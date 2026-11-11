@@ -1,0 +1,98 @@
+/* 生徒の画面（#/join/<sid>）: 縦 1 列。iPad の Safari が基準。カードは高さ 56px 以上、間は 16px */
+.st { max-width: 720px; margin: 0 auto; padding: var(--s-2) var(--s-2) var(--s-4); }
+
+/* 上の帯: 授業名と通信の状態 */
+.st-head {
+  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--s-1) var(--s-2);
+  padding-bottom: var(--s-2); margin-bottom: var(--s-3); border-bottom: 2px solid var(--c-line);
+}
+.st-title { margin: 0; font-size: 20px; min-width: 0; overflow-wrap: anywhere; }
+.st-conn { min-width: 0; }
+.st-conn .chip { white-space: normal; }
+
+/* 待ち・見つからない・通信できない */
+.st-message {
+  padding: var(--s-3); background: var(--c-card); border: 1px solid var(--c-line); border-radius: var(--r-2);
+  box-shadow: var(--shadow); font-size: 20px; font-weight: 700; text-align: center;
+}
+.st-alert { border: 2px solid var(--c-danger-text); }
+.st-again { min-width: 160px; min-height: 52px; font-size: 18px; }
+
+/* 終了の画面 */
+.st-end {
+  padding: var(--s-4) var(--s-3); background: var(--c-card); border: 1px solid var(--c-line); border-radius: var(--r-2);
+  box-shadow: var(--shadow); text-align: center;
+}
+.st-end p { font-size: 18px; }
+
+/* 資料のスライド: 幅いっぱい */
+.st-slide .slide-frame { width: 100%; border: 1px solid var(--c-line); box-shadow: var(--shadow); }
+
+/* アンケート */
+.st-poll {
+  padding: var(--s-3); background: var(--c-card); border: 1px solid var(--c-line); border-radius: var(--r-2);
+  box-shadow: var(--shadow);
+}
+.st-question { white-space: pre-wrap; overflow-wrap: anywhere; margin-bottom: var(--s-1); }
+.st-chips { display: flex; flex-wrap: wrap; gap: var(--s-1); margin-bottom: var(--s-3); }
+.st-chip-status:empty { display: none; }
+
+.st-options { display: flex; flex-direction: column; gap: var(--s-2); }
+.st-option {
+  display: flex; align-items: center; gap: var(--s-2);
+  width: 100%; min-height: 64px; padding: 12px var(--s-2);
+  border: 2px solid var(--c-border); border-radius: var(--r-2);
+  background: var(--c-card); color: var(--c-navy);
+  font: inherit; font-size: 20px; line-height: 1.4; text-align: left; cursor: pointer;
+  touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+}
+.st-option:hover { background: var(--c-bg); }
+/* 選んだカード: 太い枠（中に 2px 足して 4px に見せる。大きさは変えない）と「選択中」 */
+.st-option.is-selected { border-color: var(--c-main); box-shadow: inset 0 0 0 2px var(--c-main); background: #EEF2FF; }
+.st-option.is-sent:not(.is-selected) { border-color: var(--c-ok-border); }
+/* 受付中でないとき: 押せないことを背景と指の形でも示す（文字は読める濃さのまま） */
+.st-option[aria-disabled='true'] { cursor: not-allowed; background: var(--c-bg); }
+.st-option[aria-disabled='true'].is-selected { background: #E4E9FA; }
+
+.st-mark {
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 40px; height: 40px; border-radius: 50%; background: var(--c-navy); color: #FFFFFF; font-weight: 700;
+}
+.st-option-body { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px var(--s-1); }
+.st-option-text { flex: 1 1 12em; min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.st-tags { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.st-tags:not(:has(> :not([hidden]))) { display: none; }
+.st-tag {
+  display: inline-flex; align-items: center; gap: 4px; padding: 2px 10px; border-radius: 999px;
+  font-size: 14px; font-weight: 700; white-space: nowrap;
+}
+.st-tag-selected { background: var(--c-navy); color: #FFFFFF; }
+.st-tag-sent { background: var(--c-card); color: var(--c-navy); border: 2px solid var(--c-ok-border); }
+.st-check { font-weight: 700; }
+
+/* 送信のボタンと回答の状態 */
+.st-send { width: 100%; min-height: 56px; margin-top: var(--s-3); font-size: 20px; }
+/* 押せない送信のボタン: 淡い青に白い文字にしない（灰色の地にネイビーの文字） */
+.st-send[aria-disabled='true'] { opacity: 1; background: var(--c-line); border-color: var(--c-border); color: var(--c-navy); }
+.st-answer { margin-top: var(--s-2); }
+.st-answer-text { margin: 0; font-size: 18px; font-weight: 700; }
+.st-answer-text:not(:empty) { padding: 12px var(--s-2); border: 2px solid var(--c-border); border-radius: var(--r-1); background: var(--c-card); }
+.st-answer-text[data-state='sent'] { border-color: var(--c-ok-border); }
+.st-answer-text[data-state='sending'] { border-color: var(--c-main); }
+.st-answer-text[data-state='queued'] { border-color: var(--c-warn-border); background: #FFF6D6; }
+.st-answer-text[data-state='rejected'],
+.st-answer-text[data-state='failed'] { border-color: var(--c-danger-text); color: var(--c-danger-text); }
+.st-answer-text[data-state='unconfirmed'] { border-color: var(--c-warn-border); background: #FFF6D6; }
+.st-end .st-answer-text { margin-top: var(--s-2); }
+.st-retry { margin-top: var(--s-1); min-height: 48px; }
+
+/* 結果（先生が表示しているときだけ） */
+.st-results { margin-top: var(--s-3); padding-top: var(--s-2); border-top: 2px solid var(--c-line); font-size: 18px; }
+.st-results h3 { margin-bottom: var(--s-1); }
+
+/* 狭い画面（スマートフォンの幅） */
+@media (max-width: 480px) {
+  .st-poll { padding: var(--s-2); }
+  .st-option { gap: 12px; padding: 12px; font-size: 18px; }
+  .st-mark { width: 36px; height: 36px; }
+}

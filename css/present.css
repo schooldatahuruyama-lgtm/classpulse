@@ -1,0 +1,104 @@
+/* 発表の画面: 画面いっぱいにスライド、下に操作の帯。先生の画面がそのまま生徒に映る */
+
+/* 先生のナビを隠す（編集の画面と同じしくみ） */
+.shell:has(> .shell-main > .present) { grid-template-columns: 1fr; }
+.shell:has(> .shell-main > .present) > .shell-nav { display: none; }
+.shell-main:has(> .present) { padding: 0; }
+
+/* 画面いっぱいに固定する（練習モードの帯も隠す。通知は帯の上に出す） */
+.present {
+  position: fixed; inset: 0; z-index: 15;
+  display: flex; flex-direction: column;
+  background: var(--c-bg); color: var(--c-navy);
+}
+.present-message { overflow: auto; }
+body:has(.present) { overflow: hidden; }
+body:has(.present) #banner { visibility: hidden; } /* 隠れた帯のボタンにフォーカスが行かないように */
+body:has(.present) #toasts { bottom: 160px; }
+
+/* 接続が切れたときの帯（注意の色。文字で伝える） */
+.pr-offline {
+  flex: none; padding: 12px var(--s-2); background: var(--c-warn); color: var(--c-navy);
+  font-size: 20px; font-weight: 700; text-align: center; border-bottom: 2px solid var(--c-navy);
+}
+
+/* 授業を終了している途中の帯 */
+.pr-ending {
+  flex: none; padding: 12px var(--s-2); background: var(--c-card); color: var(--c-navy);
+  font-size: 20px; font-weight: 700; text-align: center; border-bottom: 2px solid var(--c-main);
+}
+
+/* 本体: スライドとアンケートの状況。横長の画面では横に、縦長の画面では下に並べる */
+.pr-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: var(--s-2); padding: var(--s-2); }
+
+/* スライドは、置き場所に収まるいちばん大きな 16:9 */
+.pr-stage {
+  flex: 1 1 auto; min-width: 0; min-height: 0;
+  container-type: size;
+  display: flex; align-items: center; justify-content: center;
+}
+.pr-stage > .slide-frame {
+  width: min(100cqw, calc(100cqh * 16 / 9));
+  border: 1px solid var(--c-line); box-shadow: var(--shadow);
+}
+
+.pr-poll {
+  flex: 0 1 auto; max-height: 50%; overflow: auto;
+  display: flex; flex-direction: column; align-items: flex-start; gap: var(--s-1);
+  padding: var(--s-2); background: var(--c-card); border: 1px solid var(--c-line); border-radius: var(--r-2);
+}
+.pr-poll .chip { font-size: 18px; min-height: 36px; }
+.pr-answers { margin: 0; font-size: 22px; font-weight: 700; }
+.pr-results { width: 100%; font-size: 18px; }
+@media (min-aspect-ratio: 1/1) {
+  .pr-body { flex-direction: row; }
+  .pr-poll { flex: 0 0 280px; max-height: none; }
+}
+
+/* 参加の案内（QR コードは白い地に黒。画面の短い辺の 55% 以上） */
+.pr-stage.is-join { overflow: auto; align-items: center; }
+.pr-join {
+  display: flex; flex-direction: column; align-items: center; gap: var(--s-2);
+  text-align: center; max-width: 100%;
+}
+.pr-qr {
+  flex: none; width: 56vmin; aspect-ratio: 1 / 1;
+  background: #FFFFFF; border: 2px solid var(--c-line); border-radius: var(--r-1);
+}
+.pr-qr svg { display: block; width: 100%; height: 100%; }
+.pr-qr-missing { padding: var(--s-2); }
+.pr-join-text { display: flex; flex-direction: column; gap: var(--s-1); min-width: 0; }
+.pr-join-title { margin: 0; font-size: 28px; }
+.pr-join-url { margin: 0; font-size: 16px; overflow-wrap: anywhere; word-break: break-all; }
+.pr-join-count { margin: 0; font-size: 28px; font-weight: 700; }
+@media (min-aspect-ratio: 1/1) {
+  .pr-join { flex-direction: row; text-align: left; gap: var(--s-4); }
+  .pr-join-text { max-width: 360px; }
+}
+
+/* QR コードの重ね表示 */
+dialog.pr-qr-dialog {
+  width: 100vw; height: 100vh; height: 100dvh; max-width: none; max-height: none; margin: 0;
+  padding: var(--s-3); border: 0; background: #FFFFFF; color: var(--c-navy); font-family: inherit;
+}
+dialog.pr-qr-dialog[open] { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--s-3); }
+dialog.pr-qr-dialog::backdrop { background: #FFFFFF; }
+.pr-qr-close { min-width: 160px; min-height: 52px; font-size: 20px; }
+
+/* 下の帯（左から: 前へ・位置・次へ／受付・結果／参加・QR／離して授業を終了） */
+.pr-bar {
+  flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-2);
+  padding: var(--s-1) var(--s-2); background: var(--c-card); border-top: 2px solid var(--c-line);
+}
+.pr-group { display: flex; align-items: center; gap: var(--s-1); flex-wrap: nowrap; }
+.pr-bar .btn { flex: none; min-height: 52px; padding: 0 12px; white-space: nowrap; }
+.pr-pos { min-width: 64px; text-align: center; font-size: 20px; font-weight: 700; white-space: nowrap; }
+.pr-bar .pr-next { min-height: 64px; min-width: 150px; padding: 0 var(--s-3); font-size: 24px; }
+.pr-last {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-height: 64px; min-width: 150px; padding: 0 var(--s-1);
+  border: 2px dashed var(--c-border); border-radius: var(--r-1); font-weight: 700;
+}
+.pr-last[hidden] { display: none; }
+.pr-count { font-size: 18px; font-weight: 700; white-space: nowrap; }
+.pr-group-end { margin-left: auto; padding-left: var(--s-2); border-left: 2px solid var(--c-line); }

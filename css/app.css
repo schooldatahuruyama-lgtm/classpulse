@@ -1,0 +1,97 @@
+/* 画面の骨組み: 先生の画面（左ナビ + 本体）、ログイン、練習モードの帯 */
+#banner:empty { display: none; }
+.demo-banner {
+  position: sticky; top: 0; z-index: 10;
+  display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: var(--s-1) var(--s-2);
+  padding: var(--s-1) var(--s-2); background: var(--c-warn); color: var(--c-navy); font-weight: 700;
+}
+.demo-banner .btn { background: var(--c-card); }
+
+.loading { padding: var(--s-3); }
+.center-page { max-width: 480px; margin: 0 auto; padding: var(--s-4) var(--s-2); }
+.center-page h1 { text-align: center; }
+.page-pad { max-width: 720px; margin: 0 auto; padding: var(--s-4) var(--s-2); }
+
+.shell { display: grid; grid-template-columns: 220px 1fr; min-height: 100vh; }
+.shell-nav { padding: var(--s-3) var(--s-2); background: var(--c-navy); color: #FFFFFF; display: flex; flex-direction: column; gap: var(--s-1); }
+.shell-brand { font-size: 20px; font-weight: 700; margin-bottom: var(--s-2); }
+.shell-links { display: flex; flex-direction: column; gap: var(--s-1); }
+.shell-link, .shell-nav .btn {
+  display: flex; align-items: center; min-height: 44px; padding: 0 var(--s-2);
+  border: 2px solid transparent; border-radius: var(--r-1);
+  color: #FFFFFF; background: transparent; font: inherit; font-weight: 700; text-decoration: none; cursor: pointer; text-align: left;
+}
+.shell-link:hover, .shell-nav .btn:hover { background: rgba(255, 255, 255, 0.12); }
+.shell-link[aria-current='page'] { background: #FFFFFF; color: var(--c-navy); }
+.shell-nav :focus-visible { outline-color: #FFFFFF; box-shadow: none; }
+.shell-spacer { flex: 1; }
+.shell-main { padding: var(--s-3); min-width: 0; }
+
+/* 幅 900px 未満: 上のメニュー */
+@media (max-width: 899px) {
+  .shell { grid-template-columns: 1fr; }
+  .shell-nav { flex-direction: row; align-items: center; flex-wrap: wrap; padding: var(--s-1) var(--s-2); }
+  .shell-brand { margin: 0 var(--s-2) 0 0; }
+  .shell-links { flex-direction: row; flex-wrap: wrap; }
+  .shell-spacer { display: none; }
+  .shell-nav .shell-logout { margin-left: auto; }
+  .shell-main { padding: var(--s-2); }
+  h1 { font-size: 32px; }
+}
+
+/* 授業ダッシュボード（#/） */
+.dash-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--s-2); flex-wrap: wrap; margin-bottom: var(--s-2); }
+.dash-h1 { margin-bottom: 4px; }
+.dash-h2 { font-size: 20px; }
+.dash-create { min-height: 48px; }
+.dash-active { margin-bottom: var(--s-2); }
+.dash-active:empty { display: none; }
+.dash-active-card {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--s-2); flex-wrap: wrap;
+  padding: var(--s-2) var(--s-3); border: 2px solid var(--c-navy); border-radius: var(--r-2);
+  background: var(--c-warn); color: var(--c-navy);
+}
+.dash-message:empty { display: none; }
+.dash-message { margin-bottom: var(--s-2); }
+.dash-message .btn { margin-top: var(--s-1); }
+.dash-body { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: var(--s-3); align-items: start; }
+.dash-deck-list, .dash-recent-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--s-2); }
+.dash-deck { padding: var(--s-2) var(--s-3); }
+.dash-deck-title { margin-bottom: 4px; overflow-wrap: anywhere; }
+.dash-deck-meta { margin-bottom: var(--s-2); }
+.dash-deck-actions { display: flex; flex-wrap: wrap; gap: var(--s-1); }
+.dash-delete { color: var(--c-danger-text); border-color: var(--c-danger-text); }
+.dash-empty { margin: 0; }
+.dash-recent { padding: var(--s-2); }
+.dash-recent-list { gap: var(--s-1); }
+.dash-recent-link {
+  display: flex; flex-direction: column; min-height: 44px; padding: 8px 12px; border: 2px solid var(--c-border);
+  border-radius: var(--r-1); color: var(--c-navy); text-decoration: none;
+}
+.dash-recent-link:hover { background: var(--c-bg); }
+.dash-recent-title { font-weight: 700; overflow-wrap: anywhere; }
+
+@media (max-width: 899px) {
+  .dash-body { grid-template-columns: 1fr; }
+}
+
+/* 幅が狭いとき、上のメニューが縦に伸びないようにする */
+@media (max-width: 899px) {
+  .shell { grid-template-rows: auto 1fr; }
+}
+
+/* 授業履歴と結果 */
+.hist-h1 { overflow-wrap: anywhere; }
+.hist-back { margin-bottom: var(--s-2); }
+.hist-list, .hist-qs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--s-2); }
+.hist-item { display: flex; flex-direction: column; gap: 4px; min-height: 44px; padding: var(--s-2) var(--s-3); color: var(--c-navy); text-decoration: none; }
+.hist-item:hover { background: var(--c-bg); }
+.hist-item-title { font-size: 20px; font-weight: 700; overflow-wrap: anywhere; }
+.hist-qs { margin-top: var(--s-2); }
+.hist-q { padding: var(--s-2) var(--s-3); }
+.hist-q-no { margin-bottom: 4px; }
+.hist-q-text { font-weight: 700; margin: 0 0 var(--s-2); overflow-wrap: anywhere; white-space: pre-wrap; }
+.hist-message:empty { display: none; }
+.hist-message { margin-top: var(--s-2); }
+.hist-foot { margin-top: var(--s-4); }
+.hist-delete { color: var(--c-danger-text); border-color: var(--c-danger-text); }
