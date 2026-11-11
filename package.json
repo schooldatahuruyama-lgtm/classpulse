@@ -1,0 +1,10 @@
+{
+  "name": "classpulse",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "ClassPulse リアルタイム参加型スライドアプリ（試作1）",
+  "scripts": {
+    "test": "node --test \"tests/*.test.js\""
+  }
+}
