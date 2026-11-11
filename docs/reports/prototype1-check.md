@@ -187,3 +187,11 @@ Claude Code は、本物の Firebase にログインできない。次のこと�
    - 新しいルール（`pub/results`）: 結果を公開していない質問の集計は、書きこめない。「結果を表示」で 3 つの画面に結果が出ること、「結果をかくす」で消えること、「すぐ表示」のアンケートで結果が出ることを確かめる（結果が出ないときは、このルールが書きこみを止めている）。
    - `docs/firebase/rules.json` を変えたので、もうルールを貼ってある場合は、手順 3（ルールの貼りつけ）をもう一度行う。
 7. 気づいた点を教えてください。この記録に足します。
+
+## 公開版での接続確認（2026-11-12）
+
+- 公開版の URL: https://schooldatahuruyama-lgtm.github.io/classpulse/
+- 先生の iPhone（Chrome、携帯の回線）で `check.html` を実行した。
+  - 1 回目: 1 だけ ○。2 は「応答コード 400、CONFIGURATION_NOT_FOUND」。原因は Firebase の Authentication を始めていなかったこと。
+  - Authentication を始めて「メール / パスワード」と「匿名」を有効にしたあとの 2 回目: 5 つすべて ○。
+- まだ確かめていないこと: 学校の iPad を学校の Wi-Fi につないだ状態での `check.html`（計画 Task 1 Step 12 の関門）。
