@@ -3,19 +3,13 @@ import { FIREBASE } from './firebase-config.js';
 import { createAuth } from './auth.js';
 import { createNet } from './net.js';
 import { createRepo } from './repo.js';
-import { parseRoute, routeHash, needsTeacher } from './router.js';
+import { parseRoute, routeHash, needsTeacher, viewFile } from './router.js';
 import { isDemoAllowed, createDemoBackend } from './dev/demo.js';
 import { el, confirmDialog, toast } from './ui.js';
 import { checkTeacherAccess, isStillUser } from './guard.js';
 
 const appRoot = document.getElementById('app');
 const bannerRoot = document.getElementById('banner');
-
-// 画面の名前 → 画面のファイル（js/views/）
-const VIEW_FILES = {
-  login: 'login', dashboard: 'dashboard', editor: 'editor', present: 'present',
-  history: 'history', result: 'result', join: 'student',
-};
 
 const NAV = [
   { name: 'dashboard', label: 'ホーム' },
@@ -85,7 +79,7 @@ async function start() {
 
   async function loadView(name) {
     try {
-      return await import(`./views/${VIEW_FILES[name]}.js`);
+      return await import(`./views/${viewFile(name)}.js`);
     } catch (e) {
       console.error(e);
       return null;

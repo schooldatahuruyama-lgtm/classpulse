@@ -39,6 +39,16 @@ export function routeHash(name, params = {}) {
   return SIMPLE[name] ?? '#/';
 }
 
+// 画面の名前 → 画面のファイル（js/views/ の中）。結果の画面は履歴の画面が兼ねる
+const VIEW_FILES = {
+  login: 'login', dashboard: 'dashboard', editor: 'editor', present: 'present',
+  history: 'history', result: 'history', join: 'student',
+};
+
+export function viewFile(name) {
+  return VIEW_FILES[name];
+}
+
 export function needsTeacher(name) {
   return !PUBLIC.includes(name);
 }

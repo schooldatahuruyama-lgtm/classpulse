@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseRoute, routeHash, needsTeacher } from '../js/router.js';
+import { parseRoute, routeHash, needsTeacher, viewFile } from '../js/router.js';
 
 test('空とトップはダッシュボード', () => {
   assert.deepEqual(parseRoute(''), { name: 'dashboard', params: {} });
@@ -45,4 +45,11 @@ test('routeHash との往復', () => {
 test('先生のログインが要る画面', () => {
   for (const n of ['login', 'join', 'not-found']) assert.equal(needsTeacher(n), false, n);
   for (const n of ['dashboard', 'editor', 'present', 'history', 'result']) assert.equal(needsTeacher(n), true, n);
+});
+
+test('履歴と結果は同じ画面ファイル（history）を使う', () => {
+  assert.equal(viewFile('history'), 'history');
+  assert.equal(viewFile('result'), 'history');
+  assert.equal(viewFile(parseRoute('#/history/abc').name), 'history');
+  assert.equal(viewFile('join'), 'student');
 });
