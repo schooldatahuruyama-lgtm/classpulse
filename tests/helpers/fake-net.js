@@ -21,15 +21,20 @@ function normalize(v, now) {
   return Object.keys(out).length === 0 ? null : out;
 }
 
-// 読み出し用: キーがちょうど 0..n-1 なら配列に戻す（実物と同じ）。写しを返す
+// 読み出し用: 実物の規則で配列に戻す。キーが全部 0 以上の整数で、0〜最大キーのうち
+// 半分より多くが埋まっていれば、最大キー+1 の長さの配列（欠けは null）。そうでなければオブジェクト。写しを返す
 function view(v) {
   if (!isObj(v)) return v === undefined ? null : v;
   const keys = Object.keys(v);
   const out = {};
   for (const k of keys) out[k] = view(v[k]);
-  const dense = keys.length > 0 && keys.every((k) => /^(0|[1-9]\d*)$/.test(k)) &&
-    keys.map(Number).sort((a, b) => a - b).every((n, i) => n === i);
-  return dense ? keys.map(Number).sort((a, b) => a - b).map((n) => out[n]) : out;
+  if (keys.length > 0 && keys.every((k) => /^(0|[1-9]\d*)$/.test(k))) {
+    const max = Math.max(...keys.map(Number));
+    if (keys.length > (max + 1) / 2) {
+      return Array.from({ length: max + 1 }, (_, i) => (i in out ? out[i] : null));
+    }
+  }
+  return out;
 }
 
 const segs = (path) => String(path).split('/').filter((s) => s !== '');

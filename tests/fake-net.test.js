@@ -120,13 +120,26 @@ test('配列は添字キーで保存される: 最後の要素を消すと親も
   assert.equal(got.at(-1), null);
 });
 
-test('配列の読み出し: キーが 0..n-1 なら配列、欠けていればオブジェクト', async () => {
+test('配列の読み出し: 半分より多く埋まっていれば欠けを null にした配列（get・dump・購読で同じ）', async () => {
   const net = createFakeNet();
   await net.set('a', ['x', 'y', 'z']);
   assert.deepEqual(await net.get('a'), ['x', 'y', 'z']);
+  const got = [];
+  net.subscribe('a', (v) => got.push(v));
   await net.remove('a/1');
-  assert.deepEqual(await net.get('a'), { 0: 'x', 2: 'z' });
+  assert.deepEqual(await net.get('a'), ['x', null, 'z']);
+  assert.deepEqual(net.dump().a, ['x', null, 'z']);
+  assert.deepEqual(got.at(-1), ['x', null, 'z']);
+});
+
+test('配列の読み出し: 半分以下しか埋まっていなければオブジェクトのまま', async () => {
+  const net = createFakeNet();
+  await net.set('a/0', 'x');
+  await net.set('a/5', 'y');
+  assert.deepEqual(await net.get('a'), { 0: 'x', 5: 'y' });
   await net.set('b', [null, 'q']);
   assert.deepEqual(await net.get('b'), { 1: 'q' });
   assert.deepEqual(net.dump().b, { 1: 'q' });
+  await net.remove('b/1');
+  assert.equal(await net.get('b'), null);
 });
