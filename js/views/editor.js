@@ -12,7 +12,7 @@ import { compressImage, dataUrlBytes } from '../image.js';
 import { mountCanvas } from './editor/canvas.js';
 import { renderSlideList, updateThumb, addButtons } from './editor/slide-list.js';
 import { renderItemInspector, renderPollSettings, renderPollForm } from './editor/inspector.js';
-import { createBackgroundSaver } from './editor/background-save.js';
+import { backgroundSaver, useAuth } from './editor/background.js';
 
 const UNTITLED = '無題の教材';
 const LEAVE_TITLE = '保存できていない変更があります。このまま移動しますか？';
@@ -27,30 +27,6 @@ function forSave(deck) {
   return { ...deck, title: String(deck.title || '').trim() === '' ? UNTITLED : deck.title };
 }
 
-// 画面を離れたあとの保存（アプリを開いている間、1 つだけ）
-function onBackgroundUnload(ev) {
-  ev.preventDefault();
-  ev.returnValue = '';
-}
-let bgSaver = null;
-function backgroundSaver() {
-  if (!bgSaver) {
-    bgSaver = createBackgroundSaver({
-      setTimeout: (fn, ms) => window.setTimeout(fn, ms),
-      clearTimeout: (t) => window.clearTimeout(t),
-      retryMs: CONFIG.autosaveRetryMs,
-      onGuard: (on) => {
-        if (on) window.addEventListener('beforeunload', onBackgroundUnload);
-        else window.removeEventListener('beforeunload', onBackgroundUnload);
-      },
-      onEvent: (kind, title) => {
-        if (kind === 'saved') toast('保存しました。');
-        else toast(`「${title}」の変更をまだ保存できていません。通信が戻ると自動で保存します。`);
-      },
-    });
-  }
-  return bgSaver;
-}
 
 // どのスライドからも使われていない画像を外す
 function pruneImages(deck) {
@@ -98,11 +74,13 @@ export function mount(root, ctx) {
 
   async function load() {
     root.replaceChildren(el('p', { class: 'loading', role: 'status', text: '読み込み中…' }));
-    // 前に開いたときの保存がまだなら、その（新しい）内容から始める
+    // 前に開いたときの保存がまだなら、その（新しい）内容から始める（同じ先生の分だけ）
+    useAuth(ctx.auth);
+    const uid = ctx.auth.user.uid;
     const bg = backgroundSaver();
-    await bg.settle(deckId);
+    await bg.settle(uid, deckId);
     if (!alive) return;
-    const adopted = bg.adopt(deckId);
+    const adopted = bg.adopt(uid, deckId);
     if (adopted) {
       stopEditor = startEditor(root, ctx, deckId, adopted, { adopted: true });
       return;
@@ -122,6 +100,7 @@ export function mount(root, ctx) {
         el('button', { type: 'button', class: 'btn btn-primary', text: '一覧へ戻る', onclick: () => ctx.navigate('dashboard') }));
       return;
     }
+    bg.undiscard(uid, deckId); // 教材がある（削除が取りやめ・失敗だった）ので、離れたあとの保存を受けつける
     stopEditor = startEditor(root, ctx, deckId, deck);
   }
 
@@ -141,7 +120,9 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
   let thumbTimer = null;
   let imageTask = null;              // 画像の追加中の Promise（同時に 1 つだけ）
   let flushDone = Promise.resolve(); // 画面を離れたときの最後の保存
-  const saveDeck = (deck) => ctx.repo.saveDeck(deckId, forSave(deck), Date.now());
+  const uid = ctx.auth.user.uid;     // この教材の持ち主。保存はいつも、この先生の repo で書く
+  const repo = ctx.repo;
+  const saveDeck = (deck) => repo.saveDeck(deckId, forSave(deck), Date.now());
 
   const state = {
     deck: initialDeck,
@@ -374,7 +355,7 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
           if (message) showImageError(message);
         }
       })();
-      backgroundSaver().track(deckId, imageTask);
+      backgroundSaver().track(uid, deckId, imageTask);
     },
 
     // アンケートの一部を変える（入力欄はそのまま。縮小表示だけ描き直す）
@@ -408,7 +389,7 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
     if (!alive) {
       // 画面を離れたあと: 最後の保存（flushDone）が済んでから、画面の外で保存する
       state.deck = next;
-      backgroundSaver().hand(deckId, {
+      backgroundSaver().hand(uid, deckId, {
         deck: next, save: saveDeck, title: forSave(next).title, failed: saveState === 'failed',
         after: flushDone.then(() => false, () => false),
       });
@@ -534,7 +515,7 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
     flushDone = autosaver.flush();
     if (unsaved) {
       // 最後の保存が済めばそれで終わり。失敗したら、画面の外の保存が再試行を続ける
-      backgroundSaver().hand(deckId, {
+      backgroundSaver().hand(uid, deckId, {
         deck: state.deck, save: saveDeck, title: forSave(state.deck).title, failed: saveState === 'failed',
         after: flushDone.then(() => saveState === 'saved' && !autosaver.hasPending(), () => false),
       });

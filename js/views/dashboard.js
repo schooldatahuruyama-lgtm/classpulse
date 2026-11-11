@@ -4,6 +4,7 @@ import { el, confirmDialog, toast } from '../ui.js';
 import { createDeck, newId } from '../model.js';
 import { formatDateTime } from '../format.js';
 import { routeHash } from '../router.js';
+import { backgroundSaver, useAuth } from './editor/background.js';
 import { runStartPresenting, sessionDeps, reasonsNodes, MSG_ACTIVE, MSG_FAILED } from './start-presenting.js';
 
 const UNTITLED = '無題の教材';
@@ -81,6 +82,9 @@ export function mount(root, ctx) {
     setBusy(true);
     message.replaceChildren();
     try {
+      // 編集画面を離れたあとの保存が残っていたら、先に取り消す（削除のあとに教材を作り直さない）
+      useAuth(ctx.auth);
+      await backgroundSaver().discard(ctx.auth.user.uid, d.id);
       await ctx.repo.deleteDeck(d.id);
       if (!alive) return;
       toast('削除しました。');
