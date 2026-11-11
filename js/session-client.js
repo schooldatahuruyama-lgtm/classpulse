@@ -26,22 +26,64 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
   let phase = 'loading';
   let connection = 'connected';
 
-  const outbox = createOutbox({
-    storage,
-    send: async (_sid, slideId, choice) => {
-      try {
-        await net.set(`sessions/${sid}/inbox/answers/${slideId}/${uid}`, { choice, at: net.serverTimestamp() });
-      } catch (e) {
-        if (!(e instanceof NetError) || e.code !== 'denied') throw e;
-        // 拒否されたとき、その質問が停止中なら一時保存にして、再開後に送り直す。締切などはそのまま拒否
-        let latest = pub;
-        try { latest = await net.get(pubPath); } catch { /* 読めなければ手元の最新を使う */ }
-        const status = latest && latest.polls && latest.polls[slideId] && latest.polls[slideId].status;
-        if (status === 'paused') throw new NetError('network', '受付が止まっています');
-        throw e;
-      }
-    },
-  });
+  // 拒否されたあとの再送は、受付中のまま拒否され続けても無限に繰り返さない
+  const openRetried = new Set();
+
+  async function sendAnswer(slideId, choice) {
+    const answerPath = `sessions/${sid}/inbox/answers/${slideId}/${uid}`;
+    try {
+      await net.set(answerPath, { choice, at: net.serverTimestamp() });
+      openRetried.delete(`${slideId}:${choice}`);
+      return undefined;
+    } catch (e) {
+      if (!(e instanceof NetError) || e.code !== 'denied') throw e;
+    }
+    // 拒否された。最新の pub を読みなおして、締切（最終）か、あとで送れる（再試行）かを決める
+    let latest;
+    try {
+      latest = await net.get(pubPath);
+    } catch {
+      throw new NetError('network', '状態を確かめられません'); // 締切の証拠がないので断定しない
+    }
+    const poll = latest && latest.polls ? latest.polls[slideId] : null;
+    const isCurrent = latest && latest.current && latest.current.slideId === slideId;
+    const final = !latest || latest.state === 'ended' || !poll || poll.status === 'closed' || !isCurrent;
+    if (!final) {
+      if (poll.status === 'paused') throw new NetError('network', '受付が止まっています');
+      // open で今のスライド: 読み直している間に再開された。すぐ送り直す（同じ値で 1 回だけ）
+      const key = `${slideId}:${choice}`;
+      if (openRetried.has(key)) throw new Error('受付中なのに拒否されました');
+      openRetried.add(key);
+      outbox.flush(sid).then(emit, emit);
+      throw new NetError('network', '受付が再開されました');
+    }
+    // 最終の拒否。ただし以前の送信がサーバーに届いていた（応答だけ失われた）かもしれないので照合する
+    let mine;
+    try {
+      mine = await net.get(answerPath);
+    } catch {
+      throw new NetError('network', '受信結果を確かめられません'); // 確かめられるまで保留
+    }
+    if (mine && Number.isInteger(mine.choice)) {
+      const cur = pub && pub.current;
+      if (mine.choice !== choice && cur && cur.slideId === slideId) selected = mine.choice;
+      return { choice: mine.choice };
+    }
+    throw new NetError('denied', '受付が終わっています');
+  }
+
+  const outbox = createOutbox({ storage, send: (_sid, slideId, choice) => sendAnswer(slideId, choice) });
+
+  // 締切・終了が分かったら、送れていない回答（保留・失敗）を拒否済みにする
+  function settleClosed() {
+    if (!pub) return;
+    const ended = pub.state === 'ended';
+    outbox.rejectPending(sid, (slideId) => {
+      if (ended) return true;
+      const p = pub.polls && pub.polls[slideId];
+      return !!p && p.status === 'closed';
+    });
+  }
 
   function buildState() {
     const base = {
@@ -94,6 +136,7 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
       return;
     }
     pub = value;
+    settleClosed();
     if (pub.state === 'ended') {
       phase = 'ended';
       if (unsubscribe) { unsubscribe(); unsubscribe = null; }
@@ -141,7 +184,7 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
         const first = await net.get(pubPath);
         if (stopped) return;
         if (first === null || typeof first !== 'object') { phase = 'not-found'; emit(); return; }
-        if (first.state === 'ended') { pub = first; phase = 'ended'; emit(); return; }
+        if (first.state === 'ended') { pub = first; phase = 'ended'; settleClosed(); emit(); return; }
         const rawDeck = await net.get(`sessions/${sid}/deck`);
         if (stopped) return;
         if (rawDeck === null) throw new NetError('unknown', '教材が見つかりません');
@@ -175,6 +218,17 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
       if (!poll || poll.status !== 'open' || selected === null) return;
       const p = outbox.put(sid, slideId, selected);
       emit(); // 送信中
+      await p;
+      emit();
+    },
+
+    // 保存できなかった、そのほかの失敗（failed）の回答を、今のスライドについて送り直す
+    async retry() {
+      if (stopped || !pub || phase !== 'live') return;
+      const slideId = (pub.current && pub.current.slideId) || '';
+      if (!slideId) return;
+      const p = outbox.retry(sid, slideId);
+      emit();
       await p;
       emit();
     },

@@ -124,3 +124,67 @@ test('こわれた保存データは無いものとして扱う', () => {
   const ob = createOutbox({ storage, send: makeSender().send });
   assert.equal(ob.get('s', 'q1'), null);
 });
+
+test('送信中に再送の要求があり、その後に通信エラーで終わっても、送り直す', async () => {
+  let first = true;
+  const gates = [];
+  const { send, calls } = makeSender(() => new Promise((resolve, reject) => {
+    if (first) { first = false; gates.push(() => reject(new NetError('network'))); } else resolve();
+  }));
+  const ob = createOutbox({ storage: fakeStorage(), send });
+  const p = ob.put('s', 'q1', 1);
+  const f = ob.flush('s'); // 再接続の通知が先に届く
+  gates.shift()(); // そのあと元の送信が通信エラーで終わる
+  await Promise.all([p, f]);
+  assert.deepEqual(ob.get('s', 'q1'), { choice: 1, state: 'sent' });
+  assert.equal(calls.length, 2);
+});
+
+test('送信中に clear して同じ質問を送りなおしても、新しい回答が送られる', async () => {
+  const gates = [];
+  const { send, calls } = makeSender(() => new Promise((resolve) => gates.push(resolve)));
+  const ob = createOutbox({ storage: fakeStorage(), send });
+  const old = ob.put('s', 'q1', 1); // 終わらない送信
+  ob.clear('s');
+  const fresh = ob.put('s', 'q1', 0);
+  await tick();
+  assert.deepEqual(calls.map((c) => c.choice), [1, 0]);
+  gates.forEach((g) => g());
+  await Promise.all([old, fresh]);
+  assert.deepEqual(ob.get('s', 'q1'), { choice: 0, state: 'sent' });
+});
+
+test('保存できないまま通信エラーなら failed で、読み直しても出ない。retry で送れる', async () => {
+  const base = fakeStorage();
+  const storage = { getItem: base.getItem, removeItem: base.removeItem, setItem: () => { throw new Error('容量不足'); } };
+  let online = false;
+  const { send } = makeSender(async () => { if (!online) throw new NetError('network'); });
+  const ob = createOutbox({ storage, send });
+  await ob.put('s', 'q1', 1);
+  assert.deepEqual(ob.get('s', 'q1'), { choice: 1, state: 'failed' });
+  assert.equal(createOutbox({ storage, send }).get('s', 'q1'), null);
+  await ob.flush('s');
+  assert.equal(ob.get('s', 'q1').state, 'failed'); // flush は failed を送らない
+  online = true;
+  await ob.retry('s', 'q1');
+  assert.deepEqual(ob.get('s', 'q1'), { choice: 1, state: 'sent' });
+});
+
+test('保存できないまま送れたら sent', async () => {
+  const storage = { getItem: () => null, removeItem() {}, setItem: () => { throw new Error('容量不足'); } };
+  const ob = createOutbox({ storage, send: makeSender().send });
+  await ob.put('s', 'q1', 1);
+  assert.deepEqual(ob.get('s', 'q1'), { choice: 1, state: 'sent' });
+});
+
+test('rejectPending は queued と failed だけを rejected にする', async () => {
+  const { send } = makeSender(async (sid, slideId) => { if (slideId !== 'ok') throw new NetError('network'); });
+  const ob = createOutbox({ storage: fakeStorage(), send });
+  await ob.put('s', 'ok', 0);
+  await ob.put('s', 'q', 1);
+  assert.equal(ob.get('s', 'q').state, 'queued');
+  assert.equal(ob.rejectPending('s', () => true), true);
+  assert.equal(ob.get('s', 'q').state, 'rejected');
+  assert.equal(ob.get('s', 'ok').state, 'sent');
+  assert.equal(ob.rejectPending('s', () => true), false);
+});

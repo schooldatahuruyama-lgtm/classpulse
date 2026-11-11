@@ -4,6 +4,7 @@ import { createDeck, createSlide, addSlide } from '../js/model.js';
 import { buildSession, nextPatch, prevPatch, pausePatch, closeAllPatch, endPatch } from '../js/session-logic.js';
 import { createSessionClient } from '../js/session-client.js';
 import { createFakeNet } from './helpers/fake-net.js';
+import { NetError } from '../js/errors.js';
 import { fakeStorage } from './helpers/fakes.js';
 
 const SID = 'sess1';
@@ -56,11 +57,18 @@ function setup({ storage = fakeStorage(), auth = stubAuth(), seed = true } = {})
   net.subscribe = (path, onValue, onStatus) => origSubscribe(path, (v) => {
     if (hold.on) hold.pending.push(() => onValue(v)); else onValue(v);
   }, onStatus);
+  // pub の読み取りの直前に差しはさむ処理（読んでいる間に状態が変わる場合の再現）
+  const hooks = { beforePubGet: null };
+  const origGet = net.get;
+  net.get = async (path) => {
+    if (path === PUB && hooks.beforePubGet) { const f = hooks.beforePubGet; hooks.beforePubGet = null; await f(); }
+    return origGet(path);
+  };
   const states = [];
   const client = createSessionClient({ net, auth, storage, sid: SID, onChange: (s) => states.push(s) });
   const pubNow = () => net.dump().sessions[SID].pub;
   return {
-    net, client, storage, order, states, answerSets,
+    net, client, storage, order, states, answerSets, hooks,
     holdUpdates: () => { hold.on = true; },
     releaseUpdates: () => { hold.on = false; const p = hold.pending.splice(0); if (p.length) p[p.length - 1](); },
     last: () => states[states.length - 1],
@@ -327,4 +335,129 @@ test('止めたあとは state を出さない', async () => {
   const n = t.states.length;
   await t.teacher(nextPatch);
   assert.equal(t.states.length, n);
+});
+
+const settle = () => new Promise((r) => setImmediate(r));
+
+// 回答の set は届くが、応答だけ失われる（1 回だけ）
+function loseFirstResponse(net) {
+  const orig = net.set;
+  let lose = true;
+  net.set = async (path, value) => {
+    await orig(path, value);
+    if (lose && path.includes('/inbox/answers/')) { lose = false; throw new NetError('network'); }
+  };
+}
+
+test('停止で拒否され、読み直す間に再開されても、rejected にならず送れる', async () => {
+  const t = setup();
+  await t.ready();
+  await t.client.start();
+  await toS2(t);
+  t.client.select(1);
+  t.holdUpdates();
+  await t.teacher((pub) => pausePatch(pub, 's2', true));
+  t.hooks.beforePubGet = async () => { await t.teacher((pub) => pausePatch(pub, 's2', false)); };
+  await t.client.submit();
+  await settle();
+  assert.equal(t.last().answer.state, 'sent');
+  assert.equal(t.answers().s2.stu1.choice, 1);
+});
+
+test('停止中の保留が締切で rejected になる', async () => {
+  const t = setup();
+  await t.ready();
+  await t.client.start();
+  await toS2(t);
+  t.client.select(1);
+  t.holdUpdates();
+  await t.teacher((pub) => pausePatch(pub, 's2', true));
+  await t.client.submit();
+  assert.equal(t.last().answer.state, 'queued');
+  t.releaseUpdates();
+  await t.teacher(closeAllPatch);
+  await settle();
+  assert.equal(t.last().answer.state, 'rejected');
+});
+
+test('保留のまま授業が終わると rejected', async () => {
+  const t = setup();
+  await t.ready();
+  await t.client.start();
+  await toS2(t);
+  t.client.select(1);
+  t.holdUpdates();
+  await t.teacher((pub) => pausePatch(pub, 's2', true));
+  await t.client.submit();
+  assert.equal(t.last().answer.state, 'queued');
+  t.releaseUpdates();
+  await t.teacher(endPatch);
+  assert.equal(t.last().phase, 'ended');
+  assert.deepEqual(t.last().answer, { choice: 1, state: 'rejected' });
+});
+
+test('保存できず、つながらなければ failed。retry で送り直せる', async () => {
+  const base = fakeStorage();
+  const storage = { getItem: base.getItem, removeItem: base.removeItem, setItem: () => { throw new Error('容量不足'); } };
+  const t = setup({ storage });
+  await t.ready();
+  await t.client.start();
+  await toS2(t);
+  t.client.select(1);
+  t.net.setOnline(false);
+  await t.client.submit();
+  assert.equal(t.last().answer.state, 'failed');
+  t.net.setOnline(true);
+  await settle();
+  assert.equal(t.last().answer.state, 'failed'); // 自動では送り直さない
+  await t.client.retry();
+  assert.equal(t.last().answer.state, 'sent');
+  assert.equal(t.answers().s2.stu1.choice, 1);
+});
+
+test('応答だけ失われて締め切られたあと、同じ回答なら送信済みにする', async () => {
+  const t = setup();
+  await t.ready();
+  await t.client.start();
+  await toS2(t);
+  loseFirstResponse(t.net);
+  t.client.select(1);
+  await t.client.submit();
+  assert.equal(t.last().answer.state, 'queued');
+  t.holdUpdates();
+  await t.teacher(closeAllPatch);
+  t.net.setOnline(false);
+  t.net.setOnline(true);
+  await settle();
+  assert.deepEqual(t.last().answer, { choice: 1, state: 'sent' });
+});
+
+test('応答だけ失われて締め切られたあと、違う回答なら受信済みの値を送信済みにする', async () => {
+  const t = setup();
+  await t.ready();
+  await t.client.start();
+  await toS2(t);
+  loseFirstResponse(t.net);
+  t.client.select(1);
+  await t.client.submit();
+  t.holdUpdates();
+  await t.teacher(closeAllPatch);
+  t.client.select(0);
+  await t.client.submit(); // 画面は受付中のまま。拒否される
+  await settle();
+  assert.deepEqual(t.last().answer, { choice: 1, state: 'sent' });
+  assert.equal(t.last().selected, 1);
+  assert.equal(t.answers().s2.stu1.choice, 1);
+});
+
+test('受信済みの回答が無ければ、締切後の拒否は rejected', async () => {
+  const t = setup();
+  await t.ready();
+  await t.client.start();
+  await toS2(t);
+  t.client.select(1);
+  t.holdUpdates();
+  await t.teacher(closeAllPatch);
+  await t.client.submit();
+  assert.equal(t.last().answer.state, 'rejected');
 });

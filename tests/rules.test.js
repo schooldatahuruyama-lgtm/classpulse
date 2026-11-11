@@ -15,10 +15,12 @@ test('最上位で読み書きを許していない', () => {
   assert.equal(r['.write'], undefined);
 });
 
-test('回答はほかの生徒が読めない', () => {
+test('回答は本人だけが読める（inbox・answers・質問の単位では読めない）', () => {
   const inbox = rules().sessions.$sid.inbox;
   assert.equal(inbox['.read'], undefined);
-  assert.equal(inbox.answers.$slideId.$uid['.read'], undefined);
+  assert.equal(inbox.answers['.read'], undefined);
+  assert.equal(inbox.answers.$slideId['.read'], undefined);
+  assert.equal(inbox.answers.$slideId.$uid['.read'], 'auth != null && auth.uid === $uid');
 });
 
 test('回答の書きこみは受付中だけ', () => {
