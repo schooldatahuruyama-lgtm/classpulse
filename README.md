@@ -4,7 +4,8 @@
 先生がスライドを映すと、生徒は自分の iPad から、その場でアンケートに答えられます。
 生徒はログインしません。回答に名前は付きません（匿名です）。
 
-- 公開版の URL: 公開したあとに、ここに書きます（まだ公開していません）。
+- 公開版の URL: https://schooldatahuruyama-lgtm.github.io/classpulse/
+- 接続確認ページ: https://schooldatahuruyama-lgtm.github.io/classpulse/check.html
 
 ## いまの状態
 
