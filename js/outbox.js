@@ -98,12 +98,14 @@ export function createOutbox({ storage, send }) {
       return drive(sid, slideId);
     },
     // 保留（queued）のものを送り直す。送信中のものは、終わったあとに保留になれば送り直す
-    async flush(sid) {
+    // skip(slideId) が真の質問は送らない（締切が分かっている質問へ再送しないため）
+    async flush(sid, skip = () => false) {
       const b = bucket(sid);
       const jobs = [];
       let changed = false;
       for (const [slideId, e] of Object.entries(b.data)) {
         if (e.state === 'queued') {
+          if (skip(slideId)) continue;
           e.state = 'sending';
           changed = true;
           jobs.push(drive(sid, slideId));
@@ -136,6 +138,21 @@ export function createOutbox({ storage, send }) {
       }
       if (changed) save(sid);
       return changed;
+    },
+    // 条件に合う質問のうち、送れていない（queued / failed）ものの id
+    pendingIds(sid, isClosed) {
+      return Object.entries(bucket(sid).data)
+        .filter(([slideId, e]) => (e.state === 'queued' || e.state === 'failed') && isClosed(slideId))
+        .map(([slideId]) => slideId);
+    },
+    // サーバーとの照合結果を反映する。choice が数ならその値を送信済みに、null なら rejected。変えたら true
+    settle(sid, slideId, choice) {
+      const e = bucket(sid).data[slideId];
+      if (!e || (e.state !== 'queued' && e.state !== 'failed')) return false;
+      if (Number.isInteger(choice)) { e.choice = choice; e.state = 'sent'; } else e.state = 'rejected';
+      e.unsaved = false;
+      save(sid);
+      return true;
     },
     get(sid, slideId) {
       return copy(bucket(sid).data[slideId]);

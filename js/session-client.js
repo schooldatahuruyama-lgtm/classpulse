@@ -54,7 +54,7 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
       const key = `${slideId}:${choice}`;
       if (openRetried.has(key)) throw new Error('受付中なのに拒否されました');
       openRetried.add(key);
-      outbox.flush(sid).then(emit, emit);
+      flush();
       throw new NetError('network', '受付が再開されました');
     }
     // 最終の拒否。ただし以前の送信がサーバーに届いていた（応答だけ失われた）かもしれないので照合する
@@ -74,15 +74,43 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
 
   const outbox = createOutbox({ storage, send: (_sid, slideId, choice) => sendAnswer(slideId, choice) });
 
-  // 締切・終了が分かったら、送れていない回答（保留・失敗）を拒否済みにする
-  function settleClosed() {
-    if (!pub) return;
-    const ended = pub.state === 'ended';
-    outbox.rejectPending(sid, (slideId) => {
-      if (ended) return true;
-      const p = pub.polls && pub.polls[slideId];
-      return !!p && p.status === 'closed';
-    });
+  const isClosedSlide = (slideId) => {
+    if (!pub) return false;
+    if (pub.state === 'ended') return true;
+    const p = pub.polls && pub.polls[slideId];
+    return !!p && p.status === 'closed';
+  };
+
+  // 締切・終了が分かったら、送れていない回答（保留・失敗）をサーバーの記録と照合してから確定する。
+  // 読めなかったとき（つながらない）は保留のまま残し、次の接続・更新でもう一度照合する。再送はしない
+  const reconciling = new Set();
+  async function reconcile() {
+    if (!pub || stopped) return;
+    for (const slideId of outbox.pendingIds(sid, isClosedSlide)) {
+      if (reconciling.has(slideId)) continue;
+      reconciling.add(slideId);
+      try {
+        let mine = null;
+        try {
+          mine = await net.get(`sessions/${sid}/inbox/answers/${slideId}/${uid}`);
+        } catch (e) {
+          if (!(e instanceof NetError) || e.code !== 'denied') continue; // 読めない。あとでやり直す
+        }
+        if (stopped) return;
+        const server = mine && Number.isInteger(mine.choice) ? mine.choice : null;
+        if (outbox.settle(sid, slideId, server)) {
+          const cur = pub && pub.current;
+          if (server !== null && cur && cur.slideId === slideId) selected = server;
+          emit();
+        }
+      } finally {
+        reconciling.delete(slideId);
+      }
+    }
+  }
+
+  function flush() {
+    return outbox.flush(sid, isClosedSlide).then(emit, emit);
   }
 
   function buildState() {
@@ -136,7 +164,7 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
       return;
     }
     pub = value;
-    settleClosed();
+    reconcile();
     if (pub.state === 'ended') {
       phase = 'ended';
       if (unsubscribe) { unsubscribe(); unsubscribe = null; }
@@ -153,10 +181,6 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
     if (poll && poll.status === 'open') flush();
   }
 
-  function flush() {
-    return outbox.flush(sid).then(emit, emit);
-  }
-
   async function join() {
     if (joined || stopped) return;
     try {
@@ -171,6 +195,7 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
     emit();
     if (connection === 'connected') {
       join();
+      reconcile();
       flush();
     }
   }
@@ -184,7 +209,7 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
         const first = await net.get(pubPath);
         if (stopped) return;
         if (first === null || typeof first !== 'object') { phase = 'not-found'; emit(); return; }
-        if (first.state === 'ended') { pub = first; phase = 'ended'; settleClosed(); emit(); return; }
+        if (first.state === 'ended') { pub = first; phase = 'ended'; emit(); reconcile(); return; }
         const rawDeck = await net.get(`sessions/${sid}/deck`);
         if (stopped) return;
         if (rawDeck === null) throw new NetError('unknown', '教材が見つかりません');

@@ -393,6 +393,7 @@ test('保留のまま授業が終わると rejected', async () => {
   t.releaseUpdates();
   await t.teacher(endPatch);
   assert.equal(t.last().phase, 'ended');
+  await settle();
   assert.deepEqual(t.last().answer, { choice: 1, state: 'rejected' });
 });
 
@@ -460,4 +461,76 @@ test('受信済みの回答が無ければ、締切後の拒否は rejected', as
   await t.teacher(closeAllPatch);
   await t.client.submit();
   assert.equal(t.last().answer.state, 'rejected');
+});
+
+test('応答が失われた回答は、締切を受けると照合して送信済みになる', async () => {
+  const t = setup();
+  await t.ready();
+  await t.client.start();
+  await toS2(t);
+  loseFirstResponse(t.net);
+  t.client.select(1);
+  await t.client.submit();
+  assert.equal(t.last().answer.state, 'queued');
+  await t.teacher(closeAllPatch);
+  await settle();
+  assert.deepEqual(t.last().answer, { choice: 1, state: 'sent' });
+});
+
+test('締切を受けたとき、サーバーに別の値があればその値を送信済みにし、選択も合わせる', async () => {
+  const t = setup();
+  await t.ready();
+  await t.client.start();
+  await toS2(t);
+  loseFirstResponse(t.net);
+  t.client.select(1);
+  await t.client.submit(); // サーバーには 1 がある。画面は queued
+  t.client.select(0);
+  t.holdUpdates();
+  await t.teacher((pub) => pausePatch(pub, 's2', true));
+  await t.client.submit(); // 停止中の拒否で 0 も queued
+  assert.deepEqual(t.last().answer, { choice: 0, state: 'queued' });
+  t.releaseUpdates();
+  await t.teacher(closeAllPatch);
+  await settle();
+  assert.deepEqual(t.last().answer, { choice: 1, state: 'sent' });
+  assert.equal(t.last().selected, 1);
+});
+
+test('サーバーに無い保留は、締切を受けると rejected', async () => {
+  const t = setup();
+  await t.ready();
+  await t.client.start();
+  await toS2(t);
+  t.client.select(1);
+  t.holdUpdates();
+  await t.teacher((pub) => pausePatch(pub, 's2', true));
+  await t.client.submit();
+  assert.equal(t.last().answer.state, 'queued');
+  t.releaseUpdates();
+  await t.teacher(closeAllPatch);
+  await settle();
+  assert.equal(t.last().answer.state, 'rejected');
+});
+
+test('切れている間に締切を受けたら保留のまま、つながったら照合する（再送はしない）', async () => {
+  const t = setup();
+  await t.ready();
+  await t.client.start();
+  await toS2(t);
+  loseFirstResponse(t.net);
+  t.client.select(1);
+  await t.client.submit();
+  assert.equal(t.last().answer.state, 'queued');
+  t.holdUpdates();
+  await t.teacher(closeAllPatch);
+  t.net.setOnline(false);
+  t.releaseUpdates(); // 切れている間に締切を知る
+  await settle();
+  assert.equal(t.last().answer.state, 'queued');
+  const sets = t.answerSets.length;
+  t.net.setOnline(true);
+  await settle();
+  assert.deepEqual(t.last().answer, { choice: 1, state: 'sent' });
+  assert.equal(t.answerSets.length, sets); // 締切済みの質問へ送り直していない
 });

@@ -188,3 +188,18 @@ test('rejectPending は queued と failed だけを rejected にする', async (
   assert.equal(ob.get('s', 'ok').state, 'sent');
   assert.equal(ob.rejectPending('s', () => true), false);
 });
+
+test('settle は保留を照合結果にし、flush の skip は送らない', async () => {
+  const { send, calls } = makeSender(async () => { throw new NetError('network'); });
+  const ob = createOutbox({ storage: fakeStorage(), send });
+  await ob.put('s', 'a', 1);
+  await ob.put('s', 'b', 0);
+  assert.deepEqual(ob.pendingIds('s', (id) => id === 'a'), ['a']);
+  await ob.flush('s', (id) => id === 'a');
+  assert.equal(calls.filter((c) => c.slideId === 'a').length, 1); // a は再送していない
+  assert.equal(ob.settle('s', 'a', 0), true);
+  assert.deepEqual(ob.get('s', 'a'), { choice: 0, state: 'sent' });
+  assert.equal(ob.settle('s', 'b', null), true);
+  assert.equal(ob.get('s', 'b').state, 'rejected');
+  assert.equal(ob.settle('s', 'a', 1), false); // 送信済みは変えない
+});
