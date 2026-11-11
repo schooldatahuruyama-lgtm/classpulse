@@ -151,3 +151,13 @@ test('配列の読み出し: ちょうど半分（max=1, 個数=1）でも配列
   assert.deepEqual(net.dump().b, [null, 'q']);
   assert.deepEqual(got.at(-1), [null, 'q']);
 });
+
+test('購読の通知より先に onChange（保存）が呼ばれる', async () => {
+  const order = [];
+  const net = createFakeNet({ onChange: () => order.push('save') });
+  net.subscribe('a', (v) => { if (v !== null) order.push('notify'); });
+  await net.set('a', 1);
+  await net.update('', { b: 2 });
+  await net.remove('a');
+  assert.deepEqual(order, ['save', 'notify', 'save', 'save']);
+});

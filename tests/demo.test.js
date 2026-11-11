@@ -106,3 +106,48 @@ test('isDemoAllowed は localhost 系の ?demo=1 だけ許す', () => {
   assert.equal(isDemoAllowed('localhost.evil.com', '?demo=1'), false);
   assert.equal(isDemoAllowed('localhost', '?x=1&demo=1'), true);
 });
+
+test('購読の中で net.get を呼んでも、書きこみが巻き戻らない（メモリ・保存先・別 backend）', async () => {
+  const shared = fakeStorage();
+  const BC = fakeBroadcastHub();
+  const a = make(shared, BC);
+  const b = make(shared, BC);
+  a.net.subscribe('x', () => { a.net.get('x'); });
+  await a.net.set('x', 1);
+  await a.net.update('', { y: 2 });
+  await a.net.remove('y');
+  await a.net.set('z', 3);
+  assert.equal(await a.net.get('x'), 1);
+  assert.equal(await a.net.get('z'), 3);
+  assert.equal(JSON.parse(shared.getItem('classpulse:demo:db')).x, 1);
+  assert.equal(await b.net.get('x'), 1);
+  assert.equal(await b.net.get('z'), 3);
+  assert.equal(await b.net.get('y'), null);
+});
+
+test('データを消すと、別の backend にも届き、消えたまま戻らない', async () => {
+  const shared = fakeStorage();
+  const BC = fakeBroadcastHub();
+  const a = make(shared, BC);
+  const b = make(shared, BC);
+  await a.net.set('data/k', 1);
+  const seen = [];
+  b.net.subscribe('data/k', (v) => seen.push(v));
+  a.net.clear();
+  assert.deepEqual(seen, [1, null]);
+  assert.equal(await b.net.get('data/k'), null);
+  await b.net.set('other', 2);
+  assert.equal(await b.net.get('data/k'), null);
+  assert.equal(await a.net.get('data/k'), null);
+  assert.equal(await createRepo(b.net, 'demo-teacher').isTeacher(), true);
+});
+
+test('保存先が壊れていても、今のデータを残す', async () => {
+  const shared = fakeStorage();
+  const BC = fakeBroadcastHub();
+  const a = make(shared, BC);
+  const b = make(shared, BC);
+  await a.net.set('k', 1);
+  shared.setItem('classpulse:demo:db', '{broken');
+  assert.equal(await b.net.get('k'), 1);
+});

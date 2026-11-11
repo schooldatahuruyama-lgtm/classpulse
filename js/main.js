@@ -5,7 +5,8 @@ import { createNet } from './net.js';
 import { createRepo } from './repo.js';
 import { parseRoute, routeHash, needsTeacher } from './router.js';
 import { isDemoAllowed, createDemoBackend } from './dev/demo.js';
-import { el, confirmDialog } from './ui.js';
+import { el, confirmDialog, toast } from './ui.js';
+import { checkTeacherAccess } from './guard.js';
 
 const appRoot = document.getElementById('app');
 const bannerRoot = document.getElementById('banner');
@@ -71,7 +72,8 @@ async function start() {
   let cleanup = null;
   let renderId = 0;
   let restored = false;
-  let teacherChecked = null; // 先生だと確かめた uid
+  let shownHash = null; // 今の画面のハッシュ（まだ何も出していなければ null）
+  const teardown = () => { if (cleanup) { try { cleanup(); } catch (e) { console.error(e); } cleanup = null; } };
   let notice = '';
 
   function navigate(name, params = {}) {
@@ -108,7 +110,7 @@ async function start() {
       el('div', { class: 'shell-spacer' }),
       el('button', {
         type: 'button', class: 'btn shell-logout', text: 'ログアウト',
-        onclick: () => { teacherAuth.signOut(); teacherChecked = null; navigate('login'); },
+        onclick: () => { teacherAuth.signOut(); navigate('login'); },
       }));
     appRoot.replaceChildren(el('div', { class: 'shell' }, nav, main));
     return main;
@@ -117,11 +119,12 @@ async function start() {
   async function render() {
     const id = ++renderId;
     const stale = () => id !== renderId;
-    if (cleanup) { try { cleanup(); } catch (e) { console.error(e); } cleanup = null; }
     const route = parseRoute(location.hash);
 
     // 生徒の参加画面: ログイン不要。生徒用の認証で student の画面へ
     if (route.name === 'join') {
+      teardown();
+      shownHash = location.hash;
       const view = await loadView('join');
       if (stale()) return;
       const ctx = { net: backend.studentNet, auth: studentAuth, navigate, params: route.params, storage: window.localStorage };
@@ -130,6 +133,8 @@ async function start() {
     }
 
     if (route.name === 'not-found') {
+      teardown();
+      shownHash = location.hash;
       appRoot.replaceChildren(el('main', { class: 'page-pad' },
         el('h2', { text: 'ページが見つかりません' }),
         el('p', {}, el('a', { class: 'btn btn-primary', href: '#/', text: 'ホームへ' }))));
@@ -149,24 +154,22 @@ async function start() {
       restored = true;
     }
 
-    let user = teacherAuth.user;
-    if (user && teacherChecked !== user.uid) {
-      let ok = false;
-      try {
-        ok = await createRepo(backend.net, user.uid).isTeacher();
-      } catch {
-        if (stale()) return;
+    // 先生の画面へ移るたびに、先生として登録されているかを確かめ直す
+    const access = await checkTeacherAccess({ auth: teacherAuth, repo: backend.net && teacherAuth.user ? createRepo(backend.net, teacherAuth.user.uid) : null });
+    if (stale()) return;
+    if (access === 'offline') {
+      if (shownHash !== null) { // 今の画面のまま残す
+        history.replaceState(null, '', shownHash || '#/');
+        toast('通信できませんでした。');
+      } else {
         showMessage('通信できませんでした。接続を確かめてください。', { retry: true });
-        return;
       }
-      if (stale()) return;
-      if (ok) teacherChecked = user.uid;
-      else {
-        teacherAuth.signOut();
-        user = null;
-        notice = 'このアカウントは ClassPulse の先生として登録されていません。';
-      }
+      return;
     }
+    if (access === 'not-teacher') notice = 'このアカウントは ClassPulse の先生として登録されていません。';
+    const user = access === 'ok' ? teacherAuth.user : null;
+    teardown();
+    shownHash = location.hash;
 
     if (!user && needsTeacher(route.name)) { location.hash = routeHash('login'); return; } // hashchange で描き直す
     if (user && route.name === 'login') { navigate('dashboard'); return; }

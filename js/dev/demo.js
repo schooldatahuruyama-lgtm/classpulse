@@ -1,3 +1,4 @@
+// 練習モードは手動で試すための道具。2 つのタブが同じ瞬間に書きこむ場合の競合は守っていない。
 // 練習モード: Firebase の代わりに、このパソコンの中だけで動く net / auth を作る。
 // データは localStorage に保存し、BroadcastChannel でほかのタブへ変更を知らせる。
 // ブラウザのものは引数で受け取る（Node のテストでも動かせる）。
@@ -16,17 +17,21 @@ export function isDemoAllowed(hostname, search) {
   return new URLSearchParams(search || '').get('demo') === '1';
 }
 
+// 保存先の中身。キーが無ければ null（削除された）、読めない・壊れているときは undefined（今のデータを残す）
 function readDb(storage) {
   try {
     const raw = storage.getItem(DEMO_DB_KEY);
     return raw ? JSON.parse(raw) : null;
   } catch {
-    return null;
+    return undefined;
   }
 }
 
+// 先生の登録だけが入った初期の中身
+const seedDb = () => ({ teacherList: { [DEMO_TEACHER_UID]: true } });
+
 export function createDemoBackend({ storage, sessionStorage, BroadcastChannel, now = Date.now }) {
-  let initial = readDb(storage);
+  let initial = readDb(storage) || null;
   // 先生の登録を最初から入れておく（teacherList に demo-teacher）
   if (!initial || !initial.teacherList || initial.teacherList[DEMO_TEACHER_UID] !== true) {
     initial = { ...(initial || {}), teacherList: { ...((initial && initial.teacherList) || {}), [DEMO_TEACHER_UID]: true } };
@@ -62,7 +67,8 @@ export function createDemoBackend({ storage, sessionStorage, BroadcastChannel, n
   // 保存先の最新を取りこむ（ほかのタブの変更に追いつく）
   function sync() {
     const latest = readDb(storage);
-    if (latest) mem.replaceRoot(latest);
+    if (latest === undefined) return; // 読めないときは今のデータのまま
+    mem.replaceRoot(latest === null ? seedDb() : latest); // キーが無い = 削除された
   }
   if (channel) channel.onmessage = sync;
 
@@ -73,7 +79,7 @@ export function createDemoBackend({ storage, sessionStorage, BroadcastChannel, n
   }
   net.clear = () => {
     storage.removeItem(DEMO_DB_KEY);
-    mem.replaceRoot(null);
+    mem.replaceRoot(seedDb());
     if (channel) channel.postMessage('changed');
   };
 

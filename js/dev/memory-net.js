@@ -105,8 +105,8 @@ export function createMemoryNet({ now = Date.now, deny = () => false, initial = 
     async set(path, value) {
       guard('set', path, value);
       write(path, normalize(value, now));
+      if (onChange) onChange(root); // 保存してから購読に知らせる（通知中の読み取りで巻き戻らないように）
       notify([path]);
-      if (onChange) onChange(root);
     },
     async update(path, patch) {
       guard('update', path, patch);
@@ -116,14 +116,14 @@ export function createMemoryNet({ now = Date.now, deny = () => false, initial = 
         write(full, normalize(v, now));
         paths.push(full);
       }
-      notify(paths);
       if (onChange) onChange(root);
+      notify(paths);
     },
     async remove(path) {
       guard('remove', path);
       write(path, null);
+      if (onChange) onChange(root); // 保存してから購読に知らせる（通知中の読み取りで巻き戻らないように）
       notify([path]);
-      if (onChange) onChange(root);
     },
     serverTimestamp() { return { '.sv': 'timestamp' }; },
 
