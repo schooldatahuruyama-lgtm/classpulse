@@ -82,10 +82,9 @@ export function mount(root, ctx) {
     setBusy(true);
     message.replaceChildren();
     try {
-      // 編集画面を離れたあとの保存が残っていたら、先に取り消す（削除のあとに教材を作り直さない）
+      // 編集画面を離れたあとの保存と、1 つの手続きで削除する（成功したら保存待ちを捨て、失敗したら戻す）
       useAuth(ctx.auth);
-      await backgroundSaver().discard(ctx.auth.user.uid, d.id);
-      await ctx.repo.deleteDeck(d.id);
+      await backgroundSaver().deleting(ctx.auth.user.uid, d.id, () => ctx.repo.deleteDeck(d.id));
       if (!alive) return;
       toast('削除しました。');
       await load();

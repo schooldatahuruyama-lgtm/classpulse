@@ -78,6 +78,9 @@ export function mount(root, ctx) {
     useAuth(ctx.auth);
     const uid = ctx.auth.user.uid;
     const bg = backgroundSaver();
+    // 削除の手続き中なら終わるまで待つ（成功なら下の loadDeck が null、失敗なら預かった内容を引きつぐ）
+    await bg.whenNotDeleting(uid, deckId);
+    if (!alive) return;
     await bg.settle(uid, deckId);
     if (!alive) return;
     const adopted = bg.adopt(uid, deckId);
@@ -100,7 +103,6 @@ export function mount(root, ctx) {
         el('button', { type: 'button', class: 'btn btn-primary', text: '一覧へ戻る', onclick: () => ctx.navigate('dashboard') }));
       return;
     }
-    bg.undiscard(uid, deckId); // 教材がある（削除が取りやめ・失敗だった）ので、離れたあとの保存を受けつける
     stopEditor = startEditor(root, ctx, deckId, deck);
   }
 

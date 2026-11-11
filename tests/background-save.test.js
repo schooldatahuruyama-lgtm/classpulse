@@ -172,87 +172,142 @@ test('背景の保存: 同じ教材 ID でも、持ち主が違えば別のも�
   assert.deepEqual(log, [['A', 'a'], ['B', 'b']]);
 });
 
-// ---- 削除で取り消す ----
 
-test('背景の保存: 再試行待ちを discard すると、タイマーを進めても二度と保存しない', async () => {
+// ---- 削除の手続き（deleting） ----
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
+test('削除: 削除の要求が終わるまで whenNotDeleting は待つ。成功のあとは、遅れて届いた画像の結果も含めて保存しない', async () => {
   let calls = 0;
   const save = async () => { calls += 1; throw new Error('通信なし'); };
   const { bg, timers, guards } = setup();
-  bg.hand('A', 'a', { deck: { title: 'x' }, save });
+  bg.hand('A', 'a', { deck: { v: 1 }, save });
   await tick();
   assert.equal(calls, 1);
-  await bg.discard('A', 'a');
-  timers.runAll();
+  const image = deferred();
+  bg.track('A', 'a', image.promise); // 離れたあとも画像の追加が続いている
+
+  const del = deferred();
+  const p = bg.deleting('A', 'a', () => del.promise);
+  let opened = false;
+  const editor = bg.whenNotDeleting('A', 'a').then(() => { opened = true; });
   await tick();
-  timers.runAll();
+  timers.runAll(); // 削除中は再試行しない
   await tick();
   assert.equal(calls, 1);
+  assert.equal(opened, false, '編集画面は削除の手続きが終わるまで待つ');
+  assert.equal(bg.adopt('A', 'a'), null, '削除中は引きつがない');
+
+  del.resolve();
+  await tick();
+  // 画像の追加が終わり、教材を渡してくる
+  bg.hand('A', 'a', { deck: { v: 2, image: true }, save });
+  image.resolve();
+  await p;
+  await editor;
+  assert.equal(opened, true);
+  timers.runAll();
+  await tick();
+  assert.equal(calls, 1, '削除のあとは一度も保存しない');
   assert.equal(timers.size, 0);
-  assert.equal(bg.hasPending('A', 'a'), false);
+  assert.equal(bg._hasState('A', 'a'), false, '何も残さない');
   assert.deepEqual(guards, [true, false]);
 });
 
-test('背景の保存: 保存中に discard すると、その保存が済んでから終わり、そのあとは保存しない', async () => {
-  let calls = 0;
-  let finish;
-  const save = () => { calls += 1; return new Promise((_, reject) => { finish = () => reject(new Error('通信なし')); }); };
+test('削除: 失敗したら、預かっていた最新の内容が保存待ちに戻り、再試行で保存される', async () => {
+  const saved = [];
+  let fail = true;
+  const save = async (deck) => { if (fail) throw new Error('通信なし'); saved.push(deck); };
   const { bg, timers } = setup();
-  bg.hand('A', 'a', { deck: { title: 'x' }, save });
+  const latest = { v: 3 };
+  bg.hand('A', 'a', { deck: { v: 1 }, save });
   await tick();
-  assert.equal(calls, 1);
-  let done = false;
-  const p = bg.discard('A', 'a').then(() => { done = true; });
+  bg.hand('A', 'a', { deck: latest, save });
   await tick();
-  assert.equal(done, false, '保存中は待つ');
-  finish();
+  const err = new Error('削除できない');
+  await assert.rejects(bg.deleting('A', 'a', async () => { throw err; }), (e) => e === err);
+  assert.equal(bg.hasPending('A', 'a'), true, '未保存の内容は残っている');
+  await bg.whenNotDeleting('A', 'a');
+  fail = false;
+  timers.runAll();
+  await tick();
+  assert.deepEqual(saved, [latest]);
+  assert.equal(bg._hasState('A', 'a'), false, '保存できたら何も残さない');
+});
+
+test('削除: 失敗したら、預かっていた最新の内容を引きつげる', async () => {
+  const save = async () => { throw new Error('通信なし'); };
+  const { bg, timers } = setup();
+  const latest = { v: 9 };
+  bg.hand('A', 'a', { deck: latest, save });
+  await tick();
+  await assert.rejects(bg.deleting('A', 'a', async () => { throw new Error('削除できない'); }));
+  await bg.whenNotDeleting('A', 'a');
+  await bg.settle('A', 'a');
+  assert.equal(bg.adopt('A', 'a'), latest);
+  assert.equal(timers.size, 0);
+  assert.equal(bg._hasState('A', 'a'), false);
+});
+
+test('削除: 失敗のあとに届いた画像の結果は、ふつうに保存される', async () => {
+  const saved = [];
+  const save = async (deck) => { saved.push(deck); };
+  const { bg } = setup();
+  const image = deferred();
+  bg.track('A', 'a', image.promise);
+  await assert.rejects(bg.deleting('A', 'a', async () => { throw new Error('削除できない'); }));
+  const withImage = { image: true };
+  bg.hand('A', 'a', { deck: withImage, save });
+  image.resolve();
+  await bg.settle('A', 'a');
+  assert.deepEqual(saved, [withImage]);
+  assert.equal(bg._hasState('A', 'a'), false);
+});
+
+test('削除: 保存中に削除を始めると、その保存が済んでから doDelete を呼ぶ', async () => {
+  const order = [];
+  const inFlight = deferred();
+  const save = () => { order.push('save-start'); return inFlight.promise.then(() => order.push('save-end')); };
+  const { bg, timers } = setup();
+  bg.hand('A', 'a', { deck: { v: 1 }, save });
+  await tick();
+  bg.hand('A', 'a', { deck: { v: 2 }, save }); // 保存中に新しい内容
+  const p = bg.deleting('A', 'a', async () => { order.push('delete'); });
+  await tick();
+  assert.deepEqual(order, ['save-start']);
+  inFlight.resolve();
   await p;
   timers.runAll();
   await tick();
-  assert.equal(calls, 1, 'discard のあとは保存しない');
-  assert.equal(timers.size, 0);
+  assert.deepEqual(order, ['save-start', 'save-end', 'delete'], '削除のあとに新しい内容を書かない');
+  assert.equal(bg._hasState('A', 'a'), false);
 });
 
-test('背景の保存: 保存中に discard し、その保存が成功しても、新しい内容をもう一度書かない', async () => {
-  const saved = [];
-  let finish;
-  const save = (deck) => new Promise((resolve) => { finish = () => { saved.push(deck); resolve(); }; });
+test('削除: 編集画面の最後の保存（after）が済んでから doDelete を呼ぶ', async () => {
+  const order = [];
+  const flush = deferred();
   const { bg } = setup();
-  const d1 = { v: 1 };
-  bg.hand('A', 'a', { deck: d1, save });
+  bg.hand('A', 'a', { deck: { v: 1 }, save: async () => order.push('bg-save'), after: flush.promise.then(() => { order.push('flush'); return false; }) });
+  const p = bg.deleting('A', 'a', async () => { order.push('delete'); });
   await tick();
-  bg.hand('A', 'a', { deck: { v: 2 }, save }); // 保存中に新しい内容
-  const p = bg.discard('A', 'a');
-  finish();
+  assert.deepEqual(order, []);
+  flush.resolve();
   await p;
   await tick();
-  assert.deepEqual(saved, [d1]);
+  assert.deepEqual(order, ['flush', 'delete']);
+  assert.equal(bg._hasState('A', 'a'), false);
 });
 
-test('背景の保存: discard のあとに届いた画像の追加の結果は保存しない', async () => {
-  let calls = 0;
-  const save = async () => { calls += 1; };
-  const { bg } = setup();
-  let finishImage;
-  const image = new Promise((r) => { finishImage = r; });
-  bg.track('A', 'a', image);
-  const p = bg.discard('A', 'a');
-  // 画像の追加が終わって、教材を渡してくる
-  bg.hand('A', 'a', { deck: { withImage: true }, save });
-  finishImage();
-  await p;
-  bg.hand('A', 'a', { deck: { withImage: true }, save });
-  await tick();
-  assert.equal(calls, 0);
-  assert.equal(bg.hasPending('A', 'a'), false);
-});
-
-test('背景の保存: undiscard のあとは、また受けつける', async () => {
-  let calls = 0;
-  const save = async () => { calls += 1; };
-  const { bg } = setup();
-  await bg.discard('A', 'a');
-  bg.undiscard('A', 'a');
-  bg.hand('A', 'a', { deck: {}, save });
-  await tick();
-  assert.equal(calls, 1);
+test('削除: 保存待ちが無くても、成功・失敗のどちらのあとも何も残さない', async () => {
+  const { bg, guards } = setup();
+  await bg.deleting('A', 'a', async () => {});
+  assert.equal(bg._hasState('A', 'a'), false);
+  await assert.rejects(bg.deleting('A', 'a', async () => { throw new Error('x'); }));
+  assert.equal(bg._hasState('A', 'a'), false);
+  assert.deepEqual(guards, []);
 });

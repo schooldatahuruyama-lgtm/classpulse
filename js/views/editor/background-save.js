@@ -9,12 +9,13 @@
 // track(uid, deckId, promise) … まだ教材に入っていない処理（画像の追加など）を数に入れる
 // settle(uid, deckId) … その教材の処理と保存の試みが終わるまで待つ
 // adopt(uid, deckId) … 持ち主がログイン中なら、引きついだ内容を返して引きつぎをやめる（無ければ null）
-// discard(uid, deckId) … 教材を削除する前に呼ぶ。保存待ちを取り消し、進行中の保存が済むまで待つ。
-//                        このあと届いた内容（遅れて終わった画像の追加など）は保存しない
+// deleting(uid, deckId, doDelete) … 教材の削除を 1 つの手続きで行う（下の説明）
+// whenNotDeleting(uid, deckId) … 削除の手続き中なら、終わるまで待つ
 export function createBackgroundSaver({ setTimeout, clearTimeout, retryMs, onGuard, onEvent, getCurrentUid }) {
   const entries = new Map();   // key → { owner, deck, save, title, failed, warned, timer, running }
-  const tasks = new Map();     // key → Set<Promise>
-  const discarded = new Set(); // 削除した教材の key
+  const tasks = new Map();     // key → Set<Promise>（画像の追加など、外から数に入れた処理）
+  const afters = new Map();    // key → Set<Promise>（編集画面の最後の保存を待つもの）
+  const deletes = new Map();   // key → Promise（削除の手続き中。終われば成否にかかわらず解決）
   let guardOn = false;
 
   const keyOf = (uid, deckId) => `${uid}\u0000${deckId}`;
@@ -22,7 +23,7 @@ export function createBackgroundSaver({ setTimeout, clearTimeout, retryMs, onGua
 
   function updateGuard() {
     let on = entries.size > 0;
-    for (const set of tasks.values()) if (set.size) on = true;
+    for (const m of [tasks, afters]) for (const set of m.values()) if (set.size) on = true;
     if (on === guardOn) return;
     guardOn = on;
     if (onGuard) onGuard(on);
@@ -43,8 +44,9 @@ export function createBackgroundSaver({ setTimeout, clearTimeout, retryMs, onGua
 
   function attempt(key) {
     const e = entries.get(key);
-    if (!e || e.running || discarded.has(key)) return;
+    if (!e || e.running) return;
     if (e.timer !== null) { clearTimeout(e.timer); e.timer = null; }
+    if (deletes.has(key)) return; // 削除の手続き中は書かない（失敗したら、手続きが再開する）
     // 持ち主がログインしていない間は書かない（古いログインで書かない）。あとで確かめ直す
     if (currentUid() !== e.owner) { later(key, e); return; }
     const deck = e.deck;
@@ -52,7 +54,8 @@ export function createBackgroundSaver({ setTimeout, clearTimeout, retryMs, onGua
       let ok = true;
       try { await e.save(deck); } catch { ok = false; }
       e.running = null;
-      if (entries.get(key) !== e || discarded.has(key)) return; // 途中で adopt・discard された
+      if (entries.get(key) !== e) return; // 途中で adopt された
+      if (deletes.has(key)) return;       // 削除の手続きが始まった
       if (!ok) {
         e.failed = true;
         if (!e.warned && currentUid() === e.owner) { e.warned = true; notify('failing', e.title); }
@@ -65,24 +68,26 @@ export function createBackgroundSaver({ setTimeout, clearTimeout, retryMs, onGua
     })();
   }
 
-  function track(uid, deckId, promise) {
-    const key = keyOf(uid, deckId);
-    if (!tasks.has(key)) tasks.set(key, new Set());
-    const set = tasks.get(key);
+  // 処理を数に入れる（終われば外す）
+  function add(map, key, promise) {
+    if (!map.has(key)) map.set(key, new Set());
+    const set = map.get(key);
     const p = Promise.resolve(promise).catch(() => {});
     set.add(p);
     updateGuard();
     p.then(() => {
       set.delete(p);
-      if (!set.size) tasks.delete(key);
+      if (!set.size && map.get(key) === set) map.delete(key);
       updateGuard();
     });
     return p;
   }
 
-  async function settleKey(key) {
+  // 保存の試み（と、編集画面の最後の保存）が済むまで待つ。withTasks なら画像の追加なども待つ
+  async function settleKey(key, { withTasks = true } = {}) {
     for (;;) {
-      const waits = [...(tasks.get(key) || [])];
+      const waits = [...(afters.get(key) || [])];
+      if (withTasks) waits.push(...(tasks.get(key) || []));
       const e = entries.get(key);
       if (e && e.running) waits.push(e.running);
       if (!waits.length) return;
@@ -90,70 +95,97 @@ export function createBackgroundSaver({ setTimeout, clearTimeout, retryMs, onGua
     }
   }
 
-  return {
-    hand(uid, deckId, { deck, save, title = '', failed = false, after = null }) {
-      const key = keyOf(uid, deckId);
-      if (discarded.has(key)) return; // 削除した教材には書かない
-      let e = entries.get(key);
-      if (!e) {
-        e = { owner: uid, deck, save, title, failed, warned: false, timer: null, running: null };
-        entries.set(key, e);
-      } else {
-        e.deck = deck;
-        e.save = save;
-        e.title = title;
-        e.failed = e.failed || failed;
+  function hand(uid, deckId, { deck, save, title = '', failed = false, after = null }) {
+    const key = keyOf(uid, deckId);
+    let e = entries.get(key);
+    if (!e) {
+      e = { owner: uid, deck, save, title, failed, warned: false, timer: null, running: null };
+      entries.set(key, e);
+    } else {
+      e.deck = deck;
+      e.save = save;
+      e.title = title;
+      e.failed = e.failed || failed;
+    }
+    updateGuard();
+    // 削除の手続き中は、内容だけ預かる（成功したら捨て、失敗したら保存を再開する）
+    if (!after) { attempt(key); return; }
+    // 編集画面の保存（after）が終わってから。after が true なら、その内容はもう保存できている
+    add(afters, key, Promise.resolve(after).then((alreadySaved) => {
+      const cur = entries.get(key);
+      if (cur !== e) return;
+      if (alreadySaved === true && cur.deck === deck && !cur.running) {
+        remove(key, cur);
+        if (cur.failed && currentUid() === cur.owner) notify('saved', cur.title);
+        return;
       }
-      updateGuard();
-      if (!after) { attempt(key); return; }
-      // 編集画面の保存（after）が終わってから。after が true なら、その内容はもう保存できている
-      track(uid, deckId, Promise.resolve(after).then((alreadySaved) => {
-        const cur = entries.get(key);
-        if (cur !== e || discarded.has(key)) return;
-        if (alreadySaved === true && cur.deck === deck && !cur.running) {
-          remove(key, cur);
-          if (cur.failed && currentUid() === cur.owner) notify('saved', cur.title);
-          return;
-        }
-        attempt(key);
-      }, () => attempt(key)));
-    },
+      attempt(key);
+    }, () => attempt(key)));
+  }
 
-    track,
+  // 教材の削除を 1 つの手続きで行う。
+  // 手続きの間は「削除中」にして保存を止める（未保存の内容と画像の追加は預かったまま）。
+  // 進行中の保存が済んでから doDelete を呼ぶ。
+  // 成功: 預かった内容を捨てる。手続き中に始まっていた画像の追加も、終わるのを待って捨てる。何も残さない。
+  // 失敗: 預かった内容を保存待ちに戻して保存を再開し、例外をそのまま投げる。
+  async function deleting(uid, deckId, doDelete) {
+    const key = keyOf(uid, deckId);
+    while (deletes.has(key)) await deletes.get(key); // 同じ教材の削除が重なったら、前のを待つ
+    let finish;
+    const mark = new Promise((r) => { finish = r; });
+    deletes.set(key, mark);
+    const unmark = () => {
+      if (deletes.get(key) === mark) deletes.delete(key);
+      finish();
+    };
+    let ok = false;
+    try {
+      const e = entries.get(key);
+      if (e && e.timer !== null) { clearTimeout(e.timer); e.timer = null; }
+      await settleKey(key, { withTasks: false }); // 書いている途中の保存を待つ（そのあとは書かない）
+      await doDelete();
+      ok = true;
+      // 成功: 削除中のまま画像の追加などを待ち、届いた内容ごと捨てる
+      await settleKey(key);
+      const cur = entries.get(key);
+      if (cur) remove(key, cur);
+    } finally {
+      unmark();
+      // 失敗: 預かった内容を保存待ちに戻して、保存を再開する（例外はそのまま投げる）
+      if (!ok && entries.has(key)) attempt(key);
+    }
+  }
 
-    settle(uid, deckId) {
-      return settleKey(keyOf(uid, deckId));
-    },
+  return {
+    hand,
+    track(uid, deckId, promise) { return add(tasks, keyOf(uid, deckId), promise); },
+    settle(uid, deckId) { return settleKey(keyOf(uid, deckId)); },
 
     adopt(uid, deckId) {
       const key = keyOf(uid, deckId);
       const e = entries.get(key);
-      if (!e || e.owner !== uid || currentUid() !== uid) return null;
+      if (!e || e.owner !== uid || currentUid() !== uid || deletes.has(key)) return null;
       remove(key, e);
       return e.deck;
     },
 
-    async discard(uid, deckId) {
-      const key = keyOf(uid, deckId);
-      discarded.add(key);
-      const e = entries.get(key);
-      if (e && e.timer !== null) { clearTimeout(e.timer); e.timer = null; }
-      // 進行中の保存と、数に入れた処理（編集画面の最後の保存・画像の追加）が済むまで待つ。
-      // そのあいだに届いた内容は、discarded なので保存しない
-      await settleKey(key);
-      const cur = entries.get(key);
-      if (cur) remove(key, cur);
-    },
+    deleting,
 
-    // 削除が取りやめ・失敗で、教材がまだあるとき（編集画面で開けたとき）に、取り消しの印を外す
-    undiscard(uid, deckId) {
-      discarded.delete(keyOf(uid, deckId));
+    async whenNotDeleting(uid, deckId) {
+      const key = keyOf(uid, deckId);
+      while (deletes.has(key)) await deletes.get(key);
     },
 
     hasPending(uid, deckId) {
       if (uid === undefined) return guardOn;
       const key = keyOf(uid, deckId);
-      return entries.has(key) || Boolean(tasks.get(key)?.size);
+      return entries.has(key) || Boolean(tasks.get(key)?.size) || Boolean(afters.get(key)?.size);
+    },
+
+    // テスト用: この教材について何か残っているか
+    _hasState(uid, deckId) {
+      const key = keyOf(uid, deckId);
+      return entries.has(key) || tasks.has(key) || afters.has(key) || deletes.has(key);
     },
   };
 }
