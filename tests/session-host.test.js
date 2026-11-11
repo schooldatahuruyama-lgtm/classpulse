@@ -541,3 +541,40 @@ test('発表中の印を外せなかったあと、開き直して end すると
   assert.equal(env.net.dump().teachers[UID].active, undefined);
   b.host.stop();
 });
+
+test('A を止め、B を開いて待たせたまま B も止めても、C は A の書きこみが済むまで読まない', async () => {
+  const env = setup();
+  const sid = await begin(env);
+  const a = await openHost(env, sid);
+  await a.host.next(); await a.host.next();
+  await a.host.setResultsVisible(true);
+  const g = gate();
+  env.ctl.holdResults = g.wait;
+  await answer(env, sid, 's2', 'u1', 0);
+  await env.clock.advance(500); // A の書きこみが保留
+  env.ctl.holdResults = null;
+  const stopA = a.host.stop();
+  let reads = 0;
+  const origGet = env.net.get;
+  env.net.get = async (path) => { if (path === `sessions/${sid}`) reads += 1; return origGet(path); };
+  const mk = () => createSessionHost({
+    net: env.net, repo: env.repo, sid, onChange: () => {},
+    now: env.clock.now, setTimeout: env.clock.setTimeout, clearTimeout: env.clock.clearTimeout,
+  });
+  const b = mk();
+  const startB = b.start();
+  await settle();
+  const stopB = b.stop();
+  const c = mk();
+  const startC = c.start();
+  await settle();
+  assert.equal(reads, 0); // B も C もまだ読んでいない
+  g.open();
+  await Promise.all([stopA, stopB, startB, startC]);
+  assert.equal(reads, 1); // 読んだのは C だけ
+  await c.setResultsVisible(false);
+  await env.clock.advance(5000);
+  assert.equal(sessionOf(env, sid).pub.results, undefined);
+  assert.equal(sessionOf(env, sid).pub.polls.s2.resultsVisible, false);
+  c.stop();
+});

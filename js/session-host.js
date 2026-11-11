@@ -286,9 +286,13 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
       stopped = true;
       clearTimers();
       if (unsubscribe) { unsubscribe(); unsubscribe = null; }
-      const drain = tail.then(() => {}, () => {});
-      drains.set(sid, drain);
-      return drain;
+      // 前の host の分と自分の分をつなぐ（置きかえない）。登録中のものが済んだら表から消す
+      const own = tail.then(() => {}, () => {});
+      const earlier = drains.get(sid);
+      const chained = earlier ? Promise.all([earlier, own]).then(() => {}) : own;
+      drains.set(sid, chained);
+      chained.then(() => { if (drains.get(sid) === chained) drains.delete(sid); });
+      return chained;
     },
   };
 }
