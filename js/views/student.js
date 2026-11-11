@@ -37,9 +37,34 @@ export function sendButtonState({ status, selected, answer }) {
 // 回答の状態の文（ボタンの下に出す）
 export function answerMessage(answer, status) {
   if (!answer || !ANSWER_TEXT[answer.state]) return '';
-  // 締め切ったあとは「変えられます」と言わない
-  if (answer.state === 'sent' && status === 'closed') return '送信済み。';
+  if (status === 'closed') {
+    // 締め切ったあとは「変えられます」と言わない
+    if (answer.state === 'sent') return '送信済み。';
+    // 締切後の一時保存は自動では送らない（届いていたかを照合するだけ）。送れた・送れなかったとは言わない
+    if (answer.state === 'queued') return '締め切られました。つながったら、送信できていたかを確かめます。';
+  }
   return ANSWER_TEXT[answer.state];
+}
+
+// 「もう一度送る」を出すか。retry() は失敗した回答（answer.choice）を送り直すので、
+// 受付中で、画面で選んでいるものが その回答と同じ（または何も選んでいない）ときだけ出す。
+// 別のものを選んだときは出さず、ふつうの送信のボタンで今の選択を送る
+export function retryVisible({ status, selected, answer }) {
+  if (!answer || answer.state !== 'failed' || status !== 'open') return false;
+  return selected === null || selected === undefined || selected === answer.choice;
+}
+
+// アンケートの画面の決めごとをまとめる（画面はこの結果をそのまま当てはめるだけ）
+// cardsOff: 選択肢を押せないか、sentChoice: 「送信済み」の印を付ける選択肢、showResults: 結果の棒を出すか
+export function pollDecision({ status, selected, answer, results }) {
+  return {
+    cardsOff: status !== 'open',
+    sentChoice: answer && answer.state === 'sent' ? answer.choice : null,
+    send: sendButtonState({ status, selected, answer }),
+    message: answerMessage(answer, status),
+    retry: retryVisible({ status, selected, answer }),
+    showResults: !!results,
+  };
 }
 
 export function mount(root, ctx) {
@@ -60,6 +85,7 @@ export function mount(root, ctx) {
   root.replaceChildren(wrap);
 
   function startClient() {
+    if (!alive) return; // 片づけたあと（古い画面のボタンが遅れて押された）は、新しく作らない
     if (client) client.stop();
     shownKey = null;
     pollUi = null;
@@ -111,7 +137,7 @@ export function mount(root, ctx) {
         el('span', { text: '送信済み' }));
       const btn = el('button', {
         type: 'button', class: 'st-option', 'aria-pressed': 'false',
-        onclick: () => { if (!isOff(btn)) client.select(i); },
+        onclick: () => { if (alive && !isOff(btn)) client.select(i); },
       },
       el('span', { class: 'st-mark', text: OPTION_MARKS[i] }),
       // 文と印（狭い画面では、印を文の下へ回す）
@@ -122,12 +148,13 @@ export function mount(root, ctx) {
     });
     ui.sendBtn = el('button', {
       type: 'button', class: 'btn btn-primary st-send',
-      onclick: () => { if (!isOff(ui.sendBtn)) client.submit(); },
+      onclick: () => { if (alive && !isOff(ui.sendBtn)) client.submit(); },
     });
     ui.message = el('p', { class: 'st-answer-text' });
     ui.retryBtn = el('button', {
       type: 'button', class: 'btn st-retry', text: 'もう一度送る', hidden: true,
-      onclick: () => client.retry(),
+      // 押した瞬間にも確かめる（選び直したあとに古い回答を送り直さない）
+      onclick: () => { if (alive && ui.decision && ui.decision.retry) client.retry(); },
     });
     ui.results = el('section', { class: 'st-results', 'aria-labelledby': 'st-results-title', hidden: true });
     ui.root = el('section', { class: 'st-poll', 'aria-labelledby': 'st-question' },
@@ -145,8 +172,9 @@ export function mount(root, ctx) {
     const before = document.activeElement;
     const status = state.poll ? state.poll.status : '';
     const answer = state.answer;
-    const sentChoice = answer && answer.state === 'sent' ? answer.choice : null;
-    const locked = status !== 'open'; // 受付中のときだけ選べる
+    // 何を出すか・押せるかは pollDecision が決める（テストはそちらで行う）。ここは当てはめるだけ
+    const d = pollDecision({ status, selected: state.selected, answer, results: state.results });
+    ui.decision = d;
 
     // 受付の状態のチップ（受付前は出さない）
     const chip = POLL_CHIP[status];
@@ -158,28 +186,25 @@ export function mount(root, ctx) {
 
     ui.cards.forEach((c, i) => {
       const isSel = state.selected === i;
-      const isSent = sentChoice === i;
+      const isSent = d.sentChoice === i;
       c.btn.setAttribute('aria-pressed', isSel ? 'true' : 'false');
       c.btn.classList.toggle('is-selected', isSel);
       c.btn.classList.toggle('is-sent', isSent);
       c.selTag.hidden = !isSel;
       c.sentTag.hidden = !isSent;
-      setOff(c.btn, locked);
+      setOff(c.btn, d.cardsOff);
     });
 
-    const b = sendButtonState({ status, selected: state.selected, answer });
-    if (ui.sendBtn.textContent !== b.label) ui.sendBtn.textContent = b.label;
-    setOff(ui.sendBtn, b.off);
+    if (ui.sendBtn.textContent !== d.send.label) ui.sendBtn.textContent = d.send.label;
+    setOff(ui.sendBtn, d.send.off);
 
-    const msg = answerMessage(answer, status);
-    if (ui.message.textContent !== msg) ui.message.textContent = msg;
+    if (ui.message.textContent !== d.message) ui.message.textContent = d.message;
     ui.message.dataset.state = answer ? answer.state : '';
-    const showRetry = !!answer && answer.state === 'failed' && status === 'open';
-    ui.retryBtn.hidden = !showRetry;
-    if (!showRetry && before === ui.retryBtn) ui.sendBtn.focus(); // 押したボタンが消えたら、送信のボタンへ
+    ui.retryBtn.hidden = !d.retry;
+    if (!d.retry && before === ui.retryBtn) ui.sendBtn.focus(); // 押したボタンが消えたら、送信のボタンへ
 
     // 結果（先生が表示しているときだけ）
-    const r = state.results;
+    const r = d.showResults ? state.results : null;
     const key = r ? JSON.stringify(r) : null;
     if (key !== ui.resultsKey) {
       ui.resultsKey = key;
@@ -258,5 +283,8 @@ export function mount(root, ctx) {
   return () => {
     alive = false;
     if (client) client.stop();
+    client = null;
+    // 次の画面に替わるまで古い DOM が残ることがある。その間に押されても何もしないよう、ボタンを止める
+    for (const b of wrap.querySelectorAll('button')) b.setAttribute('aria-disabled', 'true');
   };
 }
