@@ -67,6 +67,14 @@ export function pollDecision({ status, selected, answer, results }) {
   };
 }
 
+// 終了の画面に何を出すか。未確認の回答は、今の質問だけでなく授業全体で数える
+// （終わった授業を開き直したときや、前の質問に残っているときも伝える）
+export function endedDecision({ unconfirmedCount = 0 } = {}) {
+  const n = Number.isInteger(unconfirmedCount) && unconfirmedCount > 0 ? unconfirmedCount : 0;
+  if (n === 0) return { key: 'ended', message: '' };
+  return { key: `ended:unconfirmed:${n}`, message: `授業が終わったため、送信できたか確認できなかった回答が ${n} 件あります。` };
+}
+
 export function mount(root, ctx) {
   const sid = ctx.params.sid;
   let alive = true;
@@ -240,12 +248,12 @@ export function mount(root, ctx) {
     }
     if (state.phase === 'ended') {
       renderConn(null);
-      // 終わる直前に送った回答が届いたか確かめられなかったときは、そのことも伝える
-      const unsure = !!state.answer && state.answer.state === 'unconfirmed';
-      show(unsure ? 'ended:unconfirmed' : 'ended', el('section', { class: 'st-end' },
+      // 届いたか確かめられなかった回答があれば、その件数も伝える（今の質問の回答に限らない）
+      const end = endedDecision(state);
+      show(end.key, el('section', { class: 'st-end' },
         el('h2', { text: '授業は終了しました' }),
         el('p', { text: '参加してくれてありがとう。このページは閉じてかまいません。' }),
-        unsure ? el('p', { class: 'st-answer-text', 'data-state': 'unconfirmed', text: ANSWER_TEXT.unconfirmed }) : null));
+        end.message ? el('p', { class: 'st-answer-text', 'data-state': 'unconfirmed', text: end.message }) : null));
       return;
     }
     if (state.phase === 'error') {

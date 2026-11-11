@@ -11,11 +11,20 @@
 // send は成功したら何も返さないか、サーバーに別の回答が残っていたとき { choice } を返す（その値を送信済みとする）。
 const STATES = new Set(['sending', 'sent', 'queued', 'rejected', 'failed', 'unconfirmed']);
 
+// 同じ質問の送信の順番。outbox を作り直しても（同じタブで授業を出て入り直しても）保つ。
+// 保存先ごとに、「保存の鍵（授業と生徒の ID の組）| 質問」 -> 最後の送信の Promise。
+// 作り直す前の遅い送信が、新しい回答のあとから届いて上書きしないようにする
+const chainsByStorage = new WeakMap();
+function chainsFor(storage) {
+  if (!chainsByStorage.has(storage)) chainsByStorage.set(storage, new Map());
+  return chainsByStorage.get(storage);
+}
+
 // onSettle(sid, slideId): 送信が終わって状態が決まるたびに呼ぶ（締切の再評価などに使う）
 // canSend(sid, slideId): 偽なら、送信中に出た再送の要求では送り直さない（締切済みの質問など）
 export function createOutbox({ storage, send, onSettle = () => {}, canSend = () => true }) {
-  // 同じ質問の送信の順番（clear をまたいでも保つ）。sid|slideId -> 最後の送信の Promise
-  const chains = new Map();
+  // 同じ質問の送信の順番（clear や outbox の作り直しをまたいでも保つ）
+  const chains = chainsFor(storage);
   // sid -> { data: { [slideId]: entry }, active: Map(slideId -> Promise), want: Set(slideId) }
   // clear すると bucket ごと捨てる（古い送信の結果が新しい回答に混ざらないよう、世代で分ける）
   const buckets = new Map();
@@ -64,10 +73,10 @@ export function createOutbox({ storage, send, onSettle = () => {}, canSend = () 
   function drive(sid, slideId) {
     const b = bucket(sid);
     if (b.active.has(slideId)) return b.active.get(slideId);
-    const chainKey = `${sid}|${slideId}`;
+    const chainKey = `${keyOf(sid)}|${slideId}`;
     const prev = chains.get(chainKey);
     const run = (async () => {
-      // 同じ質問の前の送信（clear 前のもの）が終わってから送る。最後に put したものが最後の書き込みになる
+      // 同じ質問の前の送信（clear 前や、作り直す前の outbox のもの）が終わってから送る。最後に put したものが最後の書き込みになる
       if (prev) await prev;
       try {
         for (;;) {
@@ -218,6 +227,11 @@ export function createOutbox({ storage, send, onSettle = () => {}, canSend = () 
     get(sid, slideId) {
       const b = bucket(sid);
       return view(b, b.data[slideId]);
+    },
+    // この授業で、届いたか確かめられなかった回答の数（どの質問かによらない）
+    unconfirmedCount(sid) {
+      const b = bucket(sid);
+      return Object.values(b.data).filter((e) => view(b, e).state === 'unconfirmed').length;
     },
     clear(sid) {
       buckets.delete(sid);

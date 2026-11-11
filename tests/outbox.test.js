@@ -99,7 +99,11 @@ test('読み直したとき sending のままのものは queued として扱う
   const a = createOutbox({ storage, send: () => new Promise(() => {}) }); // 終わらない送信
   a.put('s', 'q1', 1);
   assert.equal(a.get('s', 'q1').state, 'sending');
-  const b = createOutbox({ storage, send: makeSender().send });
+  // ページの読み直し: 前のページの送信はもう無い（同じページの中の作り直しなら、前の送信を待つ）。
+  // 中身が同じ別の保存先で表す
+  const reloaded = fakeStorage();
+  reloaded.setItem('classpulse:outbox:s', storage.getItem('classpulse:outbox:s'));
+  const b = createOutbox({ storage: reloaded, send: makeSender().send });
   assert.deepEqual(b.get('s', 'q1'), { choice: 1, state: 'queued' });
   await b.flush('s');
   assert.deepEqual(b.get('s', 'q1'), { choice: 1, state: 'sent' });
@@ -285,4 +289,58 @@ test('終了後に拒否の結果が届いても未確認で、順番待ちの�
   await Promise.all([old, fresh]);
   assert.equal(calls.length, 1);
   assert.equal(ob.get('s', 'q1').state, 'unconfirmed');
+});
+
+// ---- 作り直しをまたぐ送信の順番（同じ保存先・同じ鍵・同じ質問） ----
+
+test('前の outbox の送信が終わるまで、作り直した outbox は同じ質問を送らない（最後の回答が最後に届く）', async () => {
+  const storage = fakeStorage();
+  const server = [];
+  let releaseA;
+  const oldBox = createOutbox({
+    storage,
+    send: async (_s, _q, choice) => { await new Promise((r) => { releaseA = r; }); server.push(choice); },
+  });
+  const pA = oldBox.put('s', 'q1', 0);
+  await tick();
+  const newBox = createOutbox({ storage, send: async (_s, _q, choice) => { server.push(choice); } });
+  const pB = newBox.put('s', 'q1', 1);
+  await tick();
+  assert.deepEqual(server, []); // 新しい方は、前の送信を待っている
+  assert.deepEqual(newBox.get('s', 'q1'), { choice: 1, state: 'sending' });
+  releaseA();
+  await Promise.all([pA, pB]);
+  assert.deepEqual(server, [0, 1]); // 新しい回答が最後の書きこみ
+  assert.deepEqual(newBox.get('s', 'q1'), { choice: 1, state: 'sent' });
+  assert.deepEqual(JSON.parse(storage.getItem('classpulse:outbox:s')).q1, { choice: 1, state: 'sent' });
+});
+
+test('別の保存先・別の鍵・別の質問の送信は待たない', async () => {
+  const storage = fakeStorage();
+  const held = createOutbox({ storage, send: () => new Promise(() => {}) });
+  held.put('s', 'q1', 0);
+  await tick();
+  const sent = [];
+  const send = async (s, q) => { sent.push(`${s}/${q}`); };
+  await createOutbox({ storage, send }).put('s', 'q2', 1);
+  await createOutbox({ storage, send }).put('other', 'q1', 1);
+  await createOutbox({ storage: fakeStorage(), send }).put('s', 'q1', 1);
+  assert.deepEqual(sent, ['s/q2', 'other/q1', 's/q1']);
+});
+
+// ---- 授業全体の未確認の数 ----
+
+test('unconfirmedCount: 終了後に確かめられなかった回答の数（質問をまたいで数える）', async () => {
+  const storage = fakeStorage();
+  const { send } = makeSender(async (_s, slideId) => { if (slideId !== 'ok') throw new NetError('network'); });
+  const ob = createOutbox({ storage, send });
+  await ob.put('s', 'ok', 0);
+  await ob.put('s', 'q1', 1);
+  await ob.put('s', 'q2', 1);
+  assert.equal(ob.unconfirmedCount('s'), 0);
+  ob.freeze('s');
+  assert.equal(ob.unconfirmedCount('s'), 2);
+  assert.equal(ob.unconfirmedCount('other'), 0);
+  // 読み直しても同じ（保存先から数える）
+  assert.equal(createOutbox({ storage, send }).unconfirmedCount('s'), 2);
 });

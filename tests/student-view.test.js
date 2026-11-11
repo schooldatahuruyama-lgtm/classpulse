@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { sendButtonState, answerMessage, pollDecision } from '../js/views/student.js';
+import { sendButtonState, answerMessage, pollDecision, endedDecision } from '../js/views/student.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (p) => readFileSync(join(root, p), 'utf8');
@@ -146,4 +146,18 @@ test('生徒の画面は innerHTML を使わず、先生の画面やログイン
 test('index.html が student.css を読みこみ、student.css に外部 URL が無い', () => {
   assert.match(read('index.html'), /<link[^>]+href="css\/student\.css"/);
   assert.doesNotMatch(read('css/student.css'), /https?:\/\//i);
+});
+
+test('終了の画面: 未確認の回答が無ければ何も足さない', () => {
+  assert.deepEqual(endedDecision({ unconfirmedCount: 0 }), { key: 'ended', message: '' });
+  assert.deepEqual(endedDecision({}), { key: 'ended', message: '' });
+  // 今のスライドの回答（answer）には頼らない
+  assert.deepEqual(endedDecision({ unconfirmedCount: 0, answer: { choice: 1, state: 'sent' } }), { key: 'ended', message: '' });
+});
+
+test('終了の画面: 未確認の回答があれば件数を伝える（今の質問の回答が無くても）', () => {
+  assert.deepEqual(endedDecision({ unconfirmedCount: 1, answer: null }),
+    { key: 'ended:unconfirmed:1', message: '授業が終わったため、送信できたか確認できなかった回答が 1 件あります。' });
+  assert.deepEqual(endedDecision({ unconfirmedCount: 3, answer: null }),
+    { key: 'ended:unconfirmed:3', message: '授業が終わったため、送信できたか確認できなかった回答が 3 件あります。' });
 });

@@ -705,3 +705,93 @@ test('同じ保存先を共有する別の ID の回答は、読み直しても�
   assert.deepEqual(statesA[statesA.length - 1].answer, { choice: 1, state: 'sent' });
   clientA.stop();
 });
+
+// ---- 同じタブで出て入り直したとき（クライアントの作り直し）の送信の順番 ----
+
+test('入り直す前の遅い送信は、入り直したあとの新しい回答を上書きしない', async () => {
+  const storage = fakeStorage();
+  const a = setup({ storage });
+  await a.ready();
+  await a.client.start();
+  await toS2(a);
+  // 回答の書きこみを 1 回だけ止める（古いクライアントの送信 A が通信の途中で止まる）
+  let release = null;
+  const origSet = a.net.set;
+  a.net.set = async (path, value) => {
+    if (path.includes('/inbox/answers/') && release === null) await new Promise((r) => { release = r; });
+    return origSet(path, value);
+  };
+  a.client.select(0);
+  const sendA = a.client.submit();
+  await settle();
+  assert.equal(typeof release, 'function');
+  a.client.stop(); // 画面を離れる（送信は止められない）
+
+  const states2 = [];
+  const client2 = createSessionClient({ net: a.net, auth: stubAuth(), storage, sid: SID, onChange: (s) => states2.push(s) });
+  await client2.start();
+  client2.select(1);
+  const sendB = client2.submit();
+  await settle();
+  assert.equal(a.answers(), null); // B は、A が終わるのを待っている
+  release(); // 古い送信 A が、あとから届く
+  await Promise.all([sendA, sendB]);
+  await settle();
+  assert.equal(a.answers().s2.stu1.choice, 1); // サーバーに最後に残るのは B
+  assert.deepEqual(states2[states2.length - 1].answer, { choice: 1, state: 'sent' });
+  assert.deepEqual(JSON.parse(storage.getItem(`classpulse:outbox:${SID}:stu1`)).s2, { choice: 1, state: 'sent' });
+  client2.stop();
+});
+
+// ---- 授業全体の、確かめられなかった回答の数 ----
+
+test('終わった授業を開き直すと、教材を読まなくても未確認の数が分かる', async () => {
+  const storage = fakeStorage();
+  storage.setItem(`classpulse:outbox:${SID}:stu1`, JSON.stringify({
+    s2: { choice: 1, state: 'queued' }, s3: { choice: 0, state: 'failed' }, s9: { choice: 0, state: 'sent' },
+  }));
+  const t = setup({ storage });
+  await t.ready();
+  await t.teacher(endPatch);
+  await t.client.start();
+  assert.equal(t.last().phase, 'ended');
+  assert.equal(t.last().answer, null); // 教材は読んでいない
+  assert.equal(t.last().unconfirmedCount, 2);
+});
+
+test('前の質問に未確認が残ったまま終わると、今のスライドが別でも数に入る', async () => {
+  const t = setup();
+  await t.ready();
+  await t.client.start();
+  await toS2(t);
+  // 回答の書きこみだけ、つながらないことにする
+  const origSet = t.net.set;
+  t.net.set = async (path, value) => {
+    if (path.includes('/inbox/answers/')) throw new NetError('network', 'つながりません');
+    return origSet(path, value);
+  };
+  t.client.select(1);
+  await t.client.submit();
+  assert.equal(t.last().answer.state, 'queued');
+  assert.equal(t.last().unconfirmedCount, 0);
+  t.holdUpdates(); // 次のスライドへ進んだことが届く前に、授業が終わる
+  await t.teacher(nextPatch); // s3
+  await t.teacher(endPatch);
+  t.releaseUpdates();
+  await settle();
+  assert.equal(t.last().phase, 'ended');
+  assert.equal(t.last().slideId, 's3');
+  assert.equal(t.last().answer, null); // 今のスライド（s3）には回答が無い
+  assert.equal(t.last().unconfirmedCount, 1); // s2 の回答が未確認
+});
+
+test('送信済みだけなら、未確認の数は 0', async () => {
+  const t = setup();
+  await t.ready();
+  await t.client.start();
+  await toS2(t);
+  t.client.select(1);
+  await t.client.submit();
+  await t.teacher(endPatch);
+  assert.equal(t.last().unconfirmedCount, 0);
+});

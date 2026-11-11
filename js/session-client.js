@@ -145,6 +145,8 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
       phase, connection, title: pub ? String(pub.title || '') : '',
       slide: null, slideId: '', index: -1, total: deck ? deck.order.length : 0,
       images: deck ? deck.images : {}, poll: null, results: null, selected: null, answer: null,
+      // この授業で、届いたか確かめられなかった回答の数（今のスライドや、教材を読めたかによらない）
+      unconfirmedCount: uid ? outbox.unconfirmedCount(okey()) : 0,
     };
     if (!pub || !deck) return base;
     const cur = pub.current || {};

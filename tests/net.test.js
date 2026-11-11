@@ -281,3 +281,57 @@ test('再試行を待っている間に解除すると、もう開かない', as
   await m.timers.fire();
   assert.equal(m.ES.instances.length, 0);
 });
+
+// ---- 実物の Firebase は、規則による拒否も 401 で返す（本文は {"error":"Permission denied"}） ----
+
+test('401 で本文が Permission denied なら denied（トークンは取り直さない）', async () => {
+  const { net, auth, fetch } = make(() => ({ status: 401, body: { error: 'Permission denied' } }));
+  await assert.rejects(net.set('a', 1), (e) => e instanceof NetError && e.code === 'denied');
+  assert.equal(auth.refreshes, 0);
+  assert.equal(fetch.calls.length, 1);
+});
+
+test('401 でほかの本文（期限切れなど）なら、トークンを取り直して 1 回やり直す', async () => {
+  let n = 0;
+  const { net, auth, fetch } = make(() => (++n === 1 ? { status: 401, body: { error: 'Auth token is expired' } } : { status: 200, body: { ok: 1 } }));
+  assert.deepEqual(await net.get('a'), { ok: 1 });
+  assert.equal(auth.refreshes, 1);
+  assert.equal(fetch.calls.length, 2);
+});
+
+test('401 のやり直しが Permission denied なら denied、それ以外の 401 なら auth', async () => {
+  let n = 0;
+  const a = make(() => (++n === 1 ? { status: 401, body: { error: 'Auth token is expired' } } : { status: 401, body: { error: 'Permission denied' } }));
+  await assert.rejects(a.net.get('a'), (e) => e.code === 'denied');
+  assert.equal(a.auth.refreshes, 1);
+  const b = make(() => ({ status: 401, body: { error: 'Invalid token' } }));
+  await assert.rejects(b.net.get('a'), (e) => e.code === 'auth');
+  assert.equal(b.fetch.calls.length, 2);
+});
+
+test('401 の本文が読めない・JSON でないときは、認証の失敗として扱う（取り直して 1 回やり直す）', async () => {
+  const auth = stubAuth();
+  let n = 0;
+  const fetch = async () => {
+    n += 1;
+    return { ok: false, status: 401, json: async () => { throw new SyntaxError('bad'); } };
+  };
+  const net = createNet({ databaseURL: DB, auth, fetch, EventSource: fakeEventSource() });
+  await assert.rejects(net.get('a'), (e) => e.code === 'auth');
+  assert.equal(n, 2);
+  assert.equal(auth.refreshes, 1);
+});
+
+test('変化の受信が拒否された（接続が閉じた）ときは、すぐにはつなぎ直さず、待ってから 1 回ずつ試す', async () => {
+  const { es, ES, timers } = await subscribed();
+  es.failClosed(); // 規則による拒否は、EventSource では「閉じた error」になる
+  assert.equal(ES.instances.length, 1); // その場では開き直さない
+  assert.deepEqual(timers.delays(), [3000]);
+  for (let i = 2; i <= 4; i++) {
+    await timers.fire();
+    assert.equal(ES.instances.length, i);
+    ES.last.failClosed(); // 何度拒否されても、待ちは 1 つだけ
+    ES.last.failClosed();
+    assert.equal(timers.count, 1);
+  }
+});

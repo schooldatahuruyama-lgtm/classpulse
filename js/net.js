@@ -52,14 +52,30 @@ export function createNet({ databaseURL, auth, fetch, EventSource, setTimeout: s
     }
   }
 
-  // 401 のときは 1 回だけトークンを取り直してやり直す
+  // 実物の Firebase は、規則による拒否も HTTP 401 で返す（本文は {"error":"Permission denied"}）。
+  // 期限切れ・無効なトークンも 401 だが、本文の文が違う。本文で見分ける
+  async function isPermissionDenied(res) {
+    try {
+      const body = await res.json();
+      return !!body && typeof body.error === 'string' && /permission denied/i.test(body.error);
+    } catch {
+      return false; // 本文が読めないときは、認証の失敗として扱う
+    }
+  }
+  const denied = () => new NetError('denied', '権限がありません');
+
+  // 401 のとき: 規則による拒否ならすぐ denied。それ以外は 1 回だけトークンを取り直してやり直す
   async function request(method, path, body) {
     let res = await send(method, path, body, await auth.getToken());
     if (res.status === 401) {
+      if (await isPermissionDenied(res)) throw denied();
       res = await send(method, path, body, await auth.forceRefresh());
+      if (res.status === 401) {
+        if (await isPermissionDenied(res)) throw denied();
+        throw new NetError('auth', 'ログインが無効です');
+      }
     }
-    if (res.status === 401) throw new NetError('auth', 'ログインが無効です');
-    if (res.status === 403) throw new NetError('denied', '権限がありません');
+    if (res.status === 403) throw denied();
     if (!res.ok) throw new NetError('unknown', `HTTP ${res.status}`);
     return res;
   }
