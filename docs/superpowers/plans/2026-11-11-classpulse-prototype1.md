@@ -418,6 +418,7 @@ sessions/<sid>/
   - `clear(sid): void`
   - `send` が `NetError('network')` → `queued`（残す）。`NetError('denied')` → `rejected`。そのほかの失敗 → `failed`。成功 → `sent`。保存先のキーは `classpulse:outbox:<sid>`。読み直したとき `sending` のままのものは `queued` として扱う。
 - Produces（`js/session-client.js`）: `createSessionClient({ net, auth, storage, sid, onChange: (state) => void })` が `{ start(): Promise<void>, select(choice): void, submit(): Promise<void>, stop(): void }` を返す。
+  - （2026-11-11 レビューで追加）`Entry.state` に `'unconfirmed'` を追加。client に `retry(): Promise<void>` を追加。授業の終了後は自分の回答を読まず、未確定の回答は `unconfirmed` にする。授業が続いている間に締め切られた質問の未確定の回答は、自分の回答の読み取り（規則で本人だけ許可）で照合する。
   - `state = { phase: 'loading'|'live'|'ended'|'not-found'|'error', connection: 'connected'|'disconnected', title, slide: Slide|null, slideId, index, total, images, poll: { status, resultsVisible }|null, results: { counts, total }|null, selected: number|null, answer: Entry|null }`
   - `start`: 匿名でログイン → `sessions/<sid>/pub` を読む（`null` なら `not-found`、`state === 'ended'` なら `ended`）→ `sessions/<sid>/deck` を読む → `inbox/participants/<uid>` にサーバーの時刻を書く → `pub` を購読する。接続が戻るたびに `outbox.flush(sid)`。
   - `submit`: 質問が `open` のときだけ `outbox.put`。回答は `inbox/answers/<slideId>/<uid>` に `{ choice, at: serverTimestamp() }`。
@@ -492,7 +493,14 @@ sessions/<sid>/
 
 ### Task 9: 画面の土台とログイン
 
-Task 1 のゲート（Step 12）が ○ になってから始める。
+（2026-11-11 変更）Task 1 のゲートの結果を待たずに始めてよい。画面は `net`・`auth` の形だけに頼るので、通信の仕組みを選び直すことになっても作り直しにならない。
+
+**練習モード（2026-11-11 追加）:** Claude Code は本物の Firebase にログインしない（外部の認証サービスに認証情報を入力しない決まり）。そのため、手元だけで動く練習モードをこのタスクで作り、Task 9〜14 のブラウザでの確認はすべて練習モードで行う。本物の Firebase での確認はユーザーが行う。
+
+- `js/dev/memory-net.js`: `tests/helpers/fake-net.js` の中身をここへ移し、`tests/helpers/fake-net.js` はここから再エクスポートするだけにする（既存のテストはそのまま通ること）。`createMemoryNet({ now, deny, initial?, onChange? })`。`createFakeNet` は同じものの別名。
+- `js/dev/demo.js`: `createDemoBackend({ storage, sessionStorage, BroadcastChannel, now })` が `{ net, teacherAuth, studentAuth }` を返す。データは `localStorage` の `classpulse:demo:db` に保存し、`BroadcastChannel('classpulse-demo')` でほかのタブに変更を知らせて購読を動かす（タブを読み直しても続く）。規則の代わりに `deny` で「質問が `open` でなければ回答を拒否」「授業が `live` でなければ参加を拒否」を入れる。先生は uid `demo-teacher`（`teacherList` に登録済み）で、どんなメールアドレスとパスワードでもログインできる。生徒の uid は `sessionStorage` に保存する（タブごとに別の生徒になる。同じタブの読み直しでは同じ）。
+- `js/main.js`: `location.hostname` が `localhost`・`127.0.0.1`・`[::1]` で、かつ URL に `?demo=1` があるときだけ練習モードにする。それ以外の場所では `?demo=1` を無視する。練習モードの間は、画面の上に「練習モード（データはこのパソコンの中だけ）」の帯を出す。「練習モードのデータを消す」ボタンを帯に置く。
+- テスト `tests/demo.test.js`: 2 つの backend（同じ storage、代役の BroadcastChannel）で、片方の書きこみがもう片方の購読に届く。読み直し（新しい backend）でデータが残る。受付中でない回答が拒否される。`isDemoAllowed('example.github.io', '?demo=1') === false`、`isDemoAllowed('localhost', '?demo=1') === true`、`isDemoAllowed('localhost', '') === false`。
 
 **Files:**
 - Create: `index.html`、`css/base.css`、`css/app.css`、`assets/fonts/`（フォント 2 つと `OFL.txt`）、`js/main.js`、`js/router.js`、`js/ui.js`、`js/views/login.js`
@@ -511,7 +519,7 @@ Task 1 のゲート（Step 12）が ○ になってから始める。
 - [ ] **Step 5:** `js/main.js` を実装する。`hashchange` で画面を切りかえる。`join` は生徒用の `createAuth({ role:'student' })` で `student` の画面へ。そのほかは先生用の `auth.restore()` を待ち、ログインしていなければ `#/login` へ。ログインしていて `repo.isTeacher()` が `false` なら、ログアウトして「このアカウントは ClassPulse の先生として登録されていません。」を出す。まだ無い画面は「準備中」と出す。
 - [ ] **Step 6:** `js/views/login.js` を実装する。見出し「ClassPulse」、入力欄「メールアドレス」「パスワード」（どちらも `label` つき）、ボタン「ログイン」。失敗の文: `bad-credentials` →「メールアドレスかパスワードが違います。」、`network` →「通信できませんでした。接続を確かめて、もう一度押してください。」、そのほか →「ログインできませんでした。」。新規登録やパスワードの再設定の案内は出さない。
 - [ ] **Step 7:** `npm test` を実行し、成功することを確かめる。
-- [ ] **Step 8:** ブラウザで確かめる。`python -m http.server 8765 --bind 127.0.0.1` で開き、`tools/test-account.local.json` の確認用アカウントでログインできること、まちがったパスワードで文が出ること、`#/join/xxxx` がログインなしで開くこと、幅 768px と 1024px で崩れないこと、UD フォントで表示されること（開発者ツールの「レンダリングされたフォント」）。
+- [ ] **Step 8:** ブラウザで確かめる。`python -m http.server 8765 --bind 127.0.0.1` で `http://127.0.0.1:8765/?demo=1` を開き、練習モードでログインできること、`?demo=1` なしで開くと（設定値が空なので）「Firebase の設定がまだ入っていません。」と出ること、`#/join/xxxx` がログインなしで開くこと、幅 768px と 1024px で崩れないこと、UD フォントで表示されること（開発者ツールの「レンダリングされたフォント」）。
 - [ ] **Step 9:** コミット: `feat: 画面の土台（配色、UD フォント、画面の切りかえ）とログイン`。
 
 ---
@@ -593,7 +601,7 @@ Task 1 のゲート（Step 12）が ○ になってから始める。
   - 操作が失敗したとき: `toast`「通信できなかったため、進められませんでした。」
   - `phase` が `not-found`:「この授業は見つかりません。」とボタン「ホームへ」。`ended`: `#/history/<sid>` へ。
   - キーボード: `→`・`PageDown`・スペースで次へ、`←`・`PageUp` で前へ。
-  - 画面を離れるときは `host.stop()`（授業は終わらない）。
+  - 画面を離れるときは `host.stop()`（授業は終わらない）。`stop()` は Promise を返す（進行中の書きこみが済むと解決する）。片づけの関数の中で呼ぶだけでよい（同じ授業の次の host は、前の host の処理が済むのを自分で待つ）。
 - [ ] **Step 3:** `npm test` を実行し、成功することを確かめる。
 - [ ] **Step 4:** ブラウザで確かめる（生徒の役は、Realtime Database のコンソールで `inbox/answers/<slideId>/<適当な ID>` に `{ choice:0, at:1 }` を手で書く。Task 13 のあとで通して確かめ直す）: QR コードをスマートフォンで読むと `#/join/<sid>` が開く。次へ・前へ。戻ると「締切済み」で、受付のボタンが押せない。「先生が表示するまで出さない」の質問で、「結果を表示」を押す前は画面のどこにも件数の内訳が無い（回答数だけ）。読み直しても同じスライドから続く。幅 1024×768 と 768×1024 で、帯のボタンがすべて見えて押せる。
 - [ ] **Step 5:** コミット: `feat: 発表の画面（QR コード、進行、受付の停止、結果の表示、授業の終了）`。
@@ -617,7 +625,7 @@ Task 1 のゲート（Step 12）が ○ になってから始める。
   - アンケートのスライド: 質問文（H2）、チップ「この質問は匿名です」、選択肢のカード（`button`。A〜F の記号と文。高さ 56px 以上、間は 16px）、ボタン「回答を送信」。
     - 選んだカード: 太い枠と「選択中」の文字。送信済みの選択肢:「送信済み」の文字とチェックの印。
     - ボタンの文と状態: 何も選んでいない → 押せない「選択肢を選んでください」。選んだ・まだ送っていない →「回答を送信」。送信済みと同じものを選んでいる → 押せない「送信済み」。送信済みと違うものを選んだ →「回答を更新」。
-    - 回答の状態の文（ボタンの下。`aria-live="polite"`）: `sending`「送信中…」、`sent`「送信済み。締め切りまでは変えられます。」、`queued`「一時保存しました。つながったら自動で送ります。」、`rejected`「締め切られたため、送信できませんでした。」、`failed`「送信できませんでした。」＋ボタン「もう一度送る」。
+    - 回答の状態の文（ボタンの下。`aria-live="polite"`）: `sending`「送信中…」、`sent`「送信済み。締め切りまでは変えられます。」、`queued`「一時保存しました。つながったら自動で送ります。」、`rejected`「締め切られたため、送信できませんでした。」、`failed`「送信できませんでした。」＋ボタン「もう一度送る」（`client.retry()`）、`unconfirmed`「授業が終わったため、送信できたか確認できませんでした。」。
     - `paused`: チップ「受付停止中」。カードと送信のボタンを押せなくする。`closed`: チップ「締切済み」。押せなくし、自分が送ったものがあれば「送信済み」の印を残す。
     - 結果（`state.results` があるときだけ）: `resultBars`。
 - [ ] **Step 2:** `npm test` を実行し、成功することを確かめる。
