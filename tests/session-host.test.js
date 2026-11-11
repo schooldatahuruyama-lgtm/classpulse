@@ -62,9 +62,17 @@ function setup() {
   const repo = createRepo(net, UID);
   const updates = []; // pub への update の記録
   const origUpdate = net.update;
+  const hasResults = (patch) => Object.keys(patch).some((k) => k.startsWith('results/') && patch[k] !== null);
   net.update = async (path, patch) => {
     if (path.endsWith('/pub')) updates.push({ at: clock.now(), patch });
+    // 結果の書きこみを保留する（呼ばれた時刻が送信時刻。保留が解けたあとで届く）
+    if (path.endsWith('/pub') && hasResults(patch) && ctl.holdResults) await ctl.holdResults();
     return origUpdate(path, patch);
+  };
+  const origGet = net.get;
+  net.get = async (path) => {
+    if (path.endsWith('/inbox') && ctl.holdInboxGet) await ctl.holdInboxGet();
+    return origGet(path);
   };
   return { net, repo, clock, ctl, updates };
 }
@@ -386,4 +394,150 @@ test('無い授業は not-found', async () => {
   const env = setup();
   const { last } = await openHost(env, 'nothing');
   assert.equal(last().phase, 'not-found');
+});
+
+// 手で解く保留
+function gate() {
+  let open;
+  const p = new Promise((r) => { open = r; });
+  return { wait: () => p, open };
+}
+
+test('停止した host の保留中の結果の書きこみが、新しい host の「かくす」を覆さない', async () => {
+  const env = setup();
+  const sid = await begin(env);
+  const a = await openHost(env, sid);
+  await a.host.next(); await a.host.next();
+  await a.host.setResultsVisible(true);
+  const g = gate();
+  env.ctl.holdResults = g.wait;
+  await answer(env, sid, 's2', 'u1', 0);
+  await env.clock.advance(500); // 旧 host の書きこみが保留のまま
+  const stopping = a.host.stop();
+  env.ctl.holdResults = null;
+  const b = createSessionHost({
+    net: env.net, repo: env.repo, sid, onChange: () => {},
+    now: env.clock.now, setTimeout: env.clock.setTimeout, clearTimeout: env.clock.clearTimeout,
+  });
+  const starting = b.start();
+  g.open();
+  await stopping;
+  await starting;
+  await b.setResultsVisible(false);
+  await env.clock.advance(5000);
+  assert.equal(sessionOf(env, sid).pub.results, undefined);
+  assert.equal(sessionOf(env, sid).pub.polls.s2.resultsVisible, false);
+  b.stop();
+});
+
+test('停止した host の end が回答の読み直しで止まっていても、新しい host の履歴を上書きしない', async () => {
+  const env = setup();
+  const sid = await begin(env);
+  const a = await openHost(env, sid);
+  await a.host.next(); await a.host.next();
+  await answer(env, sid, 's2', 'u1', 0);
+  let saves = 0;
+  const origSave = env.repo.saveHistory;
+  env.repo.saveHistory = async (...args) => { saves += 1; return origSave(...args); };
+  const g = gate();
+  env.ctl.holdInboxGet = g.wait;
+  const ending = a.host.end();
+  await settle(); // 旧 host は inbox の読み直しで止まっている
+  const stopping = a.host.stop();
+  env.ctl.holdInboxGet = null;
+  const b = createSessionHost({
+    net: env.net, repo: env.repo, sid, onChange: () => {},
+    now: env.clock.now, setTimeout: env.clock.setTimeout, clearTimeout: env.clock.clearTimeout,
+  });
+  const starting = b.start();
+  g.open();
+  await assert.rejects(ending);
+  await stopping;
+  await starting;
+  await b.end();
+  assert.equal(saves, 1);
+  const q = env.net.dump().teachers[UID].history[sid].questions.find((x) => x.slideId === 's2');
+  assert.equal(q.total, 1);
+  assert.equal(sessionOf(env, sid).inbox, undefined);
+  b.stop();
+});
+
+test('停止したあとに残った操作は失敗し、書きこみを始めない', async () => {
+  const env = setup();
+  const sid = await begin(env);
+  const { host } = await openHost(env, sid);
+  const first = host.next();
+  const second = host.next();
+  host.stop();
+  await first.catch(() => {});
+  await assert.rejects(second);
+  await assert.rejects(host.next());
+  assert.ok(sessionOf(env, sid).pub.current.index <= 0);
+});
+
+test('書きこみの間に回答が元に戻っても、公開中の集計が古いまま残らない', async () => {
+  const env = setup();
+  const sid = await begin(env);
+  const { host } = await openHost(env, sid);
+  await host.next(); await host.next();
+  await answer(env, sid, 's2', 'u1', 0);
+  await host.setResultsVisible(true); // 公開中は [1,0]
+  assert.deepEqual(sessionOf(env, sid).pub.results.s2, { counts: [1, 0], total: 1 });
+  const g = gate();
+  env.ctl.holdResults = g.wait;
+  await answer(env, sid, 's2', 'u1', 1); // [0,1]
+  await env.clock.advance(500); // [0,1] の書きこみが保留
+  await answer(env, sid, 's2', 'u1', 0); // [1,0] に戻る
+  env.ctl.holdResults = null;
+  g.open();
+  await settle();
+  await env.clock.advance(5000);
+  assert.deepEqual(sessionOf(env, sid).pub.results.s2, { counts: [1, 0], total: 1 });
+});
+
+test('書きこみが遅れても、実際の送信の間隔は 500ms を下回らず、最後は最新の値', async () => {
+  const env = setup();
+  const sid = await begin(env);
+  const { host } = await openHost(env, sid);
+  await host.next(); await host.next();
+  await host.setResultsVisible(true);
+  const g = gate();
+  env.ctl.holdResults = g.wait;
+  await env.clock.advance(100);
+  await answer(env, sid, 's2', 'u1', 0);
+  await env.clock.advance(400); // 書きこみが始まって保留
+  await answer(env, sid, 's2', 'u2', 1);
+  await env.clock.advance(200);
+  await answer(env, sid, 's2', 'u3', 1);
+  env.ctl.holdResults = null;
+  g.open();
+  await settle();
+  await env.clock.advance(5000);
+  const times = env.updates
+    .filter((u) => Object.keys(u.patch).some((k) => k.startsWith('results/') && u.patch[k] !== null))
+    .map((u) => u.at);
+  assert.ok(times.length >= 3);
+  for (let i = 1; i < times.length; i++) assert.ok(times[i] - times[i - 1] >= 500, `間隔 ${times[i] - times[i - 1]}`);
+  assert.deepEqual(sessionOf(env, sid).pub.results.s2, { counts: [1, 2], total: 3 });
+});
+
+test('発表中の印を外せなかったあと、開き直して end すると片づけが終わる', async () => {
+  const env = setup();
+  const sid = await begin(env);
+  const a = await openHost(env, sid);
+  await a.host.next();
+  let failed = 0;
+  env.ctl.extraDeny = (op, path) => {
+    if (op === 'remove' && path.endsWith(`teachers/${UID}/active`) && failed === 0) { failed += 1; return true; }
+    return false;
+  };
+  await assert.rejects(a.host.end());
+  assert.equal(sessionOf(env, sid).pub.state, 'ended');
+  assert.ok(env.net.dump().teachers[UID].active);
+  await a.host.stop();
+  const b = await openHost(env, sid);
+  assert.equal(b.last().phase, 'ended');
+  await b.host.end();
+  assert.equal(env.net.dump().teachers[UID].active, undefined);
+  b.host.stop();
 });

@@ -23,6 +23,13 @@ export async function startSession({ net, repo, uid, deckId, deck, now, getRando
   return sid;
 }
 
+// 停止した host の未完了の書きこみ（sid → Promise）。同じ授業を開く次の host は、これを待ってから状態を読む
+const drains = new Map();
+
+function stoppedError() {
+  return new Error('この画面は閉じられました');
+}
+
 export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: setT, clearTimeout: clearT }) {
   const base = `sessions/${sid}`;
   const pubPath = `${base}/pub`;
@@ -38,7 +45,7 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
   let unsubscribe = null;
   let stopped = false;
   let ending = false;          // end の途中は結果を書かない
-  let cleaned = false;         // 終了後の片づけまで済んだか
+  const pendingResults = new Set(); // 結果の書きこみが順番待ち・実行中の質問
   const timers = new Map();    // slideId → タイマー
   const lastWriteAt = new Map();
 
@@ -93,7 +100,7 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
   function syncResults() {
     if (stopped || ending || state.phase !== 'live') return;
     for (const id of Object.keys(state.tallies)) {
-      if (timers.has(id) || !needsResults(id)) continue;
+      if (timers.has(id) || pendingResults.has(id) || !needsResults(id)) continue;
       const last = lastWriteAt.get(id);
       const wait = last === undefined ? 0 : Math.max(0, last + CONFIG.resultsThrottleMs - now());
       if (wait === 0) {
@@ -105,12 +112,20 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
   }
 
   function writeResults(id) {
-    lastWriteAt.set(id, now());
+    pendingResults.add(id);
     enqueue(async () => {
       // 順番が来た時点で、まだ公開中かを確かめる（かくした直後に書かない）
       if (stopped || ending || state.phase !== 'live' || !needsResults(id)) return;
+      // 実際に送る時刻を基準に、間隔が足りなければ待ち直す
+      const last = lastWriteAt.get(id);
+      const wait = last === undefined ? 0 : last + CONFIG.resultsThrottleMs - now();
+      if (wait > 0) {
+        if (!timers.has(id)) timers.set(id, setT(() => { timers.delete(id); syncResults(); }, wait));
+        return;
+      }
       const t = state.tallies[id];
       const patch = { [`results/${id}`]: { counts: t.counts, total: t.total } };
+      lastWriteAt.set(id, now());
       await net.update(pubPath, patch);
       state.pub = applyPatch(state.pub, patch);
       emit();
@@ -118,6 +133,10 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
       // 書けなかったら、少し待ってもう一度試す
       if (stopped || ending || timers.has(id)) return;
       timers.set(id, setT(() => { timers.delete(id); syncResults(); }, CONFIG.resultsThrottleMs));
+    }).finally(() => {
+      pendingResults.delete(id);
+      // 書いている間に集計が変わっていたら、もう一度書く
+      syncResults();
     });
   }
 
@@ -138,6 +157,10 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
   // パッチを書き、成功してから state.pub を変える
   async function commit(patch) {
     if (!patch) return;
+    if (stopped) throw stoppedError();
+    if (Object.keys(patch).some((k) => k.startsWith('results/') && patch[k] !== null)) {
+      for (const k of Object.keys(patch)) if (k.startsWith('results/')) lastWriteAt.set(k.slice(8), now());
+    }
     await net.update(pubPath, patch);
     state.pub = applyPatch(state.pub, patch);
     emit();
@@ -146,9 +169,14 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
 
   function operate(makePatch) {
     return enqueue(async () => {
-      if (stopped || state.phase !== 'live' || ending) return;
+      if (stopped) throw stoppedError();
+      if (state.phase !== 'live' || ending) return;
       await commit(makePatch(state.pub));
     });
+  }
+
+  function guard() {
+    if (stopped) throw stoppedError();
   }
 
   async function finish() {
@@ -156,7 +184,9 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
       // 1. すべての質問を締め切る（これ以後、規則が新しい回答を拒否する）
       await commit(closeAllPatch(state.pub));
       // 2. 締め切りが書けてから、回答を読み直す
+      guard();
       const finalInbox = await net.get(inboxPath);
+      guard();
       const history = buildHistory(
         {
           deckId: meta.deckId, startedAt: meta.startedAt, pub: state.pub,
@@ -171,17 +201,22 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
       if (unsubscribe) { unsubscribe(); unsubscribe = null; }
       emit();
     }
-    // 4. 回答と教材の写しを消し、発表中の印を外す（失敗したら end をやり直せる）
-    if (!cleaned) {
-      await net.remove(inboxPath);
-      await net.remove(`${base}/deck`);
-      await repo.setActive(null);
-      cleaned = true;
-    }
+    // 4. 回答と教材の写しを消し、発表中の印を外す（どこで失敗しても end をやり直せる）
+    guard();
+    await net.remove(inboxPath);
+    guard();
+    await net.remove(`${base}/deck`);
+    guard();
+    const active = await repo.getActive();
+    guard();
+    if (active && active.sid === sid) await repo.setActive(null);
   }
 
   return {
     async start() {
+      const prev = drains.get(sid);
+      if (prev) await prev; // 前の host の書きこみが終わってから読む
+      if (stopped) return;
       state.phase = 'loading';
       emit();
       const session = await net.get(base);
@@ -202,7 +237,6 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
       }
       if (session.pub.state === 'ended') {
         state.phase = 'ended';
-        cleaned = !session.deck && !session.inbox;
         emit();
         return;
       }
@@ -227,7 +261,6 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
         if (patch && visible && state.tallies[id]) {
           const t = state.tallies[id];
           patch[`results/${id}`] = { counts: t.counts, total: t.total };
-          lastWriteAt.set(id, now());
         }
         return patch;
       });
@@ -236,7 +269,6 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
     end() {
       return enqueue(async () => {
         if (stopped) throw new Error('画面を閉じています');
-        if (state.phase === 'ended' && cleaned) return;
         if (state.phase !== 'live' && state.phase !== 'ended') throw new Error('授業が開かれていません');
         ending = true;
         clearTimers();
@@ -249,11 +281,14 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
       });
     },
 
-    // 画面を離れる。授業は終わらせない
+    // 画面を離れる。授業は終わらせない。実行中の書きこみが落ち着いたら解決する
     stop() {
       stopped = true;
       clearTimers();
       if (unsubscribe) { unsubscribe(); unsubscribe = null; }
+      const drain = tail.then(() => {}, () => {});
+      drains.set(sid, drain);
+      return drain;
     },
   };
 }
