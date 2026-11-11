@@ -132,14 +132,22 @@ test('配列の読み出し: 半分より多く埋まっていれば欠けを nu
   assert.deepEqual(got.at(-1), ['x', null, 'z']);
 });
 
-test('配列の読み出し: 半分以下しか埋まっていなければオブジェクトのまま', async () => {
+test('配列の読み出し: 最大キーが個数の 2 倍以上ならオブジェクトのまま', async () => {
   const net = createFakeNet();
   await net.set('a/0', 'x');
   await net.set('a/5', 'y');
   assert.deepEqual(await net.get('a'), { 0: 'x', 5: 'y' });
-  await net.set('b', [null, 'q']);
-  assert.deepEqual(await net.get('b'), { 1: 'q' });
-  assert.deepEqual(net.dump().b, { 1: 'q' });
+  await net.set('b', [null, 1]);
   await net.remove('b/1');
   assert.equal(await net.get('b'), null);
+});
+
+test('配列の読み出し: ちょうど半分（max=1, 個数=1）でも配列になる', async () => {
+  const net = createFakeNet();
+  const got = [];
+  net.subscribe('b', (v) => got.push(v));
+  await net.set('b', [null, 'q']);
+  assert.deepEqual(await net.get('b'), [null, 'q']);
+  assert.deepEqual(net.dump().b, [null, 'q']);
+  assert.deepEqual(got.at(-1), [null, 'q']);
 });

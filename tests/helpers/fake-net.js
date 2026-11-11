@@ -22,7 +22,7 @@ function normalize(v, now) {
 }
 
 // 読み出し用: 実物の規則で配列に戻す。キーが全部 0 以上の整数で、0〜最大キーのうち
-// 半分より多くが埋まっていれば、最大キー+1 の長さの配列（欠けは null）。そうでなければオブジェクト。写しを返す
+// 最大キーが個数の 2 倍より小さければ（Firebase SDK の規則）、最大キー+1 の長さの配列（欠けは null）。そうでなければオブジェクト。写しを返す
 function view(v) {
   if (!isObj(v)) return v === undefined ? null : v;
   const keys = Object.keys(v);
@@ -30,7 +30,7 @@ function view(v) {
   for (const k of keys) out[k] = view(v[k]);
   if (keys.length > 0 && keys.every((k) => /^(0|[1-9]\d*)$/.test(k))) {
     const max = Math.max(...keys.map(Number));
-    if (keys.length > (max + 1) / 2) {
+    if (max < 2 * keys.length) {
       return Array.from({ length: max + 1 }, (_, i) => (i in out ? out[i] : null));
     }
   }
