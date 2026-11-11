@@ -560,13 +560,13 @@ test('保留のまま授業が終わると未確認になり、終わったあ�
 
 test('終わった授業に入ると、保存されていた保留は未確認になる', async () => {
   const storage = fakeStorage();
-  storage.setItem(`classpulse:outbox:${SID}`, JSON.stringify({ s2: { choice: 1, state: 'queued' }, s3: { choice: 0, state: 'sent' } }));
+  storage.setItem(`classpulse:outbox:${SID}:stu1`, JSON.stringify({ s2: { choice: 1, state: 'queued' }, s3: { choice: 0, state: 'sent' } }));
   const t = setup({ storage });
   await t.ready();
   await t.teacher(endPatch);
   await t.client.start();
   assert.equal(t.last().phase, 'ended');
-  const saved = JSON.parse(storage.getItem(`classpulse:outbox:${SID}`));
+  const saved = JSON.parse(storage.getItem(`classpulse:outbox:${SID}:stu1`));
   assert.deepEqual(saved.s2, { choice: 1, state: 'unconfirmed' });
   assert.deepEqual(saved.s3, { choice: 0, state: 'sent' });
   assert.equal(t.answerSets.length, 0);
@@ -676,4 +676,32 @@ test('回答の読み取り中に授業が終わり回答が消えても、rejec
   await p;
   await settle();
   assert.deepEqual(t.last().answer, { choice: 1, state: 'unconfirmed' });
+});
+
+test('同じ保存先を共有する別の ID の回答は、読み直しても見えない', async () => {
+  const storage = fakeStorage();
+  const a = setup({ storage, auth: stubAuth('uidA') });
+  await a.ready();
+  await a.client.start();
+  await toS2(a);
+  a.client.select(1);
+  await a.client.submit();
+  assert.equal(a.last().answer.state, 'sent');
+  a.client.stop();
+  // 別の ID（同じ授業・同じ保存先）
+  const statesB = [];
+  const clientB = createSessionClient({ net: a.net, auth: stubAuth('uidB'), storage, sid: SID, onChange: (s) => statesB.push(s) });
+  await clientB.start();
+  const b = statesB[statesB.length - 1];
+  assert.equal(b.slideId, 's2');
+  assert.equal(b.answer, null);
+  assert.equal(b.selected, null);
+  assert.equal(JSON.stringify(b).includes('uidA') || JSON.stringify(b).includes('uidB'), false);
+  clientB.stop();
+  // 元の ID は読み直すと送信済みが戻る
+  const statesA = [];
+  const clientA = createSessionClient({ net: a.net, auth: stubAuth('uidA'), storage, sid: SID, onChange: (s) => statesA.push(s) });
+  await clientA.start();
+  assert.deepEqual(statesA[statesA.length - 1].answer, { choice: 1, state: 'sent' });
+  clientA.stop();
 });

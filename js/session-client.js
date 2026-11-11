@@ -15,6 +15,8 @@ function toArray(v) {
 
 export function createSessionClient({ net, auth, storage, sid, onChange }) {
   const pubPath = `sessions/${sid}/pub`;
+  // 一時保存の鍵は授業と生徒の ID の組（同じ保存先を共有する別の ID の回答が見えないように）。画面には出さない
+  const okey = () => `${sid}:${uid}`;
   let uid = null;
   let deck = null;          // 正規化した教材（1 回だけ読む）
   let pub = null;           // 最新の pub
@@ -94,7 +96,7 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
   // 授業の終了。送れていない回答は未確認にして、以後は読まず・送らない
   function markEnded() {
     ended = true;
-    outbox.freeze(sid);
+    outbox.freeze(okey());
   }
 
   const isClosedSlide = (slideId) => {
@@ -110,7 +112,7 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
   async function reconcile() {
     if (!pub || stopped || ended) return;
     // 終了していない授業で締切になった質問だけを照合する（終了後は読まない）
-    for (const slideId of outbox.pendingIds(sid, isClosedSlide)) {
+    for (const slideId of outbox.pendingIds(okey(), isClosedSlide)) {
       if (ended) return;
       if (reconciling.has(slideId)) continue;
       reconciling.add(slideId);
@@ -123,7 +125,7 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
         }
         if (stopped || ended) return; // 終了をまたいだ照合は使わない
         const server = mine && Number.isInteger(mine.choice) ? mine.choice : null;
-        if (outbox.settle(sid, slideId, server)) {
+        if (outbox.settle(okey(), slideId, server)) {
           const cur = pub && pub.current;
           if (server !== null && cur && cur.slideId === slideId) selected = server;
           emit();
@@ -135,7 +137,7 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
   }
 
   function flush() {
-    return outbox.flush(sid, isClosedSlide).then(emit, emit);
+    return outbox.flush(okey(), isClosedSlide).then(emit, emit);
   }
 
   function buildState() {
@@ -158,7 +160,7 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
       if (r) base.results = { counts: toArray(r.counts), total: Number(r.total) || 0 };
     }
     if (slideId) {
-      base.answer = outbox.get(sid, slideId);
+      base.answer = outbox.get(okey(), slideId);
       base.selected = selected;
     }
     return base;
@@ -175,7 +177,7 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
     const key = Number.isInteger(cur.index) && cur.index >= 0 ? String(cur.slideId || '') : '';
     if (key === slideKey) return;
     slideKey = key;
-    const prev = key ? outbox.get(sid, key) : null;
+    const prev = key ? outbox.get(okey(), key) : null;
     selected = prev ? prev.choice : null;
   }
 
@@ -267,7 +269,7 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
       const slideId = cur.slideId;
       const poll = slideId && pub.polls ? pub.polls[slideId] : null;
       if (!poll || poll.status !== 'open' || selected === null) return;
-      const p = outbox.put(sid, slideId, selected);
+      const p = outbox.put(okey(), slideId, selected);
       emit(); // 送信中
       await p;
       emit();
@@ -278,7 +280,7 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
       if (stopped || !pub || phase !== 'live') return;
       const slideId = (pub.current && pub.current.slideId) || '';
       if (!slideId) return;
-      const p = outbox.retry(sid, slideId);
+      const p = outbox.retry(okey(), slideId);
       emit();
       await p;
       emit();
