@@ -28,7 +28,29 @@ test('base.css に配色 10 色・書体・font-display: swap がある', () => 
 });
 
 test('CSS に外部 URL が無い', () => {
-  for (const f of ['css/base.css', 'css/app.css']) assert.doesNotMatch(read(f), /https?:\/\//i, f);
+  for (const f of ['css/base.css', 'css/app.css', 'css/present.css']) assert.doesNotMatch(read(f), /https?:\/\//i, f);
+});
+
+test('QR コードのライブラリ（js/lib/qrcode.js）とライセンス文がある', () => {
+  assert.ok(existsSync(join(root, 'js/lib/qrcode.js')));
+  assert.ok(existsSync(join(root, 'js/lib/qrcode.LICENSE.txt')));
+  assert.match(read('js/lib/qrcode.js'), /var qrcode = function/);
+  const license = read('js/lib/qrcode.LICENSE.txt');
+  assert.match(license, /MIT/);
+  assert.match(license, /Kazuhiko Arase/);
+});
+
+test('index.html が qrcode.js を main.js より前に、ふつうのスクリプトとして読みこむ', () => {
+  const html = read('index.html');
+  const qr = html.search(/<script src="js\/lib\/qrcode\.js"><\/script>/);
+  const main = html.search(/<script[^>]+src="js\/main\.js"/);
+  assert.ok(qr >= 0, 'qrcode.js の script タグがない');
+  assert.ok(qr < main, 'qrcode.js は main.js より前に置く');
+  assert.match(html, /<link[^>]+href="css\/present\.css"/);
+});
+
+test('発表の画面は innerHTML を使わない', () => {
+  assert.doesNotMatch(read('js/views/present.js'), /innerHTML|insertAdjacentHTML|outerHTML/);
 });
 
 test('OFL.txt があり、@font-face の url() のファイルが実在する', () => {
