@@ -10,7 +10,28 @@ function toArray(v) {
   return [];
 }
 
+// 添字つきの配列にする（{5:2} のような疎なオブジェクトも、添字の位置を保つ）
+function toIndexed(v) {
+  if (Array.isArray(v)) return [...v];
+  if (v && typeof v === 'object') {
+    const keys = Object.keys(v).map(Number).filter((n) => Number.isInteger(n) && n >= 0);
+    const out = new Array(keys.length ? Math.max(...keys) + 1 : 0).fill(null);
+    for (const k of keys) out[k] = v[k];
+    return out;
+  }
+  return [];
+}
+
 const byNewest = (key) => (a, b) => (b[key] || 0) - (a[key] || 0);
+
+function normalizeQuestion(q) {
+  const src = q && typeof q === 'object' ? q : {};
+  const options = toIndexed(src.options).map((o) => (typeof o === 'string' ? o : o == null ? '' : String(o)));
+  const rawCounts = toIndexed(src.counts);
+  const counts = Array.from({ length: Math.max(options.length, rawCounts.length) }, (_, i) =>
+    (typeof rawCounts[i] === 'number' ? rawCounts[i] : 0));
+  return { options, counts, total: typeof src.total === 'number' ? src.total : 0 };
+}
 
 export function createRepo(net, uid) {
   const base = `teachers/${uid}`;
@@ -81,8 +102,7 @@ export function createRepo(net, uid) {
         participants: typeof h.participants === 'number' ? h.participants : 0,
         questions: toArray(h.questions).map((q) => ({
           ...q,
-          options: toArray(q && q.options),
-          counts: toArray(q && q.counts),
+          ...normalizeQuestion(q),
         })),
       };
     },

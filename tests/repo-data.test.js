@@ -137,8 +137,19 @@ test('履歴の質問の options と counts は配列で返る', async () => {
   });
   const h = await repo.getHistory('S1');
   assert.deepEqual(h.questions[0].options, ['x', 'y']);
-  assert.deepEqual(h.questions[0].counts, [4]);
+  assert.deepEqual(h.questions[0].counts, [0, 4]);
   assert.equal(h.participants, 0);
+});
+
+test('選択肢が多く疎なオブジェクトで返る counts も、添字の位置を保って 0 で埋める', async () => {
+  const { net, repo } = setup();
+  await net.set('teachers/u1/history/S1', {
+    title: 'T', endedAt: 2,
+    questions: [{ slideId: 'a', question: 'Q', options: ['a', 'b', 'c', 'd', 'e', 'f'], counts: { 5: 2 } }],
+  });
+  const q = (await repo.getHistory('S1')).questions[0];
+  assert.deepEqual(q.counts, [0, 0, 0, 0, 0, 2]);
+  assert.equal(q.total, 0);
 });
 
 test('履歴が無ければ一覧は空', async () => {
