@@ -2,6 +2,14 @@
 // 通信は net を引数で受け取る。
 import { normalizeDeck } from './model.js';
 
+function toArray(v) {
+  if (Array.isArray(v)) return [...v];
+  if (v && typeof v === 'object') {
+    return Object.keys(v).sort((a, b) => Number(a) - Number(b)).map((k) => v[k]);
+  }
+  return [];
+}
+
 const byNewest = (key) => (a, b) => (b[key] || 0) - (a[key] || 0);
 
 export function createRepo(net, uid) {
@@ -64,18 +72,28 @@ export function createRepo(net, uid) {
         .sort(byNewest('endedAt'));
     },
 
+    // データベースは空の配列を落とし、配列を {0:…} で返すことがあるので形を戻す
     async getHistory(sid) {
-      return net.get(`${base}/history/${sid}`);
+      const h = await net.get(`${base}/history/${sid}`);
+      if (h === null) return null;
+      return {
+        ...h,
+        participants: typeof h.participants === 'number' ? h.participants : 0,
+        questions: toArray(h.questions).map((q) => ({
+          ...q,
+          options: toArray(q && q.options),
+          counts: toArray(q && q.counts),
+        })),
+      };
     },
 
     async saveHistory(sid, history) {
       await net.set(`${base}/history/${sid}`, history);
     },
 
-    // 履歴と、終わった授業のデータ（sessions/<sid>）を一緒に消す
+    // 履歴と、終わった授業のデータ（sessions/<sid>）を、ルートへの 1 回の update で一緒に消す
     async deleteHistory(sid) {
-      await net.remove(`${base}/history/${sid}`);
-      await net.remove(`sessions/${sid}`);
+      await net.update('', { [`${base}/history/${sid}`]: null, [`sessions/${sid}`]: null });
     },
   };
 }

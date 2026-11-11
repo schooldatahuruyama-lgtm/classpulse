@@ -111,6 +111,36 @@ test('履歴の保存・一覧・削除', async () => {
   assert.deepEqual((await repo.listHistory()).map((x) => x.sid), ['S2']);
 });
 
+test('履歴の削除は 1 回の update で、失敗したら履歴も授業も残る', async () => {
+  const net = createFakeNet({ deny: (op) => op === 'update' });
+  const repo = createRepo(net, 'u1');
+  await repo.saveHistory('S1', { title: 'T', deckId: 'd1', startedAt: 1, endedAt: 2, participants: 1, questions: [] });
+  await net.set('sessions/S1', { state: 'ended' });
+  await assert.rejects(() => repo.deleteHistory('S1'));
+  assert.notEqual(await repo.getHistory('S1'), null);
+  assert.deepEqual(await net.get('sessions/S1'), { state: 'ended' });
+});
+
+test('質問のない履歴は questions: [] で読み戻せる', async () => {
+  const { repo } = setup();
+  await repo.saveHistory('S1', { title: 'T', deckId: 'd1', startedAt: 1, endedAt: 2, participants: 0, questions: [] });
+  const h = await repo.getHistory('S1');
+  assert.deepEqual(h.questions, []);
+  assert.equal(h.participants, 0);
+});
+
+test('履歴の質問の options と counts は配列で返る', async () => {
+  const { net, repo } = setup();
+  await net.set('teachers/u1/history/S1', {
+    title: 'T', endedAt: 2,
+    questions: { 0: { slideId: 'a', question: 'Q', options: { 0: 'x', 1: 'y' }, counts: { 1: 4 }, total: 4 } },
+  });
+  const h = await repo.getHistory('S1');
+  assert.deepEqual(h.questions[0].options, ['x', 'y']);
+  assert.deepEqual(h.questions[0].counts, [4]);
+  assert.equal(h.participants, 0);
+});
+
 test('履歴が無ければ一覧は空', async () => {
   const { repo } = setup();
   assert.deepEqual(await repo.listHistory(), []);

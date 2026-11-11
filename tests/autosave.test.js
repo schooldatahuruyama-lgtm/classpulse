@@ -29,7 +29,7 @@ function fakeTimers() {
 }
 
 // 完了を手で決められる save
-function setup({ delayMs = 1000, retryMs = 5000 } = {}) {
+function setup({ delayMs = 1000, retryMs = 5000, maxWaitMs = 5000 } = {}) {
   const timers = fakeTimers();
   const saved = [];
   const states = [];
@@ -37,12 +37,13 @@ function setup({ delayMs = 1000, retryMs = 5000 } = {}) {
   let mode = 'auto'; // auto: すぐ成功 / manual: resolve を待つ / fail: 失敗
   const save = (deck) => {
     saved.push(deck);
+    if (mode === 'throw') { mode = 'auto'; throw new Error('同期の失敗'); }
     if (mode === 'fail') return Promise.reject(new Error('失敗'));
     if (mode === 'manual') return new Promise((resolve) => pendingSaves.push(resolve));
     return Promise.resolve();
   };
   const saver = createAutosaver({
-    save, delayMs, retryMs,
+    save, delayMs, retryMs, maxWaitMs,
     onState: (s) => states.push(s),
     setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout,
   });
@@ -142,6 +143,39 @@ test('flush はすぐ保存して、終わるまで待つ', async () => {
   assert.equal(states[states.length - 1], 'saved');
   await timers.advance(5000);
   assert.equal(saved.length, 1);
+});
+
+test('save が同期で例外を投げても failed になり、再試行で回復する', async () => {
+  const { timers, saver, saved, states, setMode } = setup();
+  setMode('throw');
+  saver.touch({ v: 1 });
+  await timers.advance(1000);
+  assert.deepEqual(states, ['saving', 'failed']);
+  assert.equal(saver.hasPending(), true);
+  saver.touch({ v: 2 });
+  saver.retry();
+  await settle();
+  assert.deepEqual(saved[saved.length - 1], { v: 2 });
+  assert.equal(states[states.length - 1], 'saved');
+  assert.equal(saver.hasPending(), false);
+});
+
+test('連続して変更しても、最初の変更から最大待ち時間で保存する', async () => {
+  const { timers, saver, saved } = setup();
+  let v = 0;
+  for (let t = 0; t < 4500; t += 500) {
+    saver.touch({ v: ++v }); // t = 0..4000
+    await timers.advance(500);
+  }
+  assert.equal(saved.length, 0, '4500ms まではデバウンスで延びている');
+  saver.touch({ v: ++v }); // t = 4500
+  await timers.advance(500); // t = 5000
+  assert.equal(saved.length, 1);
+  assert.deepEqual(saved[0], { v });
+  saver.touch({ v: ++v }); // 5000 以降の変更は次の回で保存
+  await timers.advance(1000);
+  assert.equal(saved.length, 2);
+  assert.deepEqual(saved[1], { v });
 });
 
 test('変更が無ければ flush はすぐ終わる', async () => {
