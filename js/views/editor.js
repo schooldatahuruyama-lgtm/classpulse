@@ -7,7 +7,7 @@ import {
   updateSlide, deckImageBytes,
 } from '../model.js';
 import { createAutosaver } from '../autosave.js';
-import { runStartPresenting, reasonsNodes, MSG_ACTIVE, MSG_FAILED } from './start-presenting.js';
+import { runStartPresenting, sessionDeps, reasonsNodes, MSG_ACTIVE, MSG_FAILED } from './start-presenting.js';
 import { compressImage, dataUrlBytes } from '../image.js';
 import { mountCanvas } from './editor/canvas.js';
 import { renderSlideList, updateThumb, addButtons } from './editor/slide-list.js';
@@ -463,7 +463,8 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
       await waitImage();
       if (!alive) return;
       const r = await runStartPresenting({
-        ctx, deckId, deck: forSave(state.deck), beforeStart: readyToLeave, isAlive: () => alive,
+        ...sessionDeps(ctx), deckId, getDeck: () => state.deck, beforeStart: readyToLeave, isAlive: () => alive,
+        startSession: (id, deck) => sessionDeps(ctx).startSession(id, forSave(deck)),
       });
       if (!alive) return;
       if (r.status === 'invalid') showReasons(r.reasons);

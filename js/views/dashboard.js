@@ -4,7 +4,7 @@ import { el, confirmDialog, toast } from '../ui.js';
 import { createDeck, newId } from '../model.js';
 import { formatDateTime } from '../format.js';
 import { routeHash } from '../router.js';
-import { runStartPresenting, reasonsNodes, MSG_ACTIVE, MSG_FAILED } from './start-presenting.js';
+import { runStartPresenting, sessionDeps, reasonsNodes, MSG_ACTIVE, MSG_FAILED } from './start-presenting.js';
 
 const UNTITLED = '無題の教材';
 const RECENT_COUNT = 5;
@@ -56,7 +56,7 @@ export function mount(root, ctx) {
       }
       if (!alive) return;
       if (!deck) { showMessage(el('p', { text: 'この教材が見つかりません。' })); return; }
-      const r = await runStartPresenting({ ctx, deckId: d.id, deck, isAlive: () => alive });
+      const r = await runStartPresenting({ ...sessionDeps(ctx), deckId: d.id, getDeck: () => deck, isAlive: () => alive });
       if (!alive) return;
       if (r.status === 'started') ctx.navigate('present', { sid: r.sid });
       else if (r.status === 'invalid') showMessage(...reasonsNodes(r.reasons));
