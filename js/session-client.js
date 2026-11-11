@@ -21,6 +21,7 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
   let unsubscribe = null;
   let stopped = false;
   let joined = false;
+  let ended = false;        // 授業の終了を知ったか（終了後は自分の回答を読まない。先生が回答を消すため）
   let slideKey = null;      // 直前に表示していたスライドの id（変わったら選択を消す）
   let selected = null;
   let phase = 'loading';
@@ -38,6 +39,8 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
     } catch (e) {
       if (!(e instanceof NetError) || e.code !== 'denied') throw e;
     }
+    // 終了を知っていれば、読み取りも再送もしない（未確認として扱われる）
+    if (ended) throw new NetError('network', '授業が終わりました');
     // 拒否された。最新の pub を読みなおして、締切（最終）か、あとで送れる（再試行）かを決める
     let latest;
     try {
@@ -47,7 +50,11 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
     }
     const poll = latest && latest.polls ? latest.polls[slideId] : null;
     const isCurrent = latest && latest.current && latest.current.slideId === slideId;
-    const final = !latest || latest.state === 'ended' || !poll || poll.status === 'closed' || !isCurrent;
+    if (latest && latest.state === 'ended') {
+      markEnded();
+      throw new NetError('network', '授業が終わりました'); // 届いたか確かめられない。未確認になる
+    }
+    const final = !latest || !poll || poll.status === 'closed' || !isCurrent;
     if (!final) {
       if (poll.status === 'paused') throw new NetError('network', '受付が止まっています');
       // open で今のスライド: 読み直している間に再開された。すぐ送り直す（同じ値で 1 回だけ）
@@ -72,11 +79,23 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
     throw new NetError('denied', '受付が終わっています');
   }
 
-  const outbox = createOutbox({ storage, send: (_sid, slideId, choice) => sendAnswer(slideId, choice) });
+  const outbox = createOutbox({
+    storage,
+    send: (_sid, slideId, choice) => sendAnswer(slideId, choice),
+    // 送信が終わるたびに、締切になっていないか見なおす（送信中に締切が届いた場合）
+    onSettle: () => { reconcile(); },
+    canSend: (_sid, slideId) => !ended && !isClosedSlide(slideId),
+  });
+
+  // 授業の終了。送れていない回答は未確認にして、以後は読まず・送らない
+  function markEnded() {
+    ended = true;
+    outbox.freeze(sid);
+  }
 
   const isClosedSlide = (slideId) => {
     if (!pub) return false;
-    if (pub.state === 'ended') return true;
+    if (ended || pub.state === 'ended') return true;
     const p = pub.polls && pub.polls[slideId];
     return !!p && p.status === 'closed';
   };
@@ -85,8 +104,10 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
   // 読めなかったとき（つながらない）は保留のまま残し、次の接続・更新でもう一度照合する。再送はしない
   const reconciling = new Set();
   async function reconcile() {
-    if (!pub || stopped) return;
+    if (!pub || stopped || ended) return;
+    // 終了していない授業で締切になった質問だけを照合する（終了後は読まない）
     for (const slideId of outbox.pendingIds(sid, isClosedSlide)) {
+      if (ended) return;
       if (reconciling.has(slideId)) continue;
       reconciling.add(slideId);
       try {
@@ -164,8 +185,8 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
       return;
     }
     pub = value;
-    reconcile();
     if (pub.state === 'ended') {
+      markEnded();
       phase = 'ended';
       if (unsubscribe) { unsubscribe(); unsubscribe = null; }
       syncSlide();
@@ -174,6 +195,7 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
     }
     phase = 'live';
     syncSlide();
+    reconcile();
     emit();
     // 質問が受付中に戻ったら、保留の回答を送り直す
     const cur = pub.current || {};
@@ -209,7 +231,7 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
         const first = await net.get(pubPath);
         if (stopped) return;
         if (first === null || typeof first !== 'object') { phase = 'not-found'; emit(); return; }
-        if (first.state === 'ended') { pub = first; phase = 'ended'; emit(); reconcile(); return; }
+        if (first.state === 'ended') { pub = first; phase = 'ended'; markEnded(); emit(); return; }
         const rawDeck = await net.get(`sessions/${sid}/deck`);
         if (stopped) return;
         if (rawDeck === null) throw new NetError('unknown', '教材が見つかりません');

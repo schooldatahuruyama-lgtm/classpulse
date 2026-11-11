@@ -380,23 +380,6 @@ test('停止中の保留が締切で rejected になる', async () => {
   assert.equal(t.last().answer.state, 'rejected');
 });
 
-test('保留のまま授業が終わると rejected', async () => {
-  const t = setup();
-  await t.ready();
-  await t.client.start();
-  await toS2(t);
-  t.client.select(1);
-  t.holdUpdates();
-  await t.teacher((pub) => pausePatch(pub, 's2', true));
-  await t.client.submit();
-  assert.equal(t.last().answer.state, 'queued');
-  t.releaseUpdates();
-  await t.teacher(endPatch);
-  assert.equal(t.last().phase, 'ended');
-  await settle();
-  assert.deepEqual(t.last().answer, { choice: 1, state: 'rejected' });
-});
-
 test('保存できず、つながらなければ failed。retry で送り直せる', async () => {
   const base = fakeStorage();
   const storage = { getItem: base.getItem, removeItem: base.removeItem, setItem: () => { throw new Error('容量不足'); } };
@@ -533,4 +516,100 @@ test('切れている間に締切を受けたら保留のまま、つながっ�
   await settle();
   assert.deepEqual(t.last().answer, { choice: 1, state: 'sent' });
   assert.equal(t.answerSets.length, sets); // 締切済みの質問へ送り直していない
+});
+
+// 回答の set を gate が開くまで止め（applied なら先にサーバーへ届かせて）、開いたら通信エラーで終える
+function holdAnswerSend(net, { applied }) {
+  const orig = net.set;
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  net.set = async (path, value) => {
+    if (!path.includes('/inbox/answers/')) return orig(path, value);
+    if (applied) await orig(path, value); // サーバーには届くが、応答が戻らない
+    await gate;
+    throw new NetError('network');
+  };
+  return release;
+}
+
+test('保留のまま授業が終わると未確認になり、終わったあとは読みも送りもしない', async () => {
+  const t = setup();
+  await t.ready();
+  await t.client.start();
+  await toS2(t);
+  t.client.select(1);
+  t.holdUpdates();
+  await t.teacher((pub) => pausePatch(pub, 's2', true));
+  await t.client.submit();
+  assert.equal(t.last().answer.state, 'queued');
+  t.releaseUpdates();
+  const reads = [];
+  const origGet = t.net.get;
+  t.net.get = async (path) => { reads.push(path); return origGet(path); };
+  const sets = t.answerSets.length;
+  await t.teacher(endPatch);
+  assert.equal(t.last().phase, 'ended');
+  assert.deepEqual(t.last().answer, { choice: 1, state: 'unconfirmed' });
+  t.net.setOnline(false);
+  t.net.setOnline(true);
+  await settle();
+  assert.equal(reads.length, 0);
+  assert.equal(t.answerSets.length, sets);
+  assert.equal(t.last().answer.state, 'unconfirmed');
+});
+
+test('終わった授業に入ると、保存されていた保留は未確認になる', async () => {
+  const storage = fakeStorage();
+  storage.setItem(`classpulse:outbox:${SID}`, JSON.stringify({ s2: { choice: 1, state: 'queued' }, s3: { choice: 0, state: 'sent' } }));
+  const t = setup({ storage });
+  await t.ready();
+  await t.teacher(endPatch);
+  await t.client.start();
+  assert.equal(t.last().phase, 'ended');
+  const saved = JSON.parse(storage.getItem(`classpulse:outbox:${SID}`));
+  assert.deepEqual(saved.s2, { choice: 1, state: 'unconfirmed' });
+  assert.deepEqual(saved.s3, { choice: 0, state: 'sent' });
+  assert.equal(t.answerSets.length, 0);
+});
+
+test('送信済みは授業が終わっても sent のまま', async () => {
+  const t = setup();
+  await t.ready();
+  await t.client.start();
+  await toS2(t);
+  t.client.select(1);
+  await t.client.submit();
+  await t.teacher(endPatch);
+  assert.deepEqual(t.last().answer, { choice: 1, state: 'sent' });
+});
+
+test('送信中に締切が届き、あとで通信エラーになっても照合される（届いていれば sent）', async () => {
+  const t = setup();
+  await t.ready();
+  await t.client.start();
+  await toS2(t);
+  const release = holdAnswerSend(t.net, { applied: true });
+  t.client.select(1);
+  const p = t.client.submit();
+  await t.teacher(closeAllPatch); // 送信中に締切を知る
+  assert.equal(t.last().poll.status, 'closed');
+  release();
+  await p;
+  await settle();
+  assert.deepEqual(t.last().answer, { choice: 1, state: 'sent' });
+});
+
+test('送信中に締切が届き、届いていなければ rejected', async () => {
+  const t = setup();
+  await t.ready();
+  await t.client.start();
+  await toS2(t);
+  const release = holdAnswerSend(t.net, { applied: false });
+  t.client.select(1);
+  const p = t.client.submit();
+  await t.teacher(closeAllPatch);
+  release();
+  await p;
+  await settle();
+  assert.equal(t.last().answer.state, 'rejected');
 });

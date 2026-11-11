@@ -2,11 +2,16 @@
 // 同じ質問への回答は 1 件だけ持ち、選びなおしたら前の未送信は置きかえる（最後の回答が勝つ）。
 // state: 'sending'（送信中）、'sent'（送信済み）、'queued'（つながらず保留。あとで送り直す）、
 //        'rejected'（規則に拒否された。締切など。送り直さない）、
-//        'failed'（そのほかの失敗、または保存できていないままつながらなかったもの。手動で retry する）
+//        'failed'（そのほかの失敗、または保存できていないままつながらなかったもの。手動で retry する）、
+//        'unconfirmed'（授業が終わったあとに、届いたか確かめられないもの。送り直さない。freeze で決まる）
 // send は成功したら何も返さないか、サーバーに別の回答が残っていたとき { choice } を返す（その値を送信済みとする）。
-const STATES = new Set(['sending', 'sent', 'queued', 'rejected', 'failed']);
+const STATES = new Set(['sending', 'sent', 'queued', 'rejected', 'failed', 'unconfirmed']);
 
-export function createOutbox({ storage, send }) {
+// onSettle(sid, slideId): 送信が終わって状態が決まるたびに呼ぶ（締切の再評価などに使う）
+// canSend(sid, slideId): 偽なら、送信中に出た再送の要求では送り直さない（締切済みの質問など）
+export function createOutbox({ storage, send, onSettle = () => {}, canSend = () => true }) {
+  // 同じ質問の送信の順番（clear をまたいでも保つ）。sid|slideId -> 最後の送信の Promise
+  const chains = new Map();
   // sid -> { data: { [slideId]: entry }, active: Map(slideId -> Promise), want: Set(slideId) }
   // clear すると bucket ごと捨てる（古い送信の結果が新しい回答に混ざらないよう、世代で分ける）
   const buckets = new Map();
@@ -27,7 +32,7 @@ export function createOutbox({ storage, send }) {
         }
       }
     } catch { /* こわれたデータは無いものとして扱う */ }
-    const b = { data, active: new Map(), want: new Set() };
+    const b = { data, active: new Map(), want: new Set(), frozen: false };
     buckets.set(sid, b);
     return b;
   }
@@ -51,7 +56,11 @@ export function createOutbox({ storage, send }) {
   function drive(sid, slideId) {
     const b = bucket(sid);
     if (b.active.has(slideId)) return b.active.get(slideId);
+    const chainKey = `${sid}|${slideId}`;
+    const prev = chains.get(chainKey);
     const run = (async () => {
+      // 同じ質問の前の送信（clear 前のもの）が終わってから送る。最後に put したものが最後の書き込みになる
+      if (prev) await prev;
       try {
         for (;;) {
           const entry = b.data[slideId];
@@ -70,14 +79,21 @@ export function createOutbox({ storage, send }) {
           if (!now) break;
           if (now.choice !== sentChoice) continue; // 送信中に選びなおされた。新しい値を送る
           if (confirmed !== null) now.choice = confirmed;
+          if (b.frozen) { // 授業が終わった。届いたか確かめられないものは未確認にして、送り直さない
+            now.state = result === 'sent' || result === 'rejected' ? result : 'unconfirmed';
+            save(sid);
+            onSettle(sid, slideId);
+            break;
+          }
           // 保存できていない回答は、つながらなかったときに「保留」と言えない（再読み込みで消える）
           if (result === 'queued' && now.unsaved) result = 'failed';
-          if (result === 'queued' && b.want.delete(slideId)) { // 送信中に再送の要求があった
+          if (result === 'queued' && b.want.delete(slideId) && canSend(sid, slideId)) { // 送信中に再送の要求があった
             continue;
           }
           now.state = result;
           if (result === 'sent') now.unsaved = false;
           if (save(sid)) now.unsaved = false;
+          onSettle(sid, slideId);
           break;
         }
       } finally {
@@ -87,6 +103,8 @@ export function createOutbox({ storage, send }) {
       return copy(buckets.get(sid) === b ? b.data[slideId] : null);
     })();
     b.active.set(slideId, run);
+    const tail = run.then(() => {}, () => {}).then(() => { if (chains.get(chainKey) === tail) chains.delete(chainKey); });
+    chains.set(chainKey, tail);
     return run;
   }
 
@@ -123,8 +141,20 @@ export function createOutbox({ storage, send }) {
       const e = b.data[slideId];
       if (!e || e.state !== 'failed') return copy(e);
       e.state = 'sending';
-      save(sid);
+      if (save(sid)) e.unsaved = false;
       return drive(sid, slideId);
+    },
+    // 授業が終わった。送れていないもの（queued / failed）は未確認にし、以後は送り直さない。
+    // 送信中のものは、終わった時点で未確認にする。sent / rejected は変えない
+    freeze(sid) {
+      const b = bucket(sid);
+      b.frozen = true;
+      let changed = false;
+      for (const e of Object.values(b.data)) {
+        if (e.state === 'queued' || e.state === 'failed') { e.state = 'unconfirmed'; changed = true; }
+      }
+      if (changed) save(sid);
+      return changed;
     },
     // 締切・終了が分かった質問の、送れていない回答（queued / failed）を rejected にする。変えたら true
     rejectPending(sid, isClosed) {

@@ -140,20 +140,6 @@ test('送信中に再送の要求があり、その後に通信エラーで終�
   assert.equal(calls.length, 2);
 });
 
-test('送信中に clear して同じ質問を送りなおしても、新しい回答が送られる', async () => {
-  const gates = [];
-  const { send, calls } = makeSender(() => new Promise((resolve) => gates.push(resolve)));
-  const ob = createOutbox({ storage: fakeStorage(), send });
-  const old = ob.put('s', 'q1', 1); // 終わらない送信
-  ob.clear('s');
-  const fresh = ob.put('s', 'q1', 0);
-  await tick();
-  assert.deepEqual(calls.map((c) => c.choice), [1, 0]);
-  gates.forEach((g) => g());
-  await Promise.all([old, fresh]);
-  assert.deepEqual(ob.get('s', 'q1'), { choice: 0, state: 'sent' });
-});
-
 test('保存できないまま通信エラーなら failed で、読み直しても出ない。retry で送れる', async () => {
   const base = fakeStorage();
   const storage = { getItem: base.getItem, removeItem: base.removeItem, setItem: () => { throw new Error('容量不足'); } };
@@ -202,4 +188,59 @@ test('settle は保留を照合結果にし、flush の skip は送らない', a
   assert.equal(ob.settle('s', 'b', null), true);
   assert.equal(ob.get('s', 'b').state, 'rejected');
   assert.equal(ob.settle('s', 'a', 1), false); // 送信済みは変えない
+});
+
+test('put → clear → put でも、同じ質問の送信は 1 つずつで、最後の値が最後に書かれる', async () => {
+  const gates = [];
+  const { send, calls } = makeSender(() => new Promise((resolve) => gates.push(resolve)));
+  const ob = createOutbox({ storage: fakeStorage(), send });
+  const old = ob.put('s', 'q1', 1);
+  ob.clear('s');
+  const fresh = ob.put('s', 'q1', 0);
+  for (let i = 0; i < 3; i++) await tick();
+  assert.deepEqual(calls.map((c) => c.choice), [1]); // 古い送信が終わるまで次は始まらない
+  gates.shift()();
+  for (let i = 0; i < 3; i++) await tick();
+  assert.deepEqual(calls.map((c) => c.choice), [1, 0]);
+  gates.shift()();
+  await Promise.all([old, fresh]);
+  assert.deepEqual(ob.get('s', 'q1'), { choice: 0, state: 'sent' });
+});
+
+test('保存が直ったあとの retry は、通信エラーなら queued で、再接続の flush で送られる', async () => {
+  const base = fakeStorage();
+  let broken = true;
+  const storage = {
+    getItem: base.getItem, removeItem: base.removeItem,
+    setItem: (k, v) => { if (broken) throw new Error('容量不足'); base.setItem(k, v); },
+  };
+  let online = false;
+  const { send } = makeSender(async () => { if (!online) throw new NetError('network'); });
+  const ob = createOutbox({ storage, send });
+  await ob.put('s', 'q1', 1);
+  assert.equal(ob.get('s', 'q1').state, 'failed');
+  broken = false;
+  await ob.retry('s', 'q1');
+  assert.equal(ob.get('s', 'q1').state, 'queued');
+  online = true;
+  await ob.flush('s');
+  assert.deepEqual(ob.get('s', 'q1'), { choice: 1, state: 'sent' });
+});
+
+test('freeze は保留を未確認にし、送信済みと拒否は変えず、以後は送らない', async () => {
+  const { send, calls } = makeSender(async (sid, slideId) => {
+    if (slideId === 'ok') return;
+    throw new NetError(slideId === 'no' ? 'denied' : 'network');
+  });
+  const ob = createOutbox({ storage: fakeStorage(), send });
+  await ob.put('s', 'ok', 0);
+  await ob.put('s', 'no', 0);
+  await ob.put('s', 'q', 1);
+  ob.freeze('s');
+  assert.equal(ob.get('s', 'ok').state, 'sent');
+  assert.equal(ob.get('s', 'no').state, 'rejected');
+  assert.equal(ob.get('s', 'q').state, 'unconfirmed');
+  const n = calls.length;
+  await ob.flush('s');
+  assert.equal(calls.length, n);
 });
