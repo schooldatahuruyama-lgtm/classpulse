@@ -154,3 +154,55 @@ test('授業 ID は 22 文字で、2 回作ると違う', () => {
   assert.match(a, /^[A-Za-z0-9]{22}$/);
   assert.notEqual(a, b);
 });
+
+// ---- 要素の位置の補正（clampItem） ----
+import { clampItem, MIN_ITEM_SIZE } from '../js/model.js';
+
+const inside = (it) => it.x >= 0 && it.y >= 0 && it.x + it.w <= 1 + 1e-9 && it.y + it.h <= 1 + 1e-9;
+
+test('clampItem: 右にはみ出す要素（x 0.9, w 0.8）は枠の中に戻す', () => {
+  const r = clampItem({ id: 'a', kind: 'text', x: 0.9, y: 0.1, w: 0.8, h: 0.2, text: '光' });
+  assert.ok(inside(r));
+  assert.equal(r.w, 0.8);
+  assert.ok(Math.abs(r.x - 0.2) < 1e-9);
+  assert.equal(r.text, '光', 'ほかの値はそのまま');
+});
+
+test('clampItem: 幅 0 は最小（0.05）、幅が無いときは文字の箱の既定値', () => {
+  assert.equal(MIN_ITEM_SIZE, 0.05);
+  assert.equal(clampItem({ x: 0, y: 0, w: 0, h: 0 }).w, 0.05);
+  assert.equal(clampItem({ x: 0, y: 0, w: 0, h: 0 }).h, 0.05);
+  const d = createTextItem('x');
+  const r = clampItem({ x: 0.1, y: 0.1 });
+  assert.equal(r.w, d.w);
+  assert.equal(r.h, d.h);
+});
+
+test('clampItem: 負の値・NaN・数でない値・大きすぎる値を直す', () => {
+  const d = createTextItem('x');
+  const a = clampItem({ x: -1, y: -0.5, w: 2, h: 1.5 });
+  assert.deepEqual([a.x, a.y, a.w, a.h], [0, 0, 1, 1]);
+  const b = clampItem({ x: NaN, y: '0.3', w: Infinity, h: null });
+  assert.equal(b.x, d.x);
+  assert.equal(b.y, d.y);
+  assert.equal(b.w, d.w);
+  assert.equal(b.h, d.h);
+  assert.ok(inside(b));
+});
+
+test('clampItem: 元の要素は書きかえない', () => {
+  const it = { x: 0.9, y: 0, w: 0.8, h: 0.2 };
+  clampItem(it);
+  assert.deepEqual(it, { x: 0.9, y: 0, w: 0.8, h: 0.2 });
+});
+
+test('normalizeDeck: どの要素にも clampItem をかける', () => {
+  const d = normalizeDeck({
+    title: 't', updatedAt: 1, order: ['a'],
+    slides: { a: { type: 'content', items: [{ id: 'i', kind: 'image', x: 0.9, y: 0.95, w: 0.8, h: 0, imageId: 'p' }] } },
+  });
+  const it = d.slides.a.items[0];
+  assert.ok(inside(it));
+  assert.equal(it.h, 0.05);
+  assert.equal(it.imageId, 'p');
+});

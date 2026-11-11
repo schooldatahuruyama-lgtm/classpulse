@@ -2,20 +2,15 @@
 // 操作は Pointer Events（指でもマウスでも動く）。位置と大きさはキャンバスに対する割合（0〜1）。
 import { el } from '../../ui.js';
 import { renderSlide, placeItem, styleText } from '../../slide-render.js';
+import { clampItem, MIN_ITEM_SIZE as MIN_SIZE } from '../../model.js';
 
-export const MIN_SIZE = 0.05;     // 要素の最小の大きさ（キャンバスの幅・高さの 5%）
 const DRAG_START_PX = 6;          // これより小さい動きはタップとみなす
 const KEY_STEP = 0.01;            // 矢印キー 1 回の移動量
 const KEY_STEP_BIG = 0.05;        // Shift + 矢印キー
+const IMAGE_LABEL = '画像を追加';
+const IMAGE_BUSY_LABEL = '画像を読みこんでいます…';
 
 const clamp = (v, lo, hi) => Math.min(Math.max(lo, hi), Math.max(lo, v));
-
-// 枠の外に出ないように直した要素（大きさが先、位置が後）
-export function clampItem(item) {
-  const w = clamp(Number(item.w) || MIN_SIZE, MIN_SIZE, 1);
-  const h = clamp(Number(item.h) || MIN_SIZE, MIN_SIZE, 1);
-  return { ...item, w, h, x: clamp(Number(item.x) || 0, 0, 1 - w), y: clamp(Number(item.y) || 0, 0, 1 - h) };
-}
 
 function itemLabel(item) {
   if (item.kind === 'image') return '画像';
@@ -23,36 +18,42 @@ function itemLabel(item) {
   return t ? `文字「${t.length > 20 ? `${t.slice(0, 20)}…` : t}」` : '文字（空）';
 }
 
-// 道具の帯（文字を追加・画像を追加）
+// 道具の帯（文字を追加・画像を追加）。画像の追加中かどうかは編集画面が持ち、setImageBusy で知らせる
 function buildTools(ed) {
   const file = el('input', { type: 'file', accept: 'image/*', class: 'ed-file', tabindex: '-1', 'aria-hidden': 'true' });
-  const status = el('span', { class: 'ed-tool-status', role: 'status' });
   const error = el('div', { class: 'error', role: 'alert', hidden: true });
-  const imgBtn = el('button', { type: 'button', class: 'btn', text: '画像を追加', onclick: () => file.click() });
+  const imgBtn = el('button', { type: 'button', class: 'btn', text: IMAGE_LABEL, onclick: () => file.click() });
   const textBtn = el('button', { type: 'button', class: 'btn', text: '文字を追加', onclick: () => { error.hidden = true; ed.addText(); } });
 
-  file.addEventListener('change', async () => {
+  file.addEventListener('change', () => {
     const f = file.files && file.files[0];
     file.value = '';
     if (!f) return;
     error.hidden = true;
-    imgBtn.disabled = true;
-    status.textContent = '画像を縮めています…';
-    const message = await ed.addImage(f);
-    imgBtn.disabled = false;
-    status.textContent = '';
-    if (message) { error.textContent = message; error.hidden = false; }
+    ed.addImage(f);
   });
 
-  return el('div', { class: 'ed-tools-wrap' },
-    el('div', { class: 'ed-tools', role: 'toolbar', 'aria-label': '要素を追加' }, textBtn, imgBtn, status, file),
+  const setImageBusy = (busy) => {
+    imgBtn.disabled = busy;
+    imgBtn.textContent = busy ? IMAGE_BUSY_LABEL : IMAGE_LABEL;
+  };
+  const showError = (message) => {
+    error.textContent = message || '';
+    error.hidden = !message;
+  };
+  setImageBusy(ed.isImageBusy());
+
+  const node = el('div', { class: 'ed-tools-wrap' },
+    el('div', { class: 'ed-tools', role: 'toolbar', 'aria-label': '要素を追加' }, textBtn, imgBtn, file),
     error);
+  return { node, setImageBusy, showError };
 }
 
 // host にキャンバスを作る。戻り値で、部分的な描き直しをする
 export function mountCanvas(host, ed) {
   const wrap = el('div', { class: 'ed-canvas-wrap' });
-  host.replaceChildren(buildTools(ed), wrap,
+  const tools = buildTools(ed);
+  host.replaceChildren(tools.node, wrap,
     el('p', { class: 'small muted ed-canvas-hint', text: '要素をタップで選び、ドラッグで動かします。右下のつまみで大きさを変えます。選んでいる文字をもう一度タップすると入力できます。' }));
 
   let stage = null;
@@ -310,5 +311,5 @@ export function mountCanvas(host, ed) {
   }
 
   render();
-  return { render, refreshItem, applySelection, finishEdit };
+  return { render, refreshItem, applySelection, finishEdit, setImageBusy: tools.setImageBusy, showImageError: tools.showError };
 }

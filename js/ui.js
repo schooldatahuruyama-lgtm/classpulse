@@ -24,11 +24,15 @@ export function el(tag, props = {}, ...children) {
   return node;
 }
 
-// 確認ダイアログ。OK なら true、取り消し・Esc なら false
+// 開いている確認ダイアログ（画面が切りかわったら、取り消しとして片づける）
+const openDialogs = new Set();
+
+// 確認ダイアログ。OK なら true、取り消し・Esc・画面の切りかえなら false
 export function confirmDialog({ title, body, okLabel = 'OK', danger = false }) {
   return new Promise((resolve) => {
     const dlg = el('dialog', { class: 'confirm', 'aria-labelledby': 'confirm-title' });
     let result = false;
+    let done = false;
     const ok = el('button', { type: 'button', class: danger ? 'btn btn-danger' : 'btn btn-primary', text: okLabel, onclick: () => { result = true; dlg.close(); } });
     const cancel = el('button', { type: 'button', class: 'btn', text: 'やめる', onclick: () => dlg.close() });
     dlg.append(
@@ -36,11 +40,34 @@ export function confirmDialog({ title, body, okLabel = 'OK', danger = false }) {
       el('p', { text: body }),
       el('div', { class: 'dialog-actions' }, cancel, ok),
     );
-    dlg.addEventListener('close', () => { dlg.remove(); resolve(result); });
+    // 1 回だけ完了させる（閉じた・片づけたの どちらからでも）
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      openDialogs.delete(entry);
+      dlg.removeEventListener('close', onClose);
+      if (dlg.open) dlg.close();
+      dlg.remove();
+      resolve(value);
+    };
+    const onClose = () => finish(result);
+    const entry = { finish };
+    openDialogs.add(entry);
+    dlg.addEventListener('close', onClose);
     document.body.append(dlg);
     dlg.showModal();
     cancel.focus(); // 間違って押しても実行されない側に置く
   });
+}
+
+// 開いている確認ダイアログを、すべて取り消し（false）として閉じる
+export function closeAllDialogs() {
+  for (const entry of [...openDialogs]) entry.finish(false);
+}
+
+// 画面が切りかわったら（ブラウザの「戻る」も）、前の画面のダイアログを残さない
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+  window.addEventListener('hashchange', closeAllDialogs);
 }
 
 const CHIP_ICONS = { ok: '✓', warn: '!', danger: '■', info: 'i' };

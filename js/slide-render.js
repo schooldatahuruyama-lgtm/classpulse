@@ -1,6 +1,7 @@
 // スライドを 16:9 の枠に描く。編集・発表・生徒の画面で共通に使う。
 // 文字は textContent で出す。画像の src は教材の images のデータ URL だけ。
 import { el } from './ui.js';
+import { clampItem } from './model.js';
 
 // 文字の大きさ（枠の幅に対する %）
 export const TEXT_SIZE_PCT = { s: 2.5, m: 4, l: 6, xl: 9 };
@@ -32,18 +33,13 @@ function watchWidth(frame) {
   ro.observe(frame);
 }
 
-const clamp01 = (v) => {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return 0;
-  return Math.min(1, Math.max(0, n));
-};
-
-// 要素の位置と大きさ（割合）を style に置く
+// 要素の位置と大きさ（割合）を style に置く。保存された値がおかしくても、枠の中に最小の大きさで出す
 export function placeItem(node, item) {
-  node.style.left = `${clamp01(item.x) * 100}%`;
-  node.style.top = `${clamp01(item.y) * 100}%`;
-  node.style.width = `${clamp01(item.w) * 100}%`;
-  node.style.height = `${clamp01(item.h) * 100}%`;
+  const { x, y, w, h } = clampItem(item);
+  node.style.left = `${x * 100}%`;
+  node.style.top = `${y * 100}%`;
+  node.style.width = `${w * 100}%`;
+  node.style.height = `${h * 100}%`;
 }
 
 // 文字の見た目（大きさ・太字・色・そろえ）を style に置く。編集中の入力欄にも使う

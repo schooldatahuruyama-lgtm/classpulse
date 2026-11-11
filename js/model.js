@@ -41,6 +41,22 @@ export function createTextItem(id) {
   };
 }
 
+// 要素の最小の大きさ（キャンバスの幅・高さに対する割合）
+export const MIN_ITEM_SIZE = 0.05;
+
+// 要素を枠の中に収める（大きさを MIN_ITEM_SIZE〜1 にしてから、x は 0〜1-w、y は 0〜1-h）。
+// 数でない値は文字の箱の既定値にする。元の要素は書きかえない
+export function clampItem(item) {
+  const src = item && typeof item === 'object' ? item : {};
+  const d = createTextItem('');
+  const num = (v, def) => (typeof v === 'number' && Number.isFinite(v) ? v : def);
+  const w = Math.min(1, Math.max(MIN_ITEM_SIZE, num(src.w, d.w)));
+  const h = Math.min(1, Math.max(MIN_ITEM_SIZE, num(src.h, d.h)));
+  const x = Math.min(1 - w, Math.max(0, num(src.x, d.x)));
+  const y = Math.min(1 - h, Math.max(0, num(src.y, d.y)));
+  return { ...src, x, y, w, h };
+}
+
 // afterId が無い（または見つからない）ときは最後に足す
 export function addSlide(deck, slide, id, afterId) {
   const order = [...deck.order];
@@ -117,7 +133,9 @@ function normalizeSlide(raw) {
       resultMode: s.resultMode === 'live' ? 'live' : 'manual',
     };
   }
-  return { ...s, type: 'content', items: toArray(s.items) };
+  // 保存された位置が枠の外・大きさ 0 でも、表示と編集で困らないように直す
+  const items = toArray(s.items).map((it) => (it && typeof it === 'object' ? clampItem(it) : it));
+  return { ...s, type: 'content', items };
 }
 
 export function normalizeDeck(raw) {

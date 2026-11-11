@@ -1,6 +1,6 @@
 // スライド編集の画面（#/edit/<deckId>）。上の帯・左の列（スライド一覧）・中央（キャンバス）・右の列（設定）。
 // 教材は model.js の関数で新しい値に置きかえ、変更のたびに自動保存へ渡す（その場で書きかえない）。
-import { el, confirmDialog, statusChip } from '../ui.js';
+import { el, confirmDialog, closeAllDialogs, statusChip, toast } from '../ui.js';
 import { CONFIG } from '../config.js';
 import {
   newId, createSlide, createTextItem, addSlide, removeSlide, moveSlide, duplicateSlide,
@@ -12,15 +12,44 @@ import { compressImage, dataUrlBytes } from '../image.js';
 import { mountCanvas } from './editor/canvas.js';
 import { renderSlideList, updateThumb, addButtons } from './editor/slide-list.js';
 import { renderItemInspector, renderPollSettings, renderPollForm } from './editor/inspector.js';
+import { createBackgroundSaver } from './editor/background-save.js';
 
 const UNTITLED = '無題の教材';
 const LEAVE_TITLE = '保存できていない変更があります。このまま移動しますか？';
+const LEAVE_BODY = '移動しても、このタブを開いている間は保存をやり直します。タブを閉じると、保存できていない変更は失われます。';
 const IMAGE_TOO_BIG = '画像の合計が 5MB を超えるため、追加できません。ほかの画像を減らしてください。';
+const IMAGE_FAILED = '画像を読み込めませんでした。別の画像を選んでください。';
+const IMAGE_SLIDE_GONE = 'スライドが削除されたため、画像を追加できませんでした。';
 const THUMB_DELAY_MS = 250;
 
 // 保存する形（教材名が空なら「無題の教材」）
 function forSave(deck) {
   return { ...deck, title: String(deck.title || '').trim() === '' ? UNTITLED : deck.title };
+}
+
+// 画面を離れたあとの保存（アプリを開いている間、1 つだけ）
+function onBackgroundUnload(ev) {
+  ev.preventDefault();
+  ev.returnValue = '';
+}
+let bgSaver = null;
+function backgroundSaver() {
+  if (!bgSaver) {
+    bgSaver = createBackgroundSaver({
+      setTimeout: (fn, ms) => window.setTimeout(fn, ms),
+      clearTimeout: (t) => window.clearTimeout(t),
+      retryMs: CONFIG.autosaveRetryMs,
+      onGuard: (on) => {
+        if (on) window.addEventListener('beforeunload', onBackgroundUnload);
+        else window.removeEventListener('beforeunload', onBackgroundUnload);
+      },
+      onEvent: (kind, title) => {
+        if (kind === 'saved') toast('保存しました。');
+        else toast(`「${title}」の変更をまだ保存できていません。通信が戻ると自動で保存します。`);
+      },
+    });
+  }
+  return bgSaver;
 }
 
 // どのスライドからも使われていない画像を外す
@@ -69,6 +98,15 @@ export function mount(root, ctx) {
 
   async function load() {
     root.replaceChildren(el('p', { class: 'loading', role: 'status', text: '読み込み中…' }));
+    // 前に開いたときの保存がまだなら、その（新しい）内容から始める
+    const bg = backgroundSaver();
+    await bg.settle(deckId);
+    if (!alive) return;
+    const adopted = bg.adopt(deckId);
+    if (adopted) {
+      stopEditor = startEditor(root, ctx, deckId, adopted, { adopted: true });
+      return;
+    }
     let deck;
     try {
       deck = await ctx.repo.loadDeck(deckId);
@@ -94,13 +132,16 @@ export function mount(root, ctx) {
   };
 }
 
-function startEditor(root, ctx, deckId, initialDeck) {
+function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
   let alive = true;
   let saveState = 'saved';
   let leaving = false;
   let starting = false;
   let canvas = null;
   let thumbTimer = null;
+  let imageTask = null;              // 画像の追加中の Promise（同時に 1 つだけ）
+  let flushDone = Promise.resolve(); // 画面を離れたときの最後の保存
+  const saveDeck = (deck) => ctx.repo.saveDeck(deckId, forSave(deck), Date.now());
 
   const state = {
     deck: initialDeck,
@@ -112,7 +153,7 @@ function startEditor(root, ctx, deckId, initialDeck) {
   // ---- 自動保存 ----
   const saveBox = el('div', { class: 'ed-save', 'aria-live': 'polite' });
   const autosaver = createAutosaver({
-    save: (deck) => ctx.repo.saveDeck(deckId, forSave(deck), Date.now()),
+    save: saveDeck,
     delayMs: CONFIG.autosaveDelayMs,
     maxWaitMs: CONFIG.autosaveMaxWaitMs,
     retryMs: CONFIG.autosaveRetryMs,
@@ -303,28 +344,37 @@ function startEditor(root, ctx, deckId, initialDeck) {
       change(updateSlide(state.deck, state.slideId, { ...slide, items: [...slide.items, item] }), { thumb: true, center: true, side: true });
     },
 
-    // 画像を縮めて足す。足せなかったときは画面に出す文を返す
-    async addImage(file) {
+    isImageBusy: () => imageTask !== null,
+
+    // 画像を縮めて足す（同時に 1 つだけ。発表の準備中は受けつけない）。
+    // 途中で画面を離れても、選んだ画像は教材に入れて、画面の外の保存で保存する
+    addImage(file) {
+      if (imageTask || starting) return;
       const slideId = state.slideId;
-      let url;
-      try {
-        url = await compressImage(file, { maxEdge: CONFIG.image.maxEdge, maxBytes: CONFIG.image.maxBytes });
-      } catch {
-        return '画像を読み込めませんでした。別の画像を選んでください。';
-      }
-      if (!alive) return null;
-      if (deckImageBytes(state.deck) + dataUrlBytes(url) > CONFIG.image.deckMaxBytes) return IMAGE_TOO_BIG;
-      const size = await imageSize(url);
-      const slide = state.deck.slides[slideId];
-      if (!alive || !slide || slide.type !== 'content') return null; // 縮めている間にスライドが消えた
-      const imageId = newId();
-      const item = { id: newId(), kind: 'image', ...imageGeometry(size), imageId };
-      let next = { ...state.deck, images: { ...state.deck.images, [imageId]: url } };
-      next = updateSlide(next, slideId, { ...slide, items: [...slide.items, item] });
-      if (canvas) canvas.finishEdit();
-      if (state.slideId === slideId) { state.itemId = item.id; state.editingId = null; }
-      change(next, { list: state.slideId !== slideId, thumb: true, center: state.slideId === slideId, side: state.slideId === slideId });
-      return null;
+      setImageBusy(true);
+      imageTask = (async () => {
+        let message = null;
+        try {
+          let url;
+          try {
+            url = await compressImage(file, { maxEdge: CONFIG.image.maxEdge, maxBytes: CONFIG.image.maxBytes });
+          } catch {
+            message = IMAGE_FAILED;
+            return;
+          }
+          // 先に一度確かめる（大きさを測る手間を省く）。本当の検査は applyImage の中
+          if (deckImageBytes(state.deck) + dataUrlBytes(url) > CONFIG.image.deckMaxBytes) { message = IMAGE_TOO_BIG; return; }
+          const size = await imageSize(url);
+          message = applyImage(slideId, url, size);
+        } catch {
+          message = IMAGE_FAILED;
+        } finally {
+          imageTask = null;
+          setImageBusy(false);
+          if (message) showImageError(message);
+        }
+      })();
+      backgroundSaver().track(deckId, imageTask);
     },
 
     // アンケートの一部を変える（入力欄はそのまま。縮小表示だけ描き直す）
@@ -335,6 +385,47 @@ function startEditor(root, ctx, deckId, initialDeck) {
     },
   };
 
+  // ---- 画像の追加 ----
+  function setImageBusy(busy) {
+    if (alive && canvas) canvas.setImageBusy(busy);
+  }
+
+  function showImageError(message) {
+    if (alive && canvas) canvas.showImageError(message);
+    else toast(message);
+  }
+
+  // 縮めた画像を教材に入れる。5MB の検査から書きかえまでの間に await を挟まない。
+  // 足せなかったときは画面に出す文を返す
+  function applyImage(slideId, url, size) {
+    if (deckImageBytes(state.deck) + dataUrlBytes(url) > CONFIG.image.deckMaxBytes) return IMAGE_TOO_BIG;
+    const slide = state.deck.slides[slideId];
+    if (!slide || slide.type !== 'content') return IMAGE_SLIDE_GONE;
+    const imageId = newId();
+    const item = { id: newId(), kind: 'image', ...imageGeometry(size), imageId };
+    let next = { ...state.deck, images: { ...state.deck.images, [imageId]: url } };
+    next = updateSlide(next, slideId, { ...slide, items: [...slide.items, item] });
+    if (!alive) {
+      // 画面を離れたあと: 最後の保存（flushDone）が済んでから、画面の外で保存する
+      state.deck = next;
+      backgroundSaver().hand(deckId, {
+        deck: next, save: saveDeck, title: forSave(next).title, failed: saveState === 'failed',
+        after: flushDone.then(() => false, () => false),
+      });
+      return null;
+    }
+    if (canvas) canvas.finishEdit();
+    const here = state.slideId === slideId;
+    if (here) { state.itemId = item.id; state.editingId = null; }
+    change(next, { list: !here, thumb: true, center: here, side: here });
+    return null;
+  }
+
+  async function waitImage() {
+    const t = imageTask;
+    if (t) await t.catch(() => {});
+  }
+
   // ---- 画面を離れる・発表を開始 ----
   function showMessage(...children) {
     messages.replaceChildren(el('div', { class: 'ed-message card' }, ...children,
@@ -344,10 +435,11 @@ function startEditor(root, ctx, deckId, initialDeck) {
   // 保存を待ち、失敗していれば確かめる。移ってよければ true
   async function readyToLeave() {
     if (canvas) canvas.finishEdit();
+    await waitImage(); // 読みこみ中の画像を教材に入れてから保存する
     await autosaver.flush();
     if (!alive) return false;
     if (saveState !== 'failed') return true;
-    return confirmDialog({ title: LEAVE_TITLE, body: '移動すると、保存できていない変更は失われます。', okLabel: '移動する', danger: true });
+    return confirmDialog({ title: LEAVE_TITLE, body: LEAVE_BODY, okLabel: '移動する', danger: true });
   }
 
   async function goTo(name, params) {
@@ -367,6 +459,9 @@ function startEditor(root, ctx, deckId, initialDeck) {
     presentBtn.textContent = '準備しています…';
     messages.replaceChildren();
     try {
+      // 読みこみ中の画像が入った教材で始める（starting の間は新しい画像を受けつけない）
+      await waitImage();
+      if (!alive) return;
       const r = await runStartPresenting({
         ctx, deckId, deck: forSave(state.deck), beforeStart: readyToLeave, isAlive: () => alive,
       });
@@ -420,14 +515,28 @@ function startEditor(root, ctx, deckId, initialDeck) {
   renderCenter();
   renderSide();
 
+  // 前の画面で保存できていなかった内容を引きついだときは、すぐ保存する
+  if (adopted) {
+    autosaver.touch(state.deck);
+    autosaver.retry();
+  }
+
   return () => {
+    closeAllDialogs();
     if (canvas) canvas.finishEdit();
     document.removeEventListener('click', onLinkClick, true);
     window.removeEventListener('beforeunload', onBeforeUnload);
     document.removeEventListener('visibilitychange', onVisibility);
     if (thumbTimer !== null) window.clearTimeout(thumbTimer);
-    // 最後の変更を 1 回だけ保存する（失敗しても、離れたあとは再試行しない）
-    autosaver.flush();
-    alive = false;
+    const unsaved = autosaver.hasPending() || saveState === 'failed';
+    alive = false; // これより後、この画面の自動保存は再試行しない（画面の外の保存が引きつぐ）
+    flushDone = autosaver.flush();
+    if (unsaved) {
+      // 最後の保存が済めばそれで終わり。失敗したら、画面の外の保存が再試行を続ける
+      backgroundSaver().hand(deckId, {
+        deck: state.deck, save: saveDeck, title: forSave(state.deck).title, failed: saveState === 'failed',
+        after: flushDone.then(() => saveState === 'saved' && !autosaver.hasPending(), () => false),
+      });
+    }
   };
 }
