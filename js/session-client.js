@@ -48,6 +48,8 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
     } catch {
       throw new NetError('network', '状態を確かめられません'); // 締切の証拠がないので断定しない
     }
+    // 読んでいる間に授業が終わったかもしれない。終わっていたら、回答は読まず、結果は outbox が未確認にする
+    if (ended) throw new NetError('network', '授業が終わりました');
     const poll = latest && latest.polls ? latest.polls[slideId] : null;
     const isCurrent = latest && latest.current && latest.current.slideId === slideId;
     if (latest && latest.state === 'ended') {
@@ -71,6 +73,8 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
     } catch {
       throw new NetError('network', '受信結果を確かめられません'); // 確かめられるまで保留
     }
+    // 読んでいる間に授業が終わったら、「無い」は削除されただけかもしれないので結果を使わない
+    if (ended) throw new NetError('network', '授業が終わりました');
     if (mine && Number.isInteger(mine.choice)) {
       const cur = pub && pub.current;
       if (mine.choice !== choice && cur && cur.slideId === slideId) selected = mine.choice;
@@ -117,7 +121,7 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
         } catch (e) {
           if (!(e instanceof NetError) || e.code !== 'denied') continue; // 読めない。あとでやり直す
         }
-        if (stopped) return;
+        if (stopped || ended) return; // 終了をまたいだ照合は使わない
         const server = mine && Number.isInteger(mine.choice) ? mine.choice : null;
         if (outbox.settle(sid, slideId, server)) {
           const cur = pub && pub.current;

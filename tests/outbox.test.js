@@ -244,3 +244,45 @@ test('freeze は保留を未確認にし、送信済みと拒否は変えず、�
   await ob.flush('s');
   assert.equal(calls.length, n);
 });
+
+test('終了時、送信中に選びなおしたものは追加で送らず、最初の送信が成功すれば sent（送った値）', async () => {
+  const gates = [];
+  const { send, calls } = makeSender(() => new Promise((resolve, reject) => gates.push({ resolve, reject })));
+  const ob = createOutbox({ storage: fakeStorage(), send });
+  const p1 = ob.put('s', 'q1', 1);
+  const p2 = ob.put('s', 'q1', 0);
+  ob.freeze('s');
+  assert.deepEqual(ob.get('s', 'q1'), { choice: 1, state: 'unconfirmed' }); // 送信中は未確認として見せる
+  gates[0].resolve();
+  await Promise.all([p1, p2]);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(ob.get('s', 'q1'), { choice: 1, state: 'sent' });
+});
+
+test('終了時、最初の送信が失敗したら unconfirmed で、追加の送信もしない', async () => {
+  const gates = [];
+  const { send, calls } = makeSender(() => new Promise((resolve, reject) => gates.push({ resolve, reject })));
+  const ob = createOutbox({ storage: fakeStorage(), send });
+  const p1 = ob.put('s', 'q1', 1);
+  const p2 = ob.put('s', 'q1', 0);
+  ob.freeze('s');
+  gates[0].reject(new NetError('network'));
+  await Promise.all([p1, p2]);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(ob.get('s', 'q1'), { choice: 1, state: 'unconfirmed' });
+});
+
+test('終了後に拒否の結果が届いても未確認で、順番待ちのものは即未確認', async () => {
+  const gates = [];
+  const { send, calls } = makeSender(() => new Promise((resolve, reject) => gates.push({ resolve, reject })));
+  const ob = createOutbox({ storage: fakeStorage(), send });
+  const old = ob.put('s', 'q1', 1);
+  ob.clear('s');
+  const fresh = ob.put('s', 'q1', 0); // 古い送信の後ろで順番待ち
+  ob.freeze('s');
+  assert.deepEqual(ob.get('s', 'q1'), { choice: 0, state: 'unconfirmed' });
+  gates[0].reject(new NetError('denied'));
+  await Promise.all([old, fresh]);
+  assert.equal(calls.length, 1);
+  assert.equal(ob.get('s', 'q1').state, 'unconfirmed');
+});

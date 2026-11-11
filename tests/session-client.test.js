@@ -613,3 +613,67 @@ test('送信中に締切が届き、届いていなければ rejected', async ()
   await settle();
   assert.equal(t.last().answer.state, 'rejected');
 });
+
+// 読み取りを gate が開くまで止める。pub は止める前の写しを返す（終了前の状態）。回答は開いてから読む
+function holdRead(net, kind) {
+  const origGet = net.get;
+  const reads = [];
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  let held = false;
+  net.get = async (path) => {
+    const isPub = path === PUB;
+    const isAnswer = path.includes('/inbox/answers/');
+    if (isAnswer) reads.push(path);
+    if (!held && ((kind === 'pub' && isPub) || (kind === 'answer' && isAnswer))) {
+      held = true;
+      const snap = isPub ? await origGet(path) : null;
+      await gate;
+      return isPub ? snap : origGet(path);
+    }
+    return origGet(path);
+  };
+  return { release, reads };
+}
+
+test('拒否後の pub の読み取り中に授業が終わり回答も消えても、未確認になり回答は読まない', async () => {
+  const t = setup();
+  await t.ready();
+  await t.client.start();
+  await toS2(t);
+  t.client.select(1);
+  t.holdUpdates();
+  await t.teacher(closeAllPatch); // 画面は受付中のまま
+  const h = holdRead(t.net, 'pub');
+  const p = t.client.submit(); // 拒否 → pub を読み直す（止まる）
+  await settle();
+  t.releaseUpdates();
+  await t.teacher(endPatch);
+  await t.net.remove(`sessions/${SID}/inbox`);
+  h.release(); // 終了前（closed）の写しが返る
+  await p;
+  await settle();
+  assert.equal(t.last().phase, 'ended');
+  assert.deepEqual(t.last().answer, { choice: 1, state: 'unconfirmed' });
+  assert.equal(h.reads.length, 0);
+});
+
+test('回答の読み取り中に授業が終わり回答が消えても、rejected ではなく未確認', async () => {
+  const t = setup();
+  await t.ready();
+  await t.client.start();
+  await toS2(t);
+  t.client.select(1);
+  t.holdUpdates();
+  await t.teacher(closeAllPatch);
+  const h = holdRead(t.net, 'answer');
+  const p = t.client.submit(); // 拒否 → 締切と分かる → 自分の回答を読む（止まる）
+  await settle();
+  t.releaseUpdates();
+  await t.teacher(endPatch);
+  await t.net.remove(`sessions/${SID}/inbox`);
+  h.release(); // 削除後なので null が返る
+  await p;
+  await settle();
+  assert.deepEqual(t.last().answer, { choice: 1, state: 'unconfirmed' });
+});

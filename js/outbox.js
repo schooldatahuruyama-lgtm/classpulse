@@ -4,6 +4,10 @@
 //        'rejected'（規則に拒否された。締切など。送り直さない）、
 //        'failed'（そのほかの失敗、または保存できていないままつながらなかったもの。手動で retry する）、
 //        'unconfirmed'（授業が終わったあとに、届いたか確かめられないもの。送り直さない。freeze で決まる）
+// 不変条件: freeze(sid) のあとは、新しい送信を始めない。すでに送信中のものが成功したら sent、
+// それ以外（保留・失敗・拒否・照合の結果・送られなかった選びなおし）は unconfirmed になる。
+// 終了後の「回答が無い」は、受信されなかったことの証拠にならない（先生が回答を消すため）。
+// freeze の前に sent / rejected だったものは変えない。
 // send は成功したら何も返さないか、サーバーに別の回答が残っていたとき { choice } を返す（その値を送信済みとする）。
 const STATES = new Set(['sending', 'sent', 'queued', 'rejected', 'failed', 'unconfirmed']);
 
@@ -40,11 +44,15 @@ export function createOutbox({ storage, send, onSettle = () => {}, canSend = () 
   // 保存できたかを返す
   function save(sid) {
     const out = {};
-    for (const [k, e] of Object.entries(bucket(sid).data)) out[k] = { choice: e.choice, state: e.state };
+    const b = bucket(sid);
+    for (const [k, e] of Object.entries(b.data)) {
+      out[k] = { choice: e.choice, state: b.frozen && e.state === 'sending' ? 'unconfirmed' : e.state };
+    }
     try { storage.setItem(keyOf(sid), JSON.stringify(out)); return true; } catch { return false; }
   }
 
-  const copy = (e) => (e ? { choice: e.choice, state: e.state } : null);
+  // 終了後は、まだ決まっていない送信中のものも未確認として見せる（成功すれば sent になる）
+  const view = (b, e) => (e ? { choice: e.choice, state: b.frozen && e.state === 'sending' ? 'unconfirmed' : e.state } : null);
 
   function classify(e) {
     if (e && e.name === 'NetError' && e.code === 'network') return 'queued';
@@ -65,7 +73,14 @@ export function createOutbox({ storage, send, onSettle = () => {}, canSend = () 
         for (;;) {
           const entry = b.data[slideId];
           if (!entry || entry.state !== 'sending') break;
+          if (b.frozen) { // 終わった授業へは、新しい送信を始めない
+            entry.state = 'unconfirmed';
+            save(sid);
+            onSettle(sid, slideId);
+            break;
+          }
           const sentChoice = entry.choice;
+          entry.inflight = sentChoice;
           let result = 'sent';
           let confirmed = null;
           try {
@@ -76,11 +91,13 @@ export function createOutbox({ storage, send, onSettle = () => {}, canSend = () 
           }
           if (buckets.get(sid) !== b) break; // 送信中に clear された
           const now = b.data[slideId];
-          if (!now) break;
+          if (!now || now.state !== 'sending') break;
           if (now.choice !== sentChoice) continue; // 送信中に選びなおされた。新しい値を送る
           if (confirmed !== null) now.choice = confirmed;
-          if (b.frozen) { // 授業が終わった。届いたか確かめられないものは未確認にして、送り直さない
-            now.state = result === 'sent' || result === 'rejected' ? result : 'unconfirmed';
+          now.inflight = null;
+          if (b.frozen) { // 授業が終わった。実際に送った値が成功したときだけ sent。それ以外は未確認
+            now.choice = sentChoice;
+            now.state = result === 'sent' && confirmed === null ? 'sent' : 'unconfirmed';
             save(sid);
             onSettle(sid, slideId);
             break;
@@ -100,7 +117,7 @@ export function createOutbox({ storage, send, onSettle = () => {}, canSend = () 
         b.active.delete(slideId);
         b.want.delete(slideId);
       }
-      return copy(buckets.get(sid) === b ? b.data[slideId] : null);
+      return buckets.get(sid) === b ? view(b, b.data[slideId]) : null;
     })();
     b.active.set(slideId, run);
     const tail = run.then(() => {}, () => {}).then(() => { if (chains.get(chainKey) === tail) chains.delete(chainKey); });
@@ -111,7 +128,13 @@ export function createOutbox({ storage, send, onSettle = () => {}, canSend = () 
   return {
     async put(sid, slideId, choice) {
       const b = bucket(sid);
-      b.data[slideId] = { choice, state: 'sending', unsaved: false };
+      if (b.frozen) { // 終わった授業には送らない
+        b.data[slideId] = { choice, state: 'unconfirmed', unsaved: false };
+        save(sid);
+        return view(b, b.data[slideId]);
+      }
+      const inflight = b.data[slideId] ? b.data[slideId].inflight ?? null : null; // 送信中のものは引き継ぐ
+      b.data[slideId] = { choice, state: 'sending', unsaved: false, inflight };
       b.data[slideId].unsaved = !save(sid);
       return drive(sid, slideId);
     },
@@ -139,7 +162,7 @@ export function createOutbox({ storage, send, onSettle = () => {}, canSend = () 
     async retry(sid, slideId) {
       const b = bucket(sid);
       const e = b.data[slideId];
-      if (!e || e.state !== 'failed') return copy(e);
+      if (!e || e.state !== 'failed') return view(b, e);
       e.state = 'sending';
       if (save(sid)) e.unsaved = false;
       return drive(sid, slideId);
@@ -150,15 +173,22 @@ export function createOutbox({ storage, send, onSettle = () => {}, canSend = () 
       const b = bucket(sid);
       b.frozen = true;
       let changed = false;
-      for (const e of Object.values(b.data)) {
+      for (const [slideId, e] of Object.entries(b.data)) {
         if (e.state === 'queued' || e.state === 'failed') { e.state = 'unconfirmed'; changed = true; }
+        else if (e.state === 'sending') {
+          if (b.active.has(slideId) && Number.isInteger(e.inflight)) {
+            e.choice = e.inflight; // 実際に送った値。結果は送信が終わったときに決まる
+          } else { e.state = 'unconfirmed'; changed = true; } // まだ送っていない（順番待ち）
+        }
       }
+      changed = true;
       if (changed) save(sid);
       return changed;
     },
     // 締切・終了が分かった質問の、送れていない回答（queued / failed）を rejected にする。変えたら true
     rejectPending(sid, isClosed) {
       const b = bucket(sid);
+      if (b.frozen) return false;
       let changed = false;
       for (const [slideId, e] of Object.entries(b.data)) {
         if ((e.state === 'queued' || e.state === 'failed') && isClosed(slideId)) {
@@ -177,15 +207,17 @@ export function createOutbox({ storage, send, onSettle = () => {}, canSend = () 
     },
     // サーバーとの照合結果を反映する。choice が数ならその値を送信済みに、null なら rejected。変えたら true
     settle(sid, slideId, choice) {
-      const e = bucket(sid).data[slideId];
-      if (!e || (e.state !== 'queued' && e.state !== 'failed')) return false;
+      const b = bucket(sid);
+      const e = b.data[slideId];
+      if (b.frozen || !e || (e.state !== 'queued' && e.state !== 'failed')) return false;
       if (Number.isInteger(choice)) { e.choice = choice; e.state = 'sent'; } else e.state = 'rejected';
       e.unsaved = false;
       save(sid);
       return true;
     },
     get(sid, slideId) {
-      return copy(bucket(sid).data[slideId]);
+      const b = bucket(sid);
+      return view(b, b.data[slideId]);
     },
     clear(sid) {
       buckets.delete(sid);
