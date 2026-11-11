@@ -65,6 +65,8 @@ function setup() {
   const hasResults = (patch) => Object.keys(patch).some((k) => k.startsWith('results/') && patch[k] !== null);
   net.update = async (path, patch) => {
     if (path.endsWith('/pub')) updates.push({ at: clock.now(), patch });
+    // pub への書きこみをすべて保留する（スライドの移動の通信待ちを作る）
+    if (path.endsWith('/pub') && ctl.holdPub) await ctl.holdPub();
     // 結果の書きこみを保留する（呼ばれた時刻が送信時刻。保留が解けたあとで届く）
     if (path.endsWith('/pub') && hasResults(patch) && ctl.holdResults) await ctl.holdResults();
     return origUpdate(path, patch);
@@ -577,4 +579,64 @@ test('A を止め、B を開いて待たせたまま B も止めても、C は A
   assert.equal(sessionOf(env, sid).pub.results, undefined);
   assert.equal(sessionOf(env, sid).pub.polls.s2.resultsVisible, false);
   c.stop();
+});
+
+// s1 資料、s2・s3 とも「先生が表示するまで出さない」アンケート
+function manualDeck() {
+  let d = createDeck('テスト教材', 1000);
+  d = addSlide(d, createSlide('content'), 's1');
+  d = addSlide(d, { ...createSlide('poll'), question: '問1', options: ['赤', '青'], resultMode: 'manual' }, 's2');
+  d = addSlide(d, { ...createSlide('poll'), question: '問2', options: ['1', '2', '3'], resultMode: 'manual' }, 's3');
+  return d;
+}
+
+// s2 にいる状態で「次へ」を通信待ちにし、その間に s2 への操作を頼む
+async function opWhileMoving(op) {
+  const env = setup();
+  const sid = await begin(env, manualDeck());
+  const { host } = await openHost(env, sid);
+  await host.next(); await host.next();
+  await answer(env, sid, 's2', 'u1', 0);
+  const g = gate();
+  env.ctl.holdPub = g.wait;
+  const moving = host.next();
+  await settle();
+  const acting = op(host);
+  await settle();
+  env.ctl.holdPub = null;
+  g.open();
+  await Promise.all([moving, acting]);
+  await answer(env, sid, 's3', 'u1', 1);
+  await env.clock.advance(5000);
+  host.stop();
+  return sessionOf(env, sid).pub;
+}
+
+test('「次へ」の通信待ちの間に押した「結果を表示」（s2 向け）は、移動先の s3 を公開しない', async () => {
+  const pub = await opWhileMoving((host) => host.setResultsVisible(true, 's2'));
+  assert.deepEqual(pub.current, { slideId: 's3', index: 2 });
+  assert.equal(pub.polls.s3.resultsVisible, false);
+  assert.equal(pub.results, undefined);
+  assert.equal(pub.polls.s2.resultsVisible, false); // s2 はもう今のスライドではないので、何も書かない
+  assert.equal(pub.polls.s2.status, 'closed');
+});
+
+test('「次へ」の通信待ちの間に押した「受付を止める」（s2 向け）は、移動先の s3 を止めない', async () => {
+  const pub = await opWhileMoving((host) => host.setPaused(true, 's2'));
+  assert.deepEqual(pub.current, { slideId: 's3', index: 2 });
+  assert.equal(pub.polls.s3.status, 'open');
+  assert.equal(pub.polls.s2.status, 'closed');
+});
+
+test('slideId を渡し、それが今のスライドなら、受付の停止と結果の表示はそのまま効く', async () => {
+  const env = setup();
+  const sid = await begin(env, manualDeck());
+  const { host } = await openHost(env, sid);
+  await host.next(); await host.next();
+  await host.setPaused(true, 's2');
+  assert.equal(sessionOf(env, sid).pub.polls.s2.status, 'paused');
+  await host.setResultsVisible(true, 's2');
+  assert.equal(sessionOf(env, sid).pub.polls.s2.resultsVisible, true);
+  assert.deepEqual(sessionOf(env, sid).pub.results.s2, { counts: [0, 0], total: 0 });
+  host.stop();
 });

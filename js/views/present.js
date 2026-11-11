@@ -1,11 +1,12 @@
 // 発表の画面（#/present/<sid>）。先生の iPad の画面がそのまま生徒に映る。
 // このため、ナビゲーション・メールアドレス・生徒の ID・非公開の集計は画面に出さない。
 // 結果を非公開にしている質問は「回答 N 人 ／ 参加 M 人」だけを出し、件数の内訳は DOM に入れない。
-import { el, confirmDialog, statusChip, resultBars, toast } from '../ui.js';
+import { el, confirmDialog, closeAllDialogs, statusChip, resultBars, toast } from '../ui.js';
 import { renderSlide } from '../slide-render.js';
 import { createSessionHost } from '../session-host.js';
 
 const FAIL = '通信できなかったため、進められませんでした。';
+const ENDING = '授業を終了しています…';
 const JOIN_TITLE = 'カメラで QR コードを読んで参加してください';
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const QR_MARGIN = 4; // QR コードのまわりの白い余白（モジュールの数）
@@ -67,7 +68,10 @@ export function mount(root, ctx) {
   let live = null; // 発表中の画面の部品（最初に live になったときに作る）
   let shownKey = null; // 中央に出しているもの（'join' か スライド ID）
   let qrDialog = null;
-  const pending = { pause: false, results: false, end: false };
+  const pending = { pause: false, results: false };
+  let moving = 0; // 通信待ちのスライド移動の数（その間は受付・結果の操作を押せない）
+  // 授業の終了: 'idle'（まだ）、'running'（後片づけの途中）、'failed'（終了したが後片づけが残った）、'done'（済んだ）
+  let endState = 'idle';
 
   const host = createSessionHost({
     net: ctx.net,
@@ -79,11 +83,43 @@ export function mount(root, ctx) {
     clearTimeout: (t) => window.clearTimeout(t),
   });
 
-  // 授業履歴（結果）の画面へ。1 回だけ
-  function goHistory() {
+  // 授業履歴（結果）の画面へ。移れなかったら（通信できないなど）、やり直しのボタンを出す
+  async function goHistory() {
     if (leaving || !alive) return;
     leaving = true;
-    ctx.navigate('result', { sid });
+    try {
+      await ctx.navigate('result', { sid });
+    } catch (e) {
+      console.error(e);
+    }
+    if (!alive) return; // 移れた（この画面は片づけられた）
+    leaving = false;
+    page(el('h2', { text: '授業を終了しました' }),
+      el('p', { role: 'alert', text: '授業履歴を開けませんでした。接続を確かめてください。' }),
+      el('p', {}, el('button', { type: 'button', class: 'btn btn-primary', text: '授業履歴を開く', onclick: goHistory })));
+  }
+
+  // 授業を終える（後片づけまで）。済んでから授業履歴へ移る。途中で画面を離れると後片づけが止まるため
+  async function finishEnd() {
+    if (endState === 'running' || !alive) return;
+    endState = 'running';
+    render();
+    try {
+      await host.end();
+    } catch {
+      if (!alive) return;
+      if (state && state.phase === 'ended') {
+        endState = 'failed'; // 授業は終わったが、後片づけが残った。やり直せる
+      } else {
+        endState = 'idle'; // まだ終わっていない（授業は続いている）
+        toast(FAIL);
+      }
+      render();
+      return;
+    }
+    if (!alive) return;
+    endState = 'done';
+    goHistory();
   }
 
   function page(...children) {
@@ -150,7 +186,12 @@ export function mount(root, ctx) {
     if (!live) return;
     const btn = dir > 0 ? live.nextBtn : live.prevBtn;
     if (isOff(btn) || btn.hidden) return;
-    run(() => (dir > 0 ? host.next() : host.prev()));
+    moving += 1;
+    render();
+    run(() => (dir > 0 ? host.next() : host.prev())).finally(() => {
+      moving -= 1;
+      if (alive) render();
+    });
   }
 
   // 受付の停止・再開と結果の表示は、終わるまで同じボタンを押せなくする
@@ -178,35 +219,26 @@ export function mount(root, ctx) {
   function togglePause() {
     const p = currentPoll();
     if (!p || isOff(live.pauseBtn)) return;
-    once('pause', () => host.setPaused(p.poll.status === 'open'));
+    // 表示しているスライドを渡す（順番が来たときに別のスライドになっていたら、host は何もしない）
+    once('pause', () => host.setPaused(p.poll.status === 'open', p.id));
   }
 
   function toggleResults() {
     const p = currentPoll();
     if (!p || isOff(live.resultsBtn)) return;
-    once('results', () => host.setResultsVisible(!p.poll.resultsVisible));
+    once('results', () => host.setResultsVisible(!p.poll.resultsVisible, p.id));
   }
 
   async function endClass() {
-    if (pending.end || !live || isOff(live.endBtn)) return;
+    if (endState !== 'idle' || !live || isOff(live.endBtn)) return;
     const ok = await confirmDialog({
       title: '授業を終了しますか？',
       body: '参加用のリンクが使えなくなり、生徒の画面は終了の画面になります。結果は授業履歴に残ります。',
       okLabel: '終了する',
       danger: true,
     });
-    if (!ok || !alive || pending.end) return;
-    pending.end = true;
-    render();
-    try {
-      await host.end();
-      goHistory();
-    } catch {
-      if (alive) toast(FAIL);
-    } finally {
-      pending.end = false;
-      if (alive) render();
-    }
+    if (!ok || !alive || endState !== 'idle') return;
+    finishEnd();
   }
 
   // ---- 発表中の画面の骨組み（1 回だけ作り、あとは中身を書きかえる） ----
@@ -231,7 +263,8 @@ export function mount(root, ctx) {
       l.pollGroup,
       el('div', { class: 'pr-group pr-group-side' }, l.count, l.qrBtn),
       el('div', { class: 'pr-group pr-group-end' }, l.endBtn));
-    l.wrap = el('div', { class: 'present' }, l.banner, el('div', { class: 'pr-body' }, l.stage, l.poll), l.bar);
+    l.ending = el('div', { class: 'pr-ending', role: 'status', hidden: true, text: ENDING });
+    l.wrap = el('div', { class: 'present' }, l.banner, l.ending, el('div', { class: 'pr-body' }, l.stage, l.poll), l.bar);
     root.replaceChildren(l.wrap);
     shownKey = null;
     return l;
@@ -259,8 +292,12 @@ export function mount(root, ctx) {
   function updateLive() {
     const l = live;
     const before = document.activeElement;
+    // 切断中と、授業を終了している途中は、操作を押せない
+    const ending = endState === 'running';
     const offline = state.connection === 'disconnected';
+    const off = offline || ending;
     l.banner.hidden = !offline;
+    l.ending.hidden = !ending;
 
     const cur = (state.pub && state.pub.current) || { slideId: '', index: -1 };
     const index = Number.isInteger(cur.index) ? cur.index : -1;
@@ -286,21 +323,22 @@ export function mount(root, ctx) {
     // 下の帯
     l.pos.textContent = index >= 0 ? `${index + 1} / ${total}` : `開始前 / ${total}`;
     l.count.textContent = participantsText();
-    setOff(l.prevBtn, offline || index <= 0);
+    setOff(l.prevBtn, off || index <= 0);
     const atLast = index >= total - 1;
     l.nextBtn.hidden = atLast;
     l.last.hidden = !atLast;
-    setOff(l.nextBtn, offline);
+    setOff(l.nextBtn, off);
 
     l.pollGroup.hidden = !p;
     if (p) {
+      // スライドの移動の通信待ちの間は、どのスライドへの操作か食い違うので押せない
       const status = p.poll.status;
       l.pauseBtn.textContent = status === 'paused' ? '受付を再開' : '受付を止める';
-      setOff(l.pauseBtn, offline || pending.pause || (status !== 'open' && status !== 'paused'));
+      setOff(l.pauseBtn, off || moving > 0 || pending.pause || (status !== 'open' && status !== 'paused'));
       l.resultsBtn.textContent = p.poll.resultsVisible ? '結果をかくす' : '結果を表示';
-      setOff(l.resultsBtn, offline || pending.results || status === 'waiting');
+      setOff(l.resultsBtn, off || moving > 0 || pending.results || status === 'waiting');
     }
-    setOff(l.endBtn, offline || pending.end);
+    setOff(l.endBtn, off);
 
     // 押していたボタンが消えたら、帯の中の押せるボタンへフォーカスを移す
     if (before instanceof HTMLElement && l.bar.contains(before) && !isShown(before)) {
@@ -325,7 +363,18 @@ export function mount(root, ctx) {
         el('p', {}, el('button', { type: 'button', class: 'btn btn-primary', text: 'ホームへ', onclick: () => ctx.navigate('dashboard') })));
       return;
     }
-    if (state.phase === 'ended') { goHistory(); return; }
+    if (state.phase === 'ended') {
+      // 開いたときにもう終わっていた授業は、残りの後片づけを 1 回だけ行ってから授業履歴へ
+      if (endState === 'idle') { finishEnd(); return; }
+      if (endState === 'running') {
+        page(el('p', { class: 'loading', role: 'status', text: ENDING }));
+      } else if (endState === 'failed') {
+        page(el('h2', { text: '授業を終了しました' }),
+          el('p', { role: 'alert', text: '終了の処理が最後まで終わりませんでした。' }),
+          el('p', {}, el('button', { type: 'button', class: 'btn btn-primary', text: 'もう一度', onclick: finishEnd })));
+      }
+      return;
+    }
     if (state.phase !== 'live') return;
     if (!live) live = buildLive();
     updateLive();
@@ -353,6 +402,7 @@ export function mount(root, ctx) {
 
   return () => {
     alive = false;
+    closeAllDialogs(); // 開いたままの確認（授業の終了など）は、取り消しとして閉じる
     document.removeEventListener('keydown', onKey);
     if (qrDialog) { const d = qrDialog; qrDialog = null; d.close(); }
     // 画面を離れるだけ（授業は終わらない）。次に同じ授業を開く host は、この書きこみが済むのを待つ

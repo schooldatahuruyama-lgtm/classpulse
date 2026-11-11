@@ -251,11 +251,20 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
 
     next() { return operate((pub) => nextPatch(pub, state.order)); },
     prev() { return operate((pub) => prevPatch(pub, state.order)); },
-    setPaused(paused) { return operate((pub) => pausePatch(pub, currentSlideId(), paused)); },
-
-    setResultsVisible(visible) {
+    // slideId を渡すと、順番が来た時点でそのスライドが今のスライドでなければ何も書かない
+    // （「次へ」の通信待ちの間に押された操作が、移動先の質問に効かないように）
+    setPaused(paused, slideId) {
       return operate((pub) => {
         const id = currentSlideId();
+        if (slideId !== undefined && slideId !== id) return null;
+        return pausePatch(pub, id, paused);
+      });
+    },
+
+    setResultsVisible(visible, slideId) {
+      return operate((pub) => {
+        const id = currentSlideId();
+        if (slideId !== undefined && slideId !== id) return null;
         const patch = resultsVisiblePatch(pub, id, visible);
         // 公開するときは、今の集計も同時に書く
         if (patch && visible && state.tallies[id]) {
