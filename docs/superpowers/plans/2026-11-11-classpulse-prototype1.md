@@ -271,6 +271,7 @@ sessions/<sid>/
   - `tally(answers: {[uid]:{choice}}|null, optionCount: number): { counts: number[], total: number }`（`choice` が整数でない・範囲外のものは数えない）
   - `percent(count: number, total: number): number`（整数に四捨五入。`total` が 0 なら 0）
   - `applyPatch(pub: Pub, patch: Patch): Pub`（パッチを当てた新しい `pub`。テストと画面の両方で使う）
+  - `closeAllPatch(pub: Pub): Patch|null`（`closed` でない質問をすべて `closed` にする。すべて `closed` なら `null`）
   - `endPatch(pub: Pub): Patch`（`state:'ended'`、`closed` でない質問をすべて `closed`、`results` を消す）
   - `buildHistory(session, inbox: { participants, answers }|null, endedAt: number): History`。`History = { title, deckId, startedAt, endedAt, participants: number, questions: [{ slideId, question, options: string[], counts: number[], total: number }] }`（`questions` は `order` の順で、アンケートのスライドだけ。一度も開かなかった質問も 0 件で入れる）
 
@@ -285,6 +286,7 @@ sessions/<sid>/
   - 「結果をかくすと集計も消す」: `resultsVisiblePatch(pub, 's2', false)` が `{ 'polls/s2/resultsVisible': false, 'results/s2': null }`。
   - 「集計は 1 人 1 件、変な値は数えない」: `tally({ a:{choice:0}, b:{choice:1}, c:{choice:1}, d:{choice:5}, e:{choice:'1'}, f:{} }, 2)` が `{ counts:[1,2], total:3 }`。`tally(null, 2)` が `{ counts:[0,0], total:0 }`。
   - 「割合」: `percent(1,3) === 33`、`percent(2,3) === 67`、`percent(0,0) === 0`。
+  - 「すべて締め切る」: `closeAllPatch` を当てると、`waiting`・`open`・`paused` の質問がすべて `closed` で、`state` は `live` のまま。もう一度呼ぶと `null`。
   - 「授業の終了」: `endPatch` を当てると `state === 'ended'`、すべての質問が `closed`、`results` が無い。
   - 「履歴」: `participants` が人数、`questions` が 2 件で `s2` の `counts` が集計どおり、開かなかった `s3` は `counts:[0,0,0]`、`total:0`。`inbox` が `null` でも落ちない（`participants:0`）。
 - [ ] **Step 2:** `npm test` を実行し、失敗することを確かめる。
@@ -463,7 +465,7 @@ sessions/<sid>/
   - `state = { phase: 'loading'|'live'|'ended'|'not-found', connection, title, order, slides, images, pub: Pub, participants: number, tallies: { [slideId]: { counts, total } } }`
   - 操作は 1 つずつ順に行う（前の書きこみが終わってから次のパッチを作る）。書きこみが成功してから `state.pub` を変える。つながっていないときは `NetError('network')` で失敗し、`state.pub` は変わらない。
   - `inbox` を購読し、変わるたびに `tallies` と `participants` を計算する。`resultsVisible` が `true` の質問は、集計が変わったら `pub/results/<slideId>` に書く（`CONFIG.resultsThrottleMs` に 1 回まで。最後の値は必ず書く）。
-  - `end`: `inbox` を読み直す → `buildHistory` → `repo.saveHistory` → `pub` に `endPatch` → `sessions/<sid>/inbox` と `deck` を消す → `repo.setActive(null)`。履歴の保存に失敗したら、そこで止めて失敗を返す（授業は終わらせない）。
+  - `end`: まず `pub` に `closeAllPatch` を当てて、すべての質問を締め切る（これ以後、規則が新しい回答を拒否する）→ その書きこみが成功してから `inbox` を読み直す → `buildHistory` → `repo.saveHistory` → `pub` に `endPatch` → `sessions/<sid>/inbox` と `deck` を消す → `repo.setActive(null)`。履歴の保存に失敗したら、そこで止めて失敗を返す（`state` は `live` のまま、`inbox` も残す。もう一度 `end` を呼べばやり直せる）。
 
 - [ ] **Step 1:** `tests/session-host.test.js` を書く（`createFakeNet` と代役のタイマー）。
   - 「検査に通らない教材は始められない」: `.reasons` に Task 2 の文。`sessions` に何も書かれない。
@@ -478,7 +480,8 @@ sessions/<sid>/
   - 「つながっていないときは進めない」: `setOnline(false)` → `next()` が `code === 'network'` で失敗、`state.pub.current` は同じ、`state.connection === 'disconnected'`。
   - 「開き直すと続きから」（Review Focus 3）: 2 枚進め、`s2` を公開した状態で `stop()`。同じ `net` で新しい `createSessionHost` を `start()` すると、`current.index === 1`、`polls.s2` は `open` のまま、`pub.results.s2` が残り、`tallies` が計算し直されている。`s2` を締め切ったあとで開き直しても `closed` のまま。
   - 「終了すると履歴が残り、回答と教材の写しが消える」: `teachers/<uid>/history/<sid>` が `buildHistory` の形、`pub.state === 'ended'`、`inbox` と `deck` が無い、`active` が無い。
-  - 「履歴を保存できなければ終わらせない」: `deny` で `history` への書きこみを拒否 → `end()` が失敗し、`pub.state === 'live'`、`inbox` が残る。
+  - 「履歴を保存できなければ終わらせない」: `deny` で `history` への書きこみを拒否 → `end()` が失敗し、`pub.state === 'live'`、`inbox` が残る。そのあと `deny` を外して `end()` を呼ぶと成功する。
+  - 「終了の処理の途中で届いた回答を失わない」: `end()` が質問を締め切ったあと（`inbox` を読む前）に、代役の `net` で `inbox/answers/s2/u9` を直接書く → 履歴の `s2` の集計にその 1 件が入っている。締め切りの書きこみより後に、規則の代わりの `deny`（`open` でなければ拒否）を通して書こうとした回答は拒否される。
   - 「無い授業は not-found」。
 - [ ] **Step 2:** `npm test` を実行し、失敗することを確かめる。
 - [ ] **Step 3:** 実装する。
