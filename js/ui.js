@@ -27,33 +27,54 @@ export function el(tag, props = {}, ...children) {
 // 開いている確認ダイアログ（画面が切りかわったら、取り消しとして片づける）
 const openDialogs = new Set();
 
-// 確認ダイアログ。OK なら true、取り消し・Esc・画面の切りかえなら false
+// 確認ダイアログ。OK なら true、取り消し・Esc・外側のタップ・画面の切りかえなら false。
+// 結果はボタンを押した時点で返す（<dialog> の close イベントが届くのを待たない。
+// 画面が隠れているときなどに close が遅れても、結果は遅れない）。完了は 1 回だけ
 export function confirmDialog({ title, body, okLabel = 'OK', danger = false }) {
   return new Promise((resolve) => {
+    const opener = document.activeElement; // 閉じたらフォーカスを戻す先
     const dlg = el('dialog', { class: 'confirm', 'aria-labelledby': 'confirm-title' });
-    let result = false;
     let done = false;
-    const ok = el('button', { type: 'button', class: danger ? 'btn btn-danger' : 'btn btn-primary', text: okLabel, onclick: () => { result = true; dlg.close(); } });
-    const cancel = el('button', { type: 'button', class: 'btn', text: 'やめる', onclick: () => dlg.close() });
-    dlg.append(
-      el('h2', { id: 'confirm-title', text: title }),
-      el('p', { text: body }),
-      el('div', { class: 'dialog-actions' }, cancel, ok),
-    );
-    // 1 回だけ完了させる（閉じた・片づけたの どちらからでも）
+
     const finish = (value) => {
       if (done) return;
       done = true;
       openDialogs.delete(entry);
       dlg.removeEventListener('close', onClose);
+      dlg.removeEventListener('cancel', onCancel);
+      dlg.removeEventListener('click', onBackdrop);
+      resolve(value);
       if (dlg.open) dlg.close();
       dlg.remove();
-      resolve(value);
+      // 開いた部品がまだ画面にあれば、そこへフォーカスを戻す
+      if (opener && opener !== document.body && opener.isConnected && typeof opener.focus === 'function') {
+        opener.focus();
+      }
     };
-    const onClose = () => finish(result);
+    // Esc（ブラウザの cancel イベント）
+    const onCancel = (ev) => { ev.preventDefault(); finish(false); };
+    // ほかの理由で閉じられたときも、取り消しとして終える
+    const onClose = () => finish(false);
+    // 外側（背景）のタップ: ダイアログの枠の外を押したとき
+    const onBackdrop = (ev) => {
+      if (ev.target !== dlg) return;
+      const r = dlg.getBoundingClientRect();
+      const inside = ev.clientX >= r.left && ev.clientX <= r.right && ev.clientY >= r.top && ev.clientY <= r.bottom;
+      if (!inside) finish(false);
+    };
+
+    const ok = el('button', { type: 'button', class: danger ? 'btn btn-danger' : 'btn btn-primary', text: okLabel, onclick: () => finish(true) });
+    const cancel = el('button', { type: 'button', class: 'btn', text: 'やめる', onclick: () => finish(false) });
+    dlg.append(
+      el('h2', { id: 'confirm-title', text: title }),
+      el('p', { text: body }),
+      el('div', { class: 'dialog-actions' }, cancel, ok),
+    );
     const entry = { finish };
     openDialogs.add(entry);
     dlg.addEventListener('close', onClose);
+    dlg.addEventListener('cancel', onCancel);
+    dlg.addEventListener('click', onBackdrop);
     document.body.append(dlg);
     dlg.showModal();
     cancel.focus(); // 間違って押しても実行されない側に置く
