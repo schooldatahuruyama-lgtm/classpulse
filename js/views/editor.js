@@ -4,10 +4,10 @@ import { el, confirmDialog, statusChip } from '../ui.js';
 import { CONFIG } from '../config.js';
 import {
   newId, createSlide, createTextItem, addSlide, removeSlide, moveSlide, duplicateSlide,
-  updateSlide, validateDeck, deckImageBytes,
+  updateSlide, deckImageBytes,
 } from '../model.js';
 import { createAutosaver } from '../autosave.js';
-import { startSession } from '../session-host.js';
+import { runStartPresenting, reasonsNodes, MSG_ACTIVE, MSG_FAILED } from './start-presenting.js';
 import { compressImage, dataUrlBytes } from '../image.js';
 import { mountCanvas } from './editor/canvas.js';
 import { renderSlideList, updateThumb, addButtons } from './editor/slide-list.js';
@@ -367,25 +367,16 @@ function startEditor(root, ctx, deckId, initialDeck) {
     presentBtn.textContent = '準備しています…';
     messages.replaceChildren();
     try {
-      const reasons = validateDeck(state.deck);
-      if (reasons.length) { showReasons(reasons); return; }
-      if (!(await readyToLeave())) return;
-      const active = await ctx.repo.getActive();
-      if (!alive) return;
-      if (active && active.sid) {
-        showMessage(el('p', { text: '発表中の授業があります。先にその授業を終了してください。' }),
-          el('button', { type: 'button', class: 'btn btn-primary', text: '発表中の授業へ', onclick: () => goTo('present', { sid: active.sid }) }));
-        return;
-      }
-      const sid = await startSession({
-        net: ctx.net, repo: ctx.repo, uid: ctx.auth.user.uid, deckId, deck: forSave(state.deck),
-        now: () => Date.now(), getRandomValues: (a) => crypto.getRandomValues(a),
+      const r = await runStartPresenting({
+        ctx, deckId, deck: forSave(state.deck), beforeStart: readyToLeave, isAlive: () => alive,
       });
-      if (alive) ctx.navigate('present', { sid });
-    } catch (e) {
       if (!alive) return;
-      if (e && Array.isArray(e.reasons)) showReasons(e.reasons);
-      else showMessage(el('p', { text: '発表を開始できませんでした。接続を確かめて、もう一度押してください。' }));
+      if (r.status === 'invalid') showReasons(r.reasons);
+      else if (r.status === 'active') {
+        showMessage(el('p', { text: MSG_ACTIVE }),
+          el('button', { type: 'button', class: 'btn btn-primary', text: '発表中の授業へ', onclick: () => goTo('present', { sid: r.sid }) }));
+      } else if (r.status === 'failed') showMessage(el('p', { text: MSG_FAILED }));
+      else if (r.status === 'started') ctx.navigate('present', { sid: r.sid });
     } finally {
       starting = false;
       presentBtn.disabled = false;
@@ -394,8 +385,7 @@ function startEditor(root, ctx, deckId, initialDeck) {
   }
 
   function showReasons(reasons) {
-    showMessage(el('p', { class: 'ed-message-title', text: '発表を開始できません。次のところを直してください。' }),
-      el('ul', {}, reasons.map((r) => el('li', { text: r }))));
+    showMessage(...reasonsNodes(reasons));
   }
 
   // 先生の骨組みのリンク（ホームなど）も、保存を待ってから移る
