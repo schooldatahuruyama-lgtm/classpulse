@@ -35,3 +35,39 @@ export function fakeClock(start = 0) {
   let t = start;
   return { now: () => t, advance: (ms) => { t += ms; } };
 }
+
+// EventSource の偽物。fakeEventSource() が「クラス」を返す（new で使える）。
+// クラスの .instances に作られた接続が全部残り、.last が最後の接続。
+// 接続側のテスト用操作: open()（接続成功）、fail()（error）、emit(type, data)（named イベント。
+// data が文字列以外なら JSON にして e.data に入れる）。close() すると closed が true になる。
+export function fakeEventSource() {
+  class FakeEventSource {
+    constructor(url) {
+      this.url = String(url);
+      this.closed = false;
+      this.listeners = new Map();
+      FakeEventSource.instances.push(this);
+    }
+    addEventListener(type, fn) {
+      if (!this.listeners.has(type)) this.listeners.set(type, []);
+      this.listeners.get(type).push(fn);
+    }
+    removeEventListener(type, fn) {
+      const list = this.listeners.get(type) || [];
+      this.listeners.set(type, list.filter((f) => f !== fn));
+    }
+    close() { this.closed = true; }
+    dispatch(type, event = {}) {
+      if (this.closed && type !== 'error') return;
+      for (const fn of this.listeners.get(type) || []) fn({ type, ...event });
+    }
+    open() { this.dispatch('open'); }
+    fail() { this.dispatch('error'); }
+    emit(type, data) {
+      this.dispatch(type, { data: typeof data === 'string' ? data : JSON.stringify(data) });
+    }
+    static get last() { return FakeEventSource.instances[FakeEventSource.instances.length - 1]; }
+  }
+  FakeEventSource.instances = [];
+  return FakeEventSource;
+}
