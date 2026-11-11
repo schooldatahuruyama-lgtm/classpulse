@@ -32,3 +32,21 @@ test('設定のファイルに秘密のキーがない', () => {
   const t = read('js/firebase-config.js').toLowerCase();
   for (const w of ['password', 'secret', 'private_key']) assert.ok(!t.includes(w), w);
 });
+
+test('授業の読み取りは登録済みの先生で持ち主だけ', () => {
+  const r = rules().sessions.$sid['.read'];
+  assert.ok(r.includes('teacherList'));
+  assert.ok(r.includes("data.child('owner').val() === auth.uid"));
+});
+
+test('回答の検証は整数で、質問に実在する選択肢だけ', () => {
+  const v = rules().sessions.$sid.inbox.answers.$slideId.$uid['.validate'];
+  assert.ok(v.includes('% 1 === 0'));
+  assert.ok(v.includes('options'));
+});
+
+test('先生のデータは本人だけが読み書きできる', () => {
+  const t = rules().teachers.$uid;
+  assert.ok(t['.read'].includes('auth.uid === $uid'));
+  assert.ok(t['.write'].includes('auth.uid === $uid'));
+});

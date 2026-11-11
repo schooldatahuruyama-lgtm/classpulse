@@ -129,43 +129,48 @@ function reason(e) {
   return '原因がわかりません';
 }
 
-// 10 秒で打ち切る fetch
-async function timedFetch(url, options) {
+// 10 秒で打ち切る通信。応答の本文を読み終わるまでタイマーを止めない
+async function request(url, options) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
   try {
-    return await fetch(url, { ...options, signal: ctrl.signal });
+    const res = await fetch(url, { ...options, signal: ctrl.signal });
+    const text = await res.text();
+    let data = null;
+    try { data = text ? JSON.parse(text) : null; } catch (_) { /* JSON でなくてもよい */ }
+    let detail = '';
+    if (data && data.error) {
+      detail = typeof data.error === 'string' ? data.error : (data.error.message || '');
+    }
+    return { ok: res.ok, status: res.status, data, detail };
   } finally {
     clearTimeout(timer);
   }
 }
 
-async function readError(res) {
-  let detail = '';
-  try {
-    const body = await res.json();
-    detail = body && body.error
-      ? (typeof body.error === 'string' ? body.error : (body.error.message || ''))
-      : '';
-  } catch (_) { /* 本文が読めなくてもよい */ }
-  return '応答コード ' + res.status + (detail ? '、' + detail : '');
+function failure(r) {
+  return new Error('応答コード ' + r.status + (r.detail ? '、' + r.detail : ''));
 }
 
-async function putNumber(base, uid, token) {
-  const res = await timedFetch(
+async function putValue(base, uid, token, value) {
+  const r = await request(
     base + '/check/' + encodeURIComponent(uid) + '.json?auth=' + encodeURIComponent(token),
-    { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(Date.now()) }
+    { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value) }
   );
-  if (!res.ok) throw new Error(await readError(res));
+  if (!r.ok) throw failure(r);
 }
 
-// 変化を受け取る: EventSource を開き、書きこんで、put イベントを待つ。10 秒で打ち切り、必ず閉じる
+// 変化を受け取る: EventSource を開き、新しい値を書き、その値の put イベントが届くのを待つ。
+// 書きこみの成功と、その値のイベントの受信の両方がそろって成功。10 秒で打ち切り、必ず閉じる
 function watchAndWrite(base, uid, token) {
   return new Promise((resolve, reject) => {
     const url = base + '/check/' + encodeURIComponent(uid) + '.json?auth=' + encodeURIComponent(token);
+    const value = Date.now() * 1000 + Math.floor(Math.random() * 1000);
     let es = null;
     let done = false;
-    let wrote = false;
+    let wroteOk = false;
+    let received = false;
+    let started = false;
     const finish = (err) => {
       if (done) return;
       done = true;
@@ -173,6 +178,7 @@ function watchAndWrite(base, uid, token) {
       if (es) es.close();
       if (err) reject(err); else resolve();
     };
+    const check = () => { if (wroteOk && received) finish(); };
     const timer = setTimeout(() => finish(new Error('10 秒たっても変化が届きませんでした')), TIMEOUT_MS);
     try {
       es = new EventSource(url);
@@ -180,16 +186,16 @@ function watchAndWrite(base, uid, token) {
       finish(e);
       return;
     }
-    let putCount = 0;
-    es.addEventListener('put', () => {
-      putCount += 1;
-      // 1 回目は開いた直後の今の値。書きこみのあとに届く 2 回目（以降）で成功とする
-      if (!wrote) {
-        wrote = true;
-        putNumber(base, uid, token).catch((e) => finish(e));
-      } else {
-        finish();
-      }
+    es.onopen = () => {
+      if (started) return;
+      started = true;
+      putValue(base, uid, token, value).then(() => { wroteOk = true; check(); }, (e) => finish(e));
+    };
+    es.addEventListener('put', (ev) => {
+      // 開いた直後の今の値や、別の値のイベントは無視する
+      let body = null;
+      try { body = JSON.parse(ev.data); } catch (_) { return; }
+      if (body && body.data === value) { received = true; check(); }
     });
     es.addEventListener('cancel', () => finish(new Error('データベースが接続を取り消しました')));
     es.onerror = () => {
@@ -219,17 +225,17 @@ async function run() {
   }
 
   await step(0, async () => {
-    const res = await timedFetch(base + '/check/ping.json');
-    if (!res.ok) throw new Error(await readError(res));
+    const r = await request(base + '/check/ping.json');
+    if (!r.ok) throw failure(r);
   });
 
   await step(1, async () => {
-    const res = await timedFetch(
+    const r = await request(
       'https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=' + encodeURIComponent(key),
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ returnSecureToken: true }) }
     );
-    if (!res.ok) throw new Error(await readError(res));
-    const data = await res.json();
+    if (!r.ok) throw failure(r);
+    const data = r.data || {};
     uid = data.localId;
     idToken = data.idToken;
     refreshToken = data.refreshToken;
@@ -238,7 +244,7 @@ async function run() {
 
   await step(2, async () => {
     if (!idToken) throw new Error('2 のログインができていないため、確認できません');
-    await putNumber(base, uid, idToken);
+    await putValue(base, uid, idToken, Date.now());
   });
 
   await step(3, async () => {
@@ -248,7 +254,7 @@ async function run() {
 
   await step(4, async () => {
     if (!refreshToken) throw new Error('2 のログインができていないため、確認できません');
-    const res = await timedFetch(
+    const r = await request(
       'https://securetoken.googleapis.com/v1/token?key=' + encodeURIComponent(key),
       {
         method: 'POST',
@@ -256,7 +262,7 @@ async function run() {
         body: 'grant_type=refresh_token&refresh_token=' + encodeURIComponent(refreshToken),
       }
     );
-    if (!res.ok) throw new Error(await readError(res));
+    if (!r.ok) throw failure(r);
   });
 
   const allOk = results.every(Boolean);

@@ -19,7 +19,7 @@
     },
     "sessions": {
       "$sid": {
-        ".read": "auth != null && data.child('owner').val() === auth.uid",
+        ".read": "auth != null && root.child('teacherList').child(auth.uid).val() === true && data.child('owner').val() === auth.uid",
         ".write": "auth != null && root.child('teacherList').child(auth.uid).val() === true && (data.exists() ? data.child('owner').val() === auth.uid : newData.child('owner').val() === auth.uid)",
         "pub": { ".read": "auth != null" },
         "deck": { ".read": "auth != null" },
@@ -34,7 +34,7 @@
             "$slideId": {
               "$uid": {
                 ".write": "auth != null && auth.uid === $uid && newData.exists() && root.child('sessions').child($sid).child('pub').child('state').val() === 'live' && root.child('sessions').child($sid).child('pub').child('polls').child($slideId).child('status').val() === 'open' && root.child('sessions').child($sid).child('pub').child('current').child('slideId').val() === $slideId",
-                ".validate": "newData.hasChildren(['choice', 'at']) && newData.child('choice').isNumber() && newData.child('choice').val() >= 0 && newData.child('choice').val() < 6 && newData.child('at').val() === now",
+                ".validate": "newData.hasChildren(['choice', 'at']) && newData.child('choice').isNumber() && newData.child('choice').val() >= 0 && newData.child('choice').val() < 6 && newData.child('choice').val() % 1 === 0 && root.child('sessions').child($sid).child('deck').child('slides').child($slideId).child('options').child(newData.child('choice').val() + '').exists() && newData.child('at').val() === now",
                 "$other": { ".validate": "$other === 'choice' || $other === 'at'" }
               }
             }
