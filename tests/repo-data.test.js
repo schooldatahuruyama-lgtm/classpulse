@@ -1,0 +1,125 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { createFakeNet } from './helpers/fake-net.js';
+import { createRepo } from '../js/repo.js';
+import { createDeck, createSlide, addSlide } from '../js/model.js';
+
+function setup() {
+  const net = createFakeNet();
+  const repo = createRepo(net, 'u1');
+  return { net, repo };
+}
+
+function sampleDeck(title = '算数') {
+  let deck = createDeck(title, 1);
+  deck = addSlide(deck, createSlide('content'), 's1');
+  deck = addSlide(deck, createSlide('poll'), 's2');
+  return deck;
+}
+
+test('保存すると一覧にも出る', async () => {
+  const { repo } = setup();
+  await repo.saveDeck('d1', sampleDeck(), 5000);
+  assert.deepEqual(await repo.listDecks(), [{ id: 'd1', title: '算数', updatedAt: 5000, slideCount: 2 }]);
+  const loaded = await repo.loadDeck('d1');
+  assert.equal(loaded.updatedAt, 5000);
+  assert.deepEqual(loaded.order, ['s1', 's2']);
+});
+
+test('教材と一覧は 1 回の update で書く', async () => {
+  const { net, repo } = setup();
+  const calls = [];
+  const orig = net.update.bind(net);
+  net.update = (path, patch) => { calls.push([path, Object.keys(patch).sort()]); return orig(path, patch); };
+  net.set = async () => { throw new Error('set は使わない'); };
+  await repo.saveDeck('d1', sampleDeck(), 5000);
+  await repo.deleteDeck('d1');
+  assert.deepEqual(calls, [
+    ['teachers/u1', ['deckIndex/d1', 'decks/d1']],
+    ['teachers/u1', ['deckIndex/d1', 'decks/d1']],
+  ]);
+});
+
+test('スライドのない教材を保存して読み直せる', async () => {
+  const { repo } = setup();
+  await repo.saveDeck('d1', createDeck('空', 1), 7);
+  const loaded = await repo.loadDeck('d1');
+  assert.deepEqual(loaded.order, []);
+  assert.deepEqual(loaded.slides, {});
+  assert.deepEqual(loaded.images, {});
+  assert.equal(loaded.title, '空');
+  assert.deepEqual(await repo.listDecks(), [{ id: 'd1', title: '空', updatedAt: 7, slideCount: 0 }]);
+});
+
+test('消すと一覧からも消える', async () => {
+  const { net, repo } = setup();
+  await repo.saveDeck('d1', sampleDeck(), 5000);
+  await repo.deleteDeck('d1');
+  assert.deepEqual(await repo.listDecks(), []);
+  assert.equal(await repo.loadDeck('d1'), null);
+  assert.equal(net.dump(), null);
+});
+
+test('無い教材は null', async () => {
+  const { repo } = setup();
+  assert.equal(await repo.loadDeck('nothing'), null);
+});
+
+test('一覧は新しい順', async () => {
+  const { repo } = setup();
+  await repo.saveDeck('a', sampleDeck('A'), 100);
+  await repo.saveDeck('b', sampleDeck('B'), 300);
+  await repo.saveDeck('c', sampleDeck('C'), 200);
+  assert.deepEqual((await repo.listDecks()).map((d) => d.id), ['b', 'c', 'a']);
+});
+
+test('保存しても渡した教材は書きかわらない', async () => {
+  const { repo } = setup();
+  const deck = sampleDeck();
+  await repo.saveDeck('d1', deck, 5000);
+  assert.equal(deck.updatedAt, 1);
+});
+
+test('授業中の教材の指し先を保存・取得・消去できる', async () => {
+  const { repo } = setup();
+  assert.equal(await repo.getActive(), null);
+  await repo.setActive({ sid: 'S1', deckId: 'd1', startedAt: 10 });
+  assert.deepEqual(await repo.getActive(), { sid: 'S1', deckId: 'd1', startedAt: 10 });
+  await repo.setActive(null);
+  assert.equal(await repo.getActive(), null);
+});
+
+test('履歴の保存・一覧・削除', async () => {
+  const { net, repo } = setup();
+  const h = (title, endedAt, participants) => ({
+    title, deckId: 'd1', startedAt: endedAt - 10, endedAt, participants,
+    questions: [{ slideId: 's2', question: 'Q', options: ['a', 'b'], counts: [1, 2], total: 3 }],
+  });
+  await repo.saveHistory('S1', h('一回目', 100, 5));
+  await repo.saveHistory('S2', h('二回目', 200, 7));
+  assert.deepEqual(await repo.listHistory(), [
+    { sid: 'S2', title: '二回目', endedAt: 200, participants: 7 },
+    { sid: 'S1', title: '一回目', endedAt: 100, participants: 5 },
+  ]);
+  assert.equal((await repo.getHistory('S1')).questions[0].total, 3);
+  assert.equal(await repo.getHistory('nope'), null);
+
+  await net.set('sessions/S1', { state: 'ended' });
+  await repo.deleteHistory('S1');
+  assert.equal(await repo.getHistory('S1'), null);
+  assert.equal(await net.get('sessions/S1'), null);
+  assert.deepEqual((await repo.listHistory()).map((x) => x.sid), ['S2']);
+});
+
+test('履歴が無ければ一覧は空', async () => {
+  const { repo } = setup();
+  assert.deepEqual(await repo.listHistory(), []);
+});
+
+test('登録されていない uid は先生でない', async () => {
+  const { net, repo } = setup();
+  assert.equal(await repo.isTeacher(), false);
+  await net.set('teacherList/u1', true);
+  assert.equal(await repo.isTeacher(), true);
+  assert.equal(await createRepo(net, 'u2').isTeacher(), false);
+});
