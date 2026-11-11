@@ -152,12 +152,22 @@ test('配列の読み出し: ちょうど半分（max=1, 個数=1）でも配列
   assert.deepEqual(got.at(-1), [null, 'q']);
 });
 
-test('購読の通知より先に onChange（保存）が呼ばれる', async () => {
-  const order = [];
-  const net = createFakeNet({ onChange: () => order.push('save') });
-  net.subscribe('a', (v) => { if (v !== null) order.push('notify'); });
-  await net.set('a', 1);
-  await net.update('', { b: 2 });
-  await net.remove('a');
-  assert.deepEqual(order, ['save', 'notify', 'save', 'save']);
+// 購読する場所そのものを set / update / remove し、通知のたびに net.get する。
+// 保存（onChange）が通知より先でなければ、get の値や保存内容が古くなる
+test('通知の中で get しても、保存済みの内容と同じ値が見える（set・update・remove、null の通知も）', async () => {
+  const saved = [];
+  const net = createFakeNet({ onChange: (root) => saved.push(JSON.parse(JSON.stringify(root))) });
+  const log = [];
+  net.subscribe('a/b', (v) => {
+    const savedNow = saved.length ? saved[saved.length - 1] : null;
+    log.push({ notified: v, savedBefore: savedNow?.a?.b ?? null });
+    return net.get('a/b').then((g) => log.push({ got: g }));
+  });
+  await net.set('a/b', 1);
+  await net.update('a', { b: 2 });
+  await net.remove('a/b');
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(log.filter((x) => 'notified' in x).map((x) => [x.notified, x.savedBefore]), [[null, null], [1, 1], [2, 2], [null, null]]);
+  assert.deepEqual(log.filter((x) => 'got' in x).map((x) => x.got), [null, 1, 2, null]);
+  assert.equal(await net.get('a/b'), null);
 });

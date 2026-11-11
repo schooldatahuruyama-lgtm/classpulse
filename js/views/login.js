@@ -14,10 +14,20 @@ export function mount(root, ctx) {
   const password = el('input', { id: 'login-password', type: 'password', autocomplete: 'current-password' });
   const error = el('div', { class: 'error', role: 'alert', hidden: true });
   const submit = el('button', { type: 'submit', class: 'btn btn-primary', text: 'ログイン' });
+  const retry = el('button', {
+    type: 'button', class: 'btn', text: 'もう一度確かめる',
+    onclick: async () => {
+      retry.disabled = true;
+      error.hidden = true;
+      try { await proceed(); } finally { retry.disabled = false; }
+    },
+  });
+  const retryRow = el('p', { hidden: true }, retry);
   const form = el('form', { novalidate: true },
     el('div', { class: 'field' }, el('label', { class: 'label', for: 'login-email', text: 'メールアドレス' }), email),
     el('div', { class: 'field' }, el('label', { class: 'label', for: 'login-password', text: 'パスワード' }), password),
     error,
+    retryRow,
     el('p', {}, submit));
 
   function showError(text) {
@@ -25,16 +35,29 @@ export function mount(root, ctx) {
     error.hidden = false;
   }
 
+  // ログイン済みで先生の画面へ進む。登録の確認だけ通信で失敗したときは、この画面に残して確かめ直せるようにする
+  async function proceed() {
+    const result = await ctx.navigate('dashboard');
+    if (!alive) return; // 画面が替わった
+    submit.disabled = false;
+    submit.textContent = 'ログイン';
+    if (result === 'offline') {
+      showError('通信できませんでした。');
+      retryRow.hidden = false;
+    }
+  }
+
   form.addEventListener('submit', async (ev) => {
     ev.preventDefault();
     if (submit.disabled) return;
     error.hidden = true;
+    retryRow.hidden = true;
     if (!email.value.trim() || !password.value) { showError('メールアドレスとパスワードを入れてください。'); return; }
     submit.disabled = true;
     submit.textContent = 'ログインしています…';
     try {
       await ctx.auth.signInTeacher(email.value.trim(), password.value);
-      if (alive) ctx.navigate('dashboard');
+      if (alive) await proceed();
     } catch (e) {
       if (!alive) return;
       showError(messageFor(e));

@@ -6,7 +6,7 @@ import { createRepo } from './repo.js';
 import { parseRoute, routeHash, needsTeacher } from './router.js';
 import { isDemoAllowed, createDemoBackend } from './dev/demo.js';
 import { el, confirmDialog, toast } from './ui.js';
-import { checkTeacherAccess } from './guard.js';
+import { checkTeacherAccess, isStillUser } from './guard.js';
 
 const appRoot = document.getElementById('app');
 const bannerRoot = document.getElementById('banner');
@@ -76,10 +76,11 @@ async function start() {
   const teardown = () => { if (cleanup) { try { cleanup(); } catch (e) { console.error(e); } cleanup = null; } };
   let notice = '';
 
+  // 画面を移して、その描き直しが終わったら結果（'offline' など）を返す
   function navigate(name, params = {}) {
     const next = routeHash(name, params);
-    if (location.hash === next) render();
-    else location.hash = next;
+    if (location.hash !== next) history.pushState(null, '', next); // hashchange は起きないので、ここで描き直す
+    return render();
   }
 
   async function loadView(name) {
@@ -155,8 +156,11 @@ async function start() {
     }
 
     // 先生の画面へ移るたびに、先生として登録されているかを確かめ直す
-    const access = await checkTeacherAccess({ auth: teacherAuth, repo: backend.net && teacherAuth.user ? createRepo(backend.net, teacherAuth.user.uid) : null });
+    const checkUser = teacherAuth.user;
+    const { verdict: access, uid: checkedUid } = await checkTeacherAccess({ auth: teacherAuth, repo: checkUser ? createRepo(backend.net, checkUser.uid) : null });
     if (stale()) return;
+    // 確認している間に別の人に替わっていたら、その古い結果は使わない（ログアウトもしない）
+    if (!isStillUser(teacherAuth, checkedUid)) { render(); return; }
     if (access === 'offline') {
       if (shownHash !== null) { // 今の画面のまま残す
         history.replaceState(null, '', shownHash || '#/');
@@ -164,9 +168,12 @@ async function start() {
       } else {
         showMessage('通信できませんでした。接続を確かめてください。', { retry: true });
       }
-      return;
+      return 'offline';
     }
-    if (access === 'not-teacher') notice = 'このアカウントは ClassPulse の先生として登録されていません。';
+    if (access === 'not-teacher') {
+      teacherAuth.signOut();
+      notice = 'このアカウントは ClassPulse の先生として登録されていません。';
+    }
     const user = access === 'ok' ? teacherAuth.user : null;
     teardown();
     shownHash = location.hash;

@@ -107,22 +107,32 @@ test('isDemoAllowed は localhost 系の ?demo=1 だけ許す', () => {
   assert.equal(isDemoAllowed('localhost', '?x=1&demo=1'), true);
 });
 
-test('購読の中で net.get を呼んでも、書きこみが巻き戻らない（メモリ・保存先・別 backend）', async () => {
+test('更新する場所を購読し、通知のたびに net.get しても、書きこみが巻き戻らない（set・update・remove）', async () => {
   const shared = fakeStorage();
   const BC = fakeBroadcastHub();
   const a = make(shared, BC);
   const b = make(shared, BC);
-  a.net.subscribe('x', () => { a.net.get('x'); });
+  const stored = () => JSON.parse(shared.getItem('classpulse:demo:db'));
+  const seen = [];
+  const gets = [];
+  a.net.subscribe('x', (v) => {
+    seen.push({ v, stored: stored().x ?? null });
+    gets.push(a.net.get('x'));
+  });
   await a.net.set('x', 1);
-  await a.net.update('', { y: 2 });
-  await a.net.remove('y');
-  await a.net.set('z', 3);
   assert.equal(await a.net.get('x'), 1);
-  assert.equal(await a.net.get('z'), 3);
-  assert.equal(JSON.parse(shared.getItem('classpulse:demo:db')).x, 1);
-  assert.equal(await b.net.get('x'), 1);
-  assert.equal(await b.net.get('z'), 3);
-  assert.equal(await b.net.get('y'), null);
+  assert.equal(stored().x, 1);
+  await a.net.update('', { x: 2 });
+  assert.equal(await a.net.get('x'), 2);
+  assert.equal(stored().x, 2);
+  assert.equal(await b.net.get('x'), 2);
+  await a.net.remove('x');
+  assert.equal(await a.net.get('x'), null);
+  assert.equal(stored().x ?? null, null);
+  assert.equal(await b.net.get('x'), null);
+  // 通知（最初の null、1、2、削除の null）の時点で、保存先も同じ値になっている
+  assert.deepEqual(seen.map((s) => [s.v, s.stored]), [[null, null], [1, 1], [2, 2], [null, null]]);
+  assert.deepEqual(await Promise.all(gets), [null, 1, 2, null]);
 });
 
 test('データを消すと、別の backend にも届き、消えたまま戻らない', async () => {
