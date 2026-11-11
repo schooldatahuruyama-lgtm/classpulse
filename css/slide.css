@@ -1,0 +1,57 @@
+/* スライドの表示（編集・発表・生徒の画面で共通）。16:9 の枠。文字の大きさは枠の幅に対する割合 */
+.slide-frame {
+  --unit: 1cqw; /* 枠の幅の 1%（cqw を使えないときは JavaScript が px で入れる） */
+  container-type: inline-size;
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: #FFFFFF;
+  color: var(--c-navy);
+  font-family: var(--font);
+  line-height: 1.35;
+  overflow: hidden;
+  border-radius: var(--r-1);
+}
+.slide-stage { position: absolute; inset: 0; }
+
+.slide-item { position: absolute; overflow: hidden; }
+
+.slide-text { font-size: calc(var(--fs, 4) * var(--unit)); }
+.slide-text-body {
+  width: 100%; height: 100%;
+  padding: calc(0.6 * var(--unit));
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.slide-image img { display: block; width: 100%; height: 100%; object-fit: contain; -webkit-user-drag: none; user-select: none; }
+.slide-image-missing {
+  display: flex; align-items: center; justify-content: center; width: 100%; height: 100%;
+  border: 2px dashed var(--c-border); color: #4B5694; font-size: calc(2.5 * var(--unit));
+}
+
+/* アンケートのスライド: 質問文と A〜F の選択肢（結果は出さない） */
+.slide-poll { position: absolute; inset: 0; padding: calc(4 * var(--unit)) calc(5 * var(--unit)); display: flex; flex-direction: column; gap: calc(2.5 * var(--unit)); }
+.slide-poll-question { margin: 0; font-size: calc(4.5 * var(--unit)); font-weight: 700; white-space: pre-wrap; overflow-wrap: anywhere; }
+.slide-poll-options { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: 1fr; gap: calc(1.5 * var(--unit)); }
+.slide-poll-options.is-grid { grid-template-columns: 1fr 1fr; }
+.slide-poll-option {
+  display: flex; align-items: center; gap: calc(1.5 * var(--unit));
+  min-height: calc(6 * var(--unit)); padding: calc(0.8 * var(--unit)) calc(1.5 * var(--unit));
+  border: calc(0.25 * var(--unit)) solid var(--c-line); border-radius: calc(1.2 * var(--unit));
+  font-size: calc(3 * var(--unit)); overflow: hidden;
+}
+.slide-poll-mark {
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: calc(4.5 * var(--unit)); height: calc(4.5 * var(--unit)); border-radius: 50%;
+  background: var(--c-navy); color: #FFFFFF; font-weight: 700;
+}
+.slide-poll-text { overflow-wrap: anywhere; }
+
+/* 縮小表示 */
+.slide-thumb { border: 1px solid var(--c-line); border-radius: 6px; pointer-events: none; }
+.slide-badge {
+  position: absolute; right: calc(1.5 * var(--unit)); top: calc(1.5 * var(--unit)); z-index: 1;
+  padding: calc(0.5 * var(--unit)) calc(1.5 * var(--unit)); border-radius: calc(3 * var(--unit));
+  background: var(--c-navy); color: #FFFFFF; font-size: calc(5 * var(--unit)); font-weight: 700;
+}

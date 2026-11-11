@@ -1,0 +1,136 @@
+/* スライド編集の画面: 上の帯、左（スライド一覧）・中央（キャンバス）・右（設定）の 3 列 */
+
+/* 編集の画面では先生のナビを隠して、横幅を広く使う（「← 一覧へ」で戻る） */
+.shell:has(> .shell-main > .editor) { grid-template-columns: 1fr; }
+.shell:has(> .shell-main > .editor) > .shell-nav { display: none; }
+.shell-main:has(> .editor) { padding: 0; }
+
+.editor { display: flex; flex-direction: column; min-height: 100vh; }
+
+/* 上の帯 */
+.ed-top {
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-2);
+  padding: var(--s-1) var(--s-2); background: var(--c-card); border-bottom: 1px solid var(--c-line);
+}
+.ed-top input.ed-title { flex: 1 1 220px; width: auto; font-size: 20px; font-weight: 700; }
+.ed-save { display: flex; align-items: center; gap: var(--s-1); flex-wrap: wrap; }
+.ed-top-actions { display: flex; flex-wrap: wrap; gap: var(--s-1); margin-left: auto; }
+.ed-toggle { display: none; }
+.ed-toggle[aria-expanded='true'] { border-color: var(--c-navy); background: #E7ECFF; }
+
+.ed-messages:empty { display: none; }
+.ed-message { margin: var(--s-2) var(--s-2) 0; border: 2px solid var(--c-danger-text); }
+.ed-message ul { margin: 0 0 var(--s-2); padding-left: 1.5em; }
+.ed-message-title { font-weight: 700; }
+
+/* 3 列 */
+.ed-body {
+  display: grid; grid-template-columns: 200px minmax(0, 1fr) 280px; gap: var(--s-2);
+  padding: var(--s-2); align-items: start;
+}
+.ed-left, .ed-right {
+  background: var(--c-card); border: 1px solid var(--c-line); border-radius: var(--r-2); padding: var(--s-2);
+}
+.ed-center { min-width: 0; }
+.ed-col-title { font-size: 20px; margin-bottom: var(--s-2); }
+.ed-side-label { font-weight: 700; margin: 0 0 var(--s-1); }
+
+/* 左: スライド一覧 */
+.ed-slides { list-style: none; margin: 0 0 var(--s-2); padding: 0; max-height: 60vh; overflow-y: auto; }
+.ed-slides li { margin-bottom: var(--s-1); }
+.ed-slide-btn {
+  display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: var(--s-1); align-items: start;
+  width: 100%; min-height: 44px; padding: 6px;
+  border: 3px solid transparent; border-radius: var(--r-1);
+  background: transparent; color: var(--c-navy); font: inherit; text-align: left; cursor: pointer;
+}
+.ed-slide-btn:hover { background: var(--c-bg); }
+.ed-slide-btn[aria-current='true'] { border-color: var(--c-main); background: #EEF2FF; }
+.ed-slide-num { display: flex; flex-direction: column; font-weight: 700; line-height: 1.2; }
+.ed-slide-current { font-size: 12px; color: var(--c-navy); }
+.ed-thumb { display: block; min-width: 0; }
+.ed-add { display: grid; gap: var(--s-1); margin-bottom: var(--s-2); }
+.ed-add .btn { width: 100%; }
+.ed-slide-actions { border-top: 1px solid var(--c-line); padding-top: var(--s-2); }
+.ed-btn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s-1); }
+
+/* 中央: 道具とキャンバス */
+.ed-tools { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1); margin-bottom: var(--s-1); }
+.ed-tool-status { font-weight: 700; }
+.ed-file { position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; pointer-events: none; }
+.ed-canvas-wrap { padding: 24px; background: var(--c-line); border-radius: var(--r-2); }
+.ed-canvas-hint { margin-top: var(--s-1); }
+.ed-empty { text-align: center; }
+.ed-empty .ed-add { max-width: 280px; margin: 0 auto; }
+
+.slide-frame.ed-frame { overflow: visible; box-shadow: var(--shadow); }
+.ed-item {
+  cursor: move; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  outline: 1px dashed var(--c-border); outline-offset: -1px;
+}
+.ed-item.is-selected { box-shadow: 0 0 0 3px var(--c-main); outline: none; }
+.ed-item:focus-visible { outline: 3px solid var(--c-navy); outline-offset: 4px; }
+.ed-item.is-editing { cursor: text; user-select: text; -webkit-user-select: text; }
+.ed-placeholder {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  color: #4B5694; font-size: calc(2.5 * var(--unit)); font-weight: 400; pointer-events: none;
+}
+textarea.ed-textarea {
+  display: block; width: 100%; height: 100%; min-height: 0; margin: 0;
+  padding: calc(0.6 * var(--unit)); border: 0; border-radius: 0;
+  background: rgba(63, 99, 246, 0.06); color: inherit;
+  font: inherit; text-align: inherit; line-height: inherit; resize: none;
+}
+textarea.ed-textarea { overflow: hidden; }
+textarea.ed-textarea:focus-visible { outline: none; }
+.ed-handle {
+  position: absolute; z-index: 2; width: 44px; height: 44px; transform: translate(-50%, -50%);
+  display: flex; align-items: center; justify-content: center;
+  touch-action: none; cursor: nwse-resize;
+}
+.ed-handle-dot { width: 20px; height: 20px; border-radius: 4px; background: var(--c-main); border: 3px solid #FFFFFF; box-shadow: 0 0 0 1px var(--c-navy); }
+.ed-handle:focus-visible { outline: 3px solid var(--c-navy); outline-offset: 0; border-radius: var(--r-1); }
+
+/* 右: 設定 */
+.ed-group { margin-bottom: var(--s-2); }
+.ed-choices { display: flex; flex-wrap: wrap; gap: var(--s-1); }
+.ed-choices-color { display: grid; grid-template-columns: 1fr 1fr; }
+.ed-choices-color .ed-choice { justify-content: flex-start; padding: 0 var(--s-1); }
+.ed-choice.is-on { border-color: var(--c-navy); background: #E7ECFF; }
+.ed-check { font-weight: 700; }
+.ed-swatch { flex: none; width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--c-navy); }
+.ed-wide { width: 100%; }
+.ed-fieldset { border: 0; margin: 0 0 var(--s-2); padding: 0; min-width: 0; }
+.ed-radio {
+  display: flex; align-items: center; gap: var(--s-1); min-height: 44px; padding: 4px var(--s-1); margin-bottom: var(--s-1);
+  border: 2px solid var(--c-line); border-radius: var(--r-1); cursor: pointer;
+}
+.ed-radio input { flex: none; width: 24px; height: 24px; margin: 0; accent-color: var(--c-main); }
+.ed-radio:has(input:checked) { border-color: var(--c-navy); }
+.ed-note { padding: 12px; border-radius: var(--r-1); background: var(--c-bg); border: 1px solid var(--c-line); }
+
+/* アンケートの入力欄 */
+.ed-opts { list-style: none; margin: 0 0 var(--s-2); padding: 0; }
+.ed-opt { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; gap: var(--s-1); align-items: center; margin-bottom: var(--s-1); }
+.ed-opt-mark {
+  display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px;
+  border-radius: 50%; background: var(--c-navy); color: #FFFFFF; font-weight: 700;
+}
+
+/* iPad の横向き（1024px 前後）: 左右の列を少し細くして、キャンバスを広くする */
+@media (max-width: 1199px) {
+  .ed-body { grid-template-columns: 176px minmax(0, 1fr) 232px; }
+  .ed-choices-color { grid-template-columns: 1fr; }
+}
+
+/* 幅 900px 未満: 左と右の列は、ボタンで開閉するパネル */
+@media (max-width: 899px) {
+  .ed-toggle { display: inline-flex; }
+  .ed-top-actions { margin-left: 0; }
+  .ed-body { grid-template-columns: minmax(0, 1fr); padding: var(--s-1); gap: var(--s-1); }
+  .ed-left:not(.is-open), .ed-right:not(.is-open) { display: none; }
+  .ed-slides { display: flex; gap: var(--s-1); overflow-x: auto; max-height: none; padding-bottom: 4px; }
+  .ed-slides li { flex: 0 0 168px; margin: 0; }
+  .ed-add { grid-template-columns: 1fr 1fr; }
+  .ed-btn-grid { grid-template-columns: repeat(4, 1fr); }
+}
