@@ -83,8 +83,14 @@ export function createAuth({ apiKey, fetch, storage, now, role }) {
     storage.setItem(storageKey, JSON.stringify(saved));
   }
 
-  function clearState() {
+  // 世代を進める。進行中の更新は古いものとして切り離し、次の更新は新しく始める
+  function bumpGen() {
     gen += 1;
+    refreshing = null;
+  }
+
+  function clearState() {
+    bumpGen();
     user = null;
     refreshToken = null;
     idToken = null;
@@ -149,19 +155,24 @@ export function createAuth({ apiKey, fetch, storage, now, role }) {
     return refreshing;
   }
 
-  // 保存したトークンで戻る。無い・無効なら null（通信失敗は例外のまま）
-  async function restore() {
+  // 保存したトークンで戻る。{ user, g }（g は戻した時点の世代）。
+  // 無い・無効が確定したなら user は null（通信失敗・古い応答は例外のまま）
+  async function restoreImpl() {
     const saved = readSaved();
-    if (!saved) return null;
+    if (!saved) return { user: null, g: gen };
     user = saved.email ? { uid: saved.uid, email: saved.email } : { uid: saved.uid };
     refreshToken = saved.refreshToken;
     try {
       await refresh();
     } catch (e) {
-      if (e && e.invalid) return null; // 無効が確定したときだけ null
+      if (e && e.invalid) return { user: null, g: gen }; // 無効が確定したときだけ null（世代は自分の消去で進んだ）
       throw e; // 一時的な失敗・古い応答は保存を残して伝える
     }
-    return { ...user };
+    return { user: { ...user }, g: gen };
+  }
+
+  async function restore() {
+    return (await restoreImpl()).user;
   }
 
   return {
@@ -170,19 +181,19 @@ export function createAuth({ apiKey, fetch, storage, now, role }) {
       const body = await postJson('accounts:signInWithPassword', { email, password, returnSecureToken: true });
       assertCurrent(g);
       parseBody(body);
-      gen += 1;
+      bumpGen();
       adopt(body, body.email ?? email);
       return { ...user };
     },
 
     async signInAnonymous() {
-      const restored = await restore();
-      if (restored) return { uid: restored.uid };
-      const g = gen;
+      const r = await restoreImpl();
+      if (r.user) return { uid: r.user.uid };
+      const g = r.g;
       const body = await postJson('accounts:signUp', { returnSecureToken: true });
       assertCurrent(g);
       parseBody(body);
-      gen += 1;
+      bumpGen();
       adopt(body);
       return { uid: user.uid };
     },

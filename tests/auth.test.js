@@ -255,3 +255,45 @@ test('必須項目が足りない 200 応答: unknown で拒否し、保存を�
   assert.equal(storage.getItem('classpulse:auth:student'), SAVED);
   assert.equal(fetch.calls.filter((c) => isSignUp(c.url)).length, 0);
 });
+
+// ---- 修正ラウンド 2: 開始直後のログアウト、古い更新の共有 ----
+
+test('signInAnonymous の直後に signOut しても、後から届く signUp の応答で復活しない', async () => {
+  const storage = fakeStorage();
+  const fetch = deferredFetch();
+  const auth = createAuth({ apiKey: 'FAKE_KEY', fetch, storage, now: fakeClock(1000).now, role: 'student' });
+  const p = auth.signInAnonymous();
+  const rejected = assert.rejects(p, (e) => e instanceof NetError && e.code === 'auth');
+  auth.signOut();
+  await tick();
+  fetch.respond(0, 200, { localId: 'S1', idToken: 'tok1', refreshToken: 'r1', expiresIn: '3600' });
+  await rejected;
+  assert.equal(auth.user, null);
+  assert.equal(storage.getItem('classpulse:auth:student'), null);
+});
+
+test('A の更新が保留中でも、B でログインすれば forceRefresh は B の新しい更新を送る', async () => {
+  const storage = fakeStorage();
+  const fetch = deferredFetch();
+  const auth = createAuth({ apiKey: 'FAKE_KEY', fetch, storage, now: fakeClock(1000).now, role: 'teacher' });
+  const a = auth.signInTeacher('a@example.com', 'x');
+  fetch.respond(0, 200, { localId: 'A', email: 'a@example.com', idToken: 'tokA', refreshToken: 'rA', expiresIn: '3600' });
+  await a;
+  const aRefresh = auth.forceRefresh(); // pending[1]
+  const aRejected = assert.rejects(aRefresh, (e) => e instanceof NetError);
+  await tick();
+  const b = auth.signInTeacher('b@example.com', 'x'); // pending[2]
+  fetch.respond(2, 200, { localId: 'B', email: 'b@example.com', idToken: 'tokB', refreshToken: 'rB', expiresIn: '3600' });
+  await b;
+  const bRefresh = auth.forceRefresh(); // pending[3]（A の保留を使い回さない）
+  await tick();
+  assert.equal(fetch.pending.length, 4);
+  assert.equal(fetch.calls[3].init.body, 'grant_type=refresh_token&refresh_token=rB');
+  fetch.respond(3, 200, { user_id: 'B', id_token: 'tokB2', refresh_token: 'rB2', expires_in: '3600' });
+  assert.equal(await bRefresh, 'tokB2');
+  // 古い A の応答が後から届いても何も変わらない
+  fetch.respond(1, 200, { user_id: 'A', id_token: 'tokA2', refresh_token: 'rA2', expires_in: '3600' });
+  await aRejected;
+  assert.deepEqual(auth.user, { uid: 'B', email: 'b@example.com' });
+  assert.deepEqual(JSON.parse(storage.getItem('classpulse:auth:teacher')), { uid: 'B', email: 'b@example.com', refreshToken: 'rB2' });
+});
