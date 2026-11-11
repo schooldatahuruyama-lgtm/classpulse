@@ -5,7 +5,6 @@
 // 最初の値も subscribe の中で同期的に渡す。渡す値は常に写し。
 import { NetError } from '../../js/errors.js';
 
-const clone = (v) => (v === null || v === undefined ? null : structuredClone(v));
 const isObj = (v) => v !== null && typeof v === 'object';
 
 // 書く値を整える: サーバーの時刻を置きかえ、null と空の入れ物を落とす（全部落ちたら null）
@@ -13,16 +12,24 @@ function normalize(v, now) {
   if (v === null || v === undefined) return null;
   if (!isObj(v)) return v;
   if (!Array.isArray(v) && v['.sv'] === 'timestamp') return now();
-  if (Array.isArray(v)) {
-    const arr = v.map((x) => normalize(x, now));
-    return arr.every((x) => x === null) ? null : arr;
-  }
+  // 配列は「添字を文字にしたキーのオブジェクト」で保存する（null の要素は落とす）。実物と同じ
   const out = {};
   for (const [k, x] of Object.entries(v)) {
     const n = normalize(x, now);
     if (n !== null) out[k] = n;
   }
   return Object.keys(out).length === 0 ? null : out;
+}
+
+// 読み出し用: キーがちょうど 0..n-1 なら配列に戻す（実物と同じ）。写しを返す
+function view(v) {
+  if (!isObj(v)) return v === undefined ? null : v;
+  const keys = Object.keys(v);
+  const out = {};
+  for (const k of keys) out[k] = view(v[k]);
+  const dense = keys.length > 0 && keys.every((k) => /^(0|[1-9]\d*)$/.test(k)) &&
+    keys.map(Number).sort((a, b) => a - b).every((n, i) => n === i);
+  return dense ? keys.map(Number).sort((a, b) => a - b).map((n) => out[n]) : out;
 }
 
 const segs = (path) => String(path).split('/').filter((s) => s !== '');
@@ -75,7 +82,7 @@ export function createFakeNet({ now = Date.now, deny = () => false } = {}) {
   function notify(changedPaths) {
     for (const s of [...subs]) {
       if (!subs.has(s)) continue;
-      if (changedPaths.some((p) => related(p, s.path))) s.onValue(clone(read(s.path)));
+      if (changedPaths.some((p) => related(p, s.path))) s.onValue(view(read(s.path)));
     }
   }
 
@@ -87,7 +94,7 @@ export function createFakeNet({ now = Date.now, deny = () => false } = {}) {
   return {
     async get(path) {
       guard('get', path);
-      return clone(read(path));
+      return view(read(path));
     },
     async set(path, value) {
       guard('set', path, value);
@@ -116,7 +123,7 @@ export function createFakeNet({ now = Date.now, deny = () => false } = {}) {
       subs.add(s);
       if (online) {
         if (onStatus) onStatus('connected');
-        onValue(clone(read(path)));
+        onValue(view(read(path)));
       } else if (onStatus) {
         onStatus('disconnected');
       }
@@ -124,7 +131,7 @@ export function createFakeNet({ now = Date.now, deny = () => false } = {}) {
     },
 
     // 全体の写し
-    dump() { return clone(root); },
+    dump() { return view(root); },
 
     setOnline(value) {
       const next = Boolean(value);
@@ -133,7 +140,7 @@ export function createFakeNet({ now = Date.now, deny = () => false } = {}) {
       for (const s of [...subs]) {
         if (!subs.has(s)) continue;
         if (s.onStatus) s.onStatus(online ? 'connected' : 'disconnected');
-        if (online) s.onValue(clone(read(s.path)));
+        if (online) s.onValue(view(read(s.path)));
       }
     },
   };

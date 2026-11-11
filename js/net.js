@@ -2,6 +2,7 @@
 // データベースの URL の形を知っているのはこのモジュールだけ。fetch と EventSource は引数で受け取る。
 // パスは先頭と末尾に `/` のない文字列（例 'sessions/abc/pub'）。
 import { NetError } from './errors.js';
+import { CONFIG } from './config.js';
 
 // 木（値）の path（'/a/b' や '/'）に value を置く。null は削除。空になった親は取り除く。
 // 木を直接書きかえて、新しい根を返す。
@@ -34,7 +35,7 @@ function isEmpty(v) {
   return v === null || v === undefined || (typeof v === 'object' && Object.keys(v).length === 0);
 }
 
-export function createNet({ databaseURL, auth, fetch, EventSource }) {
+export function createNet({ databaseURL, auth, fetch, EventSource, setTimeout: setTimer = globalThis.setTimeout, clearTimeout: clearTimer = globalThis.clearTimeout }) {
   const base = String(databaseURL).replace(/\/+$/, '');
   const urlFor = (path, token) => `${base}/${path}.json?auth=${encodeURIComponent(token)}`;
 
@@ -63,8 +64,14 @@ export function createNet({ databaseURL, auth, fetch, EventSource }) {
     return res;
   }
 
+  // 本文の JSON を読む。受信に失敗したら network、JSON として不正なら unknown（null にしない）
   async function readJson(res) {
-    try { return await res.json(); } catch { return null; }
+    try {
+      return await res.json();
+    } catch (e) {
+      if (e && e.name === 'SyntaxError') throw new NetError('unknown', '応答が JSON ではありません');
+      throw new NetError('network', '応答を読み込めませんでした');
+    }
   }
 
   return {
@@ -81,6 +88,7 @@ export function createNet({ databaseURL, auth, fetch, EventSource }) {
       let stopped = false;
       let es = null;
       let value = null;
+      let timer = null; // つなぎ直しの待ち
       let generation = 0; // 開き直すたびに増やし、古い接続のイベントを無視する
       const status = (s) => { if (!stopped && onStatus) onStatus(s); };
 
@@ -104,20 +112,39 @@ export function createNet({ databaseURL, auth, fetch, EventSource }) {
         if (es) { es.close(); es = null; }
       }
 
-      async function connect() {
+      // 待ってからつなぎ直す（トークンも取り直す）。解除されるまで、開くまで繰り返す
+      function scheduleRetry() {
+        if (stopped || timer !== null) return;
+        timer = setTimer(() => {
+          timer = null;
+          connect(true);
+        }, CONFIG.reconnectDelayMs);
+      }
+
+      async function connect(refresh) {
         const gen = ++generation;
         let token;
         try {
-          token = gen === 1 ? await auth.getToken() : await auth.forceRefresh();
+          token = refresh ? await auth.forceRefresh() : await auth.getToken();
         } catch {
+          if (stopped || gen !== generation) return;
           status('disconnected');
+          scheduleRetry();
           return;
         }
         if (stopped || gen !== generation) return;
         const source = new EventSource(urlFor(path, token));
         es = source;
         source.addEventListener('open', () => { if (!stopped && gen === generation) status('connected'); });
-        source.addEventListener('error', () => { if (!stopped && gen === generation) status('disconnected'); });
+        source.addEventListener('error', () => {
+          if (stopped || gen !== generation) return;
+          status('disconnected');
+          // 完全に閉じた（CLOSED = 2）なら自動では戻らないので、こちらでつなぎ直す
+          if (source.readyState === 2) {
+            close();
+            scheduleRetry();
+          }
+        });
         source.addEventListener('put', (e) => handle(gen, 'put', e));
         source.addEventListener('patch', (e) => handle(gen, 'patch', e));
         source.addEventListener('keep-alive', () => {});
@@ -129,13 +156,15 @@ export function createNet({ databaseURL, auth, fetch, EventSource }) {
         source.addEventListener('auth_revoked', () => {
           if (stopped || gen !== generation) return;
           close();
-          connect();
+          status('disconnected');
+          connect(true);
         });
       }
 
-      connect();
+      connect(false);
       return () => {
         stopped = true;
+        if (timer !== null) { clearTimer(timer); timer = null; }
         close();
       };
     },

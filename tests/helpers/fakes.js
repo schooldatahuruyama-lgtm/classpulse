@@ -45,6 +45,7 @@ export function fakeEventSource() {
     constructor(url) {
       this.url = String(url);
       this.closed = false;
+      this.readyState = 0; // 0 接続中、1 開いている、2 閉じている
       this.listeners = new Map();
       FakeEventSource.instances.push(this);
     }
@@ -56,13 +57,16 @@ export function fakeEventSource() {
       const list = this.listeners.get(type) || [];
       this.listeners.set(type, list.filter((f) => f !== fn));
     }
-    close() { this.closed = true; }
+    close() { this.closed = true; this.readyState = 2; }
     dispatch(type, event = {}) {
       if (this.closed && type !== 'error') return;
       for (const fn of this.listeners.get(type) || []) fn({ type, ...event });
     }
-    open() { this.dispatch('open'); }
-    fail() { this.dispatch('error'); }
+    open() { this.readyState = 1; this.dispatch('open'); }
+    // 一時的な切断（ブラウザが自動でつなぎ直す）
+    fail() { this.readyState = 0; this.dispatch('error'); }
+    // 完全な切断（ブラウザは自動でつなぎ直さない）
+    failClosed() { this.readyState = 2; this.dispatch('error'); }
     emit(type, data) {
       this.dispatch(type, { data: typeof data === 'string' ? data : JSON.stringify(data) });
     }

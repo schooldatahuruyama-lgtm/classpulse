@@ -8,4 +8,5 @@ export const CONFIG = {
   idLength: 12,
   sessionIdLength: 22,
   tokenRefreshMarginMs: 300000,
+  reconnectDelayMs: 3000,
 };

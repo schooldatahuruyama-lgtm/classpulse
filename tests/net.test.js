@@ -4,6 +4,7 @@ import { createNet } from '../js/net.js';
 import { NetError } from '../js/errors.js';
 import { fakeFetch, fakeEventSource } from './helpers/fakes.js';
 
+const flush = () => new Promise((r) => setImmediate(r));
 const DB = 'https://example-db.firebaseio.com';
 
 // 数えられるログインの代役
@@ -17,15 +18,33 @@ function stubAuth() {
   return auth;
 }
 
+// 手で進める時計（待ち時間を実際には待たない）
+function fakeTimers() {
+  let seq = 0;
+  const pending = new Map();
+  return {
+    setTimeout: (fn, ms) => { seq += 1; pending.set(seq, { fn, ms }); return seq; },
+    clearTimeout: (id) => { pending.delete(id); },
+    get count() { return pending.size; },
+    delays: () => [...pending.values()].map((t) => t.ms),
+    // 待っているものを全部実行する
+    async fire() {
+      const list = [...pending.entries()];
+      pending.clear();
+      for (const [, t] of list) t.fn();
+      await flush();
+    },
+  };
+}
+
 function make(handler = () => ({ status: 200, body: null })) {
   const auth = stubAuth();
   const fetch = fakeFetch(handler);
   const ES = fakeEventSource();
-  const net = createNet({ databaseURL: DB, auth, fetch, EventSource: ES });
-  return { net, auth, fetch, ES };
+  const timers = fakeTimers();
+  const net = createNet({ databaseURL: DB, auth, fetch, EventSource: ES, setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout });
+  return { net, auth, fetch, ES, timers };
 }
-
-const flush = () => new Promise((r) => setImmediate(r));
 
 // 購読を始めて、最初の接続を開いた状態にする
 async function subscribed() {
@@ -174,4 +193,91 @@ test('接続の前に購読をやめると、接続を作らない', async () =>
   stop();
   await flush();
   assert.equal(ES.instances.length, 0);
+});
+
+test('読む: 200 でも本文の受信に失敗したら network（null にしない）', async () => {
+  const { net } = make(() => ({ status: 200, body: null }));
+  const auth = stubAuth();
+  const broken = async () => ({ ok: true, status: 200, json: async () => { throw new TypeError('terminated'); } });
+  const n = createNet({ databaseURL: DB, auth, fetch: broken, EventSource: fakeEventSource() });
+  await assert.rejects(n.get('a'), (e) => e.code === 'network');
+  assert.equal(await net.get('a'), null);
+});
+
+test('読む: 本文が JSON として不正なら unknown、本物の JSON null は null', async () => {
+  const auth = stubAuth();
+  const bad = async () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError('Unexpected token'); } });
+  const n = createNet({ databaseURL: DB, auth, fetch: bad, EventSource: fakeEventSource() });
+  await assert.rejects(n.get('a'), (e) => e.code === 'unknown');
+  const { net } = make(() => ({ status: 200, body: null }));
+  assert.equal(await net.get('a'), null);
+});
+
+test('完全に閉じたあと復帰する: 待ってから新しいトークンで開き直し、手で open しなくても connected になる', async () => {
+  const { es, auth, ES, timers, statuses } = await subscribed();
+  es.failClosed();
+  assert.equal(statuses.at(-1), 'disconnected');
+  assert.equal(es.closed, true);
+  assert.deepEqual(timers.delays(), [3000]);
+  assert.equal(ES.instances.length, 1);
+  await timers.fire();
+  assert.equal(auth.refreshes, 1);
+  assert.equal(ES.instances.length, 2);
+  assert.equal(ES.last.url, `${DB}/sessions/x/pub.json?auth=tok2`);
+  ES.last.failClosed(); // また閉じたら、また待ってつなぎ直す
+  assert.equal(timers.count, 1);
+  await timers.fire();
+  assert.equal(ES.instances.length, 3);
+  ES.last.open();
+  assert.equal(statuses.at(-1), 'connected');
+});
+
+test('一時的な切断（自動で戻る）では、こちらからはつなぎ直さない', async () => {
+  const { es, ES, timers } = await subscribed();
+  es.fail();
+  assert.equal(timers.count, 0);
+  assert.equal(ES.instances.length, 1);
+});
+
+test('初回の失敗のあと復帰する: getToken が失敗したら disconnected と再試行', async () => {
+  const m = make();
+  m.auth.getToken = async () => { throw new NetError('network'); };
+  const statuses = [];
+  m.net.subscribe('a', () => {}, (s) => statuses.push(s));
+  await flush();
+  assert.deepEqual(statuses, ['disconnected']);
+  assert.equal(m.ES.instances.length, 0);
+  assert.deepEqual(m.timers.delays(), [3000]);
+  await m.timers.fire();
+  assert.equal(m.ES.instances.length, 1);
+  m.ES.last.open();
+  assert.equal(statuses.at(-1), 'connected');
+});
+
+test('更新の失敗のあと復帰する: auth_revoked の forceRefresh が失敗しても再試行する', async () => {
+  const { es, auth, ES, timers, statuses } = await subscribed();
+  let fail = true;
+  const original = auth.forceRefresh;
+  auth.forceRefresh = async () => { if (fail) throw new NetError('network'); return original(); };
+  es.emit('auth_revoked', 'null');
+  await flush();
+  assert.equal(statuses.at(-1), 'disconnected');
+  assert.equal(ES.instances.length, 1);
+  assert.equal(timers.count, 1);
+  fail = false;
+  await timers.fire();
+  assert.equal(ES.instances.length, 2);
+  assert.equal(ES.last.url, `${DB}/sessions/x/pub.json?auth=tok2`);
+});
+
+test('再試行を待っている間に解除すると、もう開かない', async () => {
+  const m = make();
+  m.auth.getToken = async () => { throw new NetError('network'); };
+  const stop = m.net.subscribe('a', () => {});
+  await flush();
+  assert.equal(m.timers.count, 1);
+  stop();
+  assert.equal(m.timers.count, 0);
+  await m.timers.fire();
+  assert.equal(m.ES.instances.length, 0);
 });

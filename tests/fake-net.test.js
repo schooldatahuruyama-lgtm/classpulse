@@ -108,3 +108,25 @@ test('setOnline(false): 読み書きは network、購読には disconnected、�
   assert.equal(values.at(-1), 1);
   assert.equal(await net.get('a'), 1);
 });
+
+test('配列は添字キーで保存される: 最後の要素を消すと親も消え、購読には null が届く', async () => {
+  const net = createFakeNet();
+  await net.set('a', [null, 1]);
+  const got = [];
+  net.subscribe('a', (v) => got.push(v));
+  await net.remove('a/1');
+  assert.equal(await net.get('a'), null);
+  assert.equal('a' in (net.dump() ?? {}), false);
+  assert.equal(got.at(-1), null);
+});
+
+test('配列の読み出し: キーが 0..n-1 なら配列、欠けていればオブジェクト', async () => {
+  const net = createFakeNet();
+  await net.set('a', ['x', 'y', 'z']);
+  assert.deepEqual(await net.get('a'), ['x', 'y', 'z']);
+  await net.remove('a/1');
+  assert.deepEqual(await net.get('a'), { 0: 'x', 2: 'z' });
+  await net.set('b', [null, 'q']);
+  assert.deepEqual(await net.get('b'), { 1: 'q' });
+  assert.deepEqual(net.dump().b, { 1: 'q' });
+});
