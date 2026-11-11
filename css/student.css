@@ -49,7 +49,7 @@
 .st-option:hover { background: var(--c-bg); }
 /* 選んだカード: 太い枠（中に 2px 足して 4px に見せる。大きさは変えない）と「選択中」 */
 .st-option.is-selected { border-color: var(--c-main); box-shadow: inset 0 0 0 2px var(--c-main); background: #EEF2FF; }
-.st-option.is-sent:not(.is-selected) { border-color: var(--c-ok); }
+.st-option.is-sent:not(.is-selected) { border-color: var(--c-ok-border); }
 /* 受付中でないとき: 押せないことを背景と指の形でも示す（文字は読める濃さのまま） */
 .st-option[aria-disabled='true'] { cursor: not-allowed; background: var(--c-bg); }
 .st-option[aria-disabled='true'].is-selected { background: #E4E9FA; }
@@ -67,7 +67,7 @@
   font-size: 14px; font-weight: 700; white-space: nowrap;
 }
 .st-tag-selected { background: var(--c-navy); color: #FFFFFF; }
-.st-tag-sent { background: var(--c-card); color: var(--c-navy); border: 2px solid var(--c-ok); }
+.st-tag-sent { background: var(--c-card); color: var(--c-navy); border: 2px solid var(--c-ok-border); }
 .st-check { font-weight: 700; }
 
 /* 送信のボタンと回答の状態 */
@@ -76,13 +76,13 @@
 .st-send[aria-disabled='true'] { opacity: 1; background: var(--c-line); border-color: var(--c-border); color: var(--c-navy); }
 .st-answer { margin-top: var(--s-2); }
 .st-answer-text { margin: 0; font-size: 18px; font-weight: 700; }
-.st-answer-text:not(:empty) { padding: 12px var(--s-2); border: 2px solid var(--c-line); border-radius: var(--r-1); background: var(--c-card); }
-.st-answer-text[data-state='sent'] { border-color: var(--c-ok); }
+.st-answer-text:not(:empty) { padding: 12px var(--s-2); border: 2px solid var(--c-border); border-radius: var(--r-1); background: var(--c-card); }
+.st-answer-text[data-state='sent'] { border-color: var(--c-ok-border); }
 .st-answer-text[data-state='sending'] { border-color: var(--c-main); }
-.st-answer-text[data-state='queued'] { border-color: var(--c-warn); background: #FFF6D6; }
+.st-answer-text[data-state='queued'] { border-color: var(--c-warn-border); background: #FFF6D6; }
 .st-answer-text[data-state='rejected'],
 .st-answer-text[data-state='failed'] { border-color: var(--c-danger-text); color: var(--c-danger-text); }
-.st-answer-text[data-state='unconfirmed'] { border-color: var(--c-warn); background: #FFF6D6; }
+.st-answer-text[data-state='unconfirmed'] { border-color: var(--c-warn-border); background: #FFF6D6; }
 .st-end .st-answer-text { margin-top: var(--s-2); }
 .st-retry { margin-top: var(--s-1); min-height: 48px; }
 

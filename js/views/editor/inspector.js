@@ -80,9 +80,10 @@ export function renderPollSettings(host, ed) {
   const radio = (value, label) => el('label', { class: 'ed-radio' },
     el('input', {
       type: 'radio', name: 'ed-result-mode', value, checked: slide.resultMode === value,
+      'aria-labelledby': `ed-result-mode-${value}`, // 読み上げの名前は日本語の文（値の manual / live ではなく）
       onchange: () => ed.patchSlide({ resultMode: value }),
     }),
-    el('span', { text: label }));
+    el('span', { id: `ed-result-mode-${value}`, text: label }));
   host.replaceChildren(
     el('h2', { class: 'ed-col-title', text: 'アンケートの設定' }),
     el('fieldset', { class: 'ed-fieldset' },

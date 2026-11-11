@@ -1,35 +1,111 @@
 # ClassPulse
 
-リアルタイム参加型スライドアプリ（試作1）。
+授業で使う、スライドとアンケートのアプリです（試作1）。
+先生がスライドを映すと、生徒は自分の iPad から、その場でアンケートに答えられます。
+生徒はログインしません。回答に名前は付きません（匿名です）。
 
-## 資料
+- 公開版の URL: 公開したあとに、ここに書きます（まだ公開していません）。
 
-- [要件定義書](docs/requirements.md)
-- [設計書](docs/superpowers/specs/2026-11-11-classpulse-design.md)
-- [試作1の実装計画](docs/superpowers/plans/2026-11-11-classpulse-prototype1.md)
+## いまの状態
 
-## テスト
+- 試作1 は、画面と仕組みが一通りできた段階です。
+- 本物の Firebase につないだ確認は、まだしていません。先生の準備（`docs/firebase/setup.md`）が済んでいないためです。
+- 学校の iPad での確認も、まだしていません。
+- 確認した内容と、未確認の内容は `docs/reports/prototype1-check.md` に書いてあります。
+
+## 授業の流れ
+
+### 先生
+
+1. ログインします（メールアドレスとパスワード）。
+2. 「＋ 新規作成」で教材を作ります。
+3. スライドを足します。「資料スライド」には文字と画像を置けます。「アンケート」には質問と選択肢（2〜6 個）を書きます。入力は自動で保存されます。
+4. 「発表を開始」を押します。QR コードとリンクが出ます。教室のスクリーンに映します。
+5. 生徒が参加すると、人数が増えます。
+6. 「次へ」で進めます。アンケートのスライドに来ると、受付が始まります。回答の人数が増えていきます。
+7. 「結果を表示」を押すと、結果が画面に出ます。生徒の画面にも出ます。押すまでは、結果は誰にも見えません。
+8. 次のスライドへ進むと、そのアンケートは締め切られます。
+9. 最後に「授業を終了」を押します。
+10. 「授業履歴」で、質問ごとの結果（選択肢ごとの人数と割合）を見られます。
+
+### 生徒
+
+1. 先生が映した QR コードを読むか、リンクを開きます。
+2. 先生がスライドを進めると、自分の画面も進みます。
+3. アンケートが出たら、選択肢を押して「回答を送信」を押します。
+4. 締め切られるまでは、答えを変えられます。
+5. 授業が終わると、終了の画面になります。
+
+## 試作1 でできないこと
+
+- 選択式以外の回答（自由記述など）、名前を付ける回答、投稿の承認。
+- PowerPoint や Google スライドを読み込むこと。
+- PDF や Excel への出力。ゴミ箱と復元。
+- 動画、音声、アニメーション、図形。
+- Google アカウントでのログイン。管理者の画面。
+- 200 人が同時に答える使い方。
+
+## 知っておくこと
+
+- 同時につながれるのは 100 台までです（Firebase の無料の枠）。30 人の学級 1 つなら足ります。同じ時間に 3 学級以上で使うと足りなくなります。
+- 画像は 1 つの教材で合計 5MB までです。画像はデータベースの中に入れています。
+- 締め切ったあとに届いた回答は、数えません。
+- 授業が終わるときに、送れたかどうかがわからなかった回答は、生徒に「授業が終わったため、送信できたか確認できませんでした。」と出ます。
+- 授業を終了し忘れると、参加のリンクが使えるままになります。授業のあとは必ず「授業を終了」を押してください。
+- 通信が切れると、画面に「接続が切れています」と出ます。つながり直すと、続きから使えます。
+- 先生がパスワードを Claude Code に伝える必要はありません。パスワードはこのリポジトリのどこにも書きません。
+
+## 先生を増やすには
+
+`docs/firebase/setup.md` の「先生を増やすとき」の手順で行います。
+
+## 開発者向け
+
+### テスト
 
 ```
 npm test
 ```
 
-Node.js 組み込みのテストランナー（`node --test`）で `tests/*.test.js` を実行する。依存パッケージは無い。
+Node.js 組み込みのテストランナー（`node --test`）で `tests/*.test.js` を実行します。依存パッケージはありません。ビルドもありません。
 
-## 画面を手元で試す（練習モード）
+### 手元で開く
 
 ```
 python -m http.server 8765 --bind 127.0.0.1
 ```
 
-`http://127.0.0.1:8765/?demo=1` を開く。`localhost`・`127.0.0.1`・`[::1]` で `?demo=1` を付けたときだけ、データをこのパソコンの中（localStorage）に置く練習モードになる。先生はどんなメールアドレスとパスワードでもログインできる。それ以外の場所では `?demo=1` は無視される。
+`http://127.0.0.1:8765/` を開きます（本物の Firebase の設定が `js/firebase-config.js` に入っている場合）。
 
-## フォント
+### 練習モード
 
-画面の書体は BIZ UDPGothic（SIL Open Font License 1.1。`assets/fonts/OFL.txt`）。
+`http://127.0.0.1:8765/?demo=1` を開くと、データをそのパソコンの中（localStorage）に置く練習モードになります。どんなメールアドレスとパスワードでもログインできます。生徒はタブを増やして試します（タブごとに別の生徒です）。`localhost`・`127.0.0.1`・`[::1]` 以外では `?demo=1` は無視されます。練習モードは、2 つのタブが同じ瞬間に書きこむ場合を守りません。
 
-| ファイル | 入手先 | 大きさ |
+### 部品の出どころ
+
+| 部品 | 出どころ | ライセンス |
 | --- | --- | --- |
-| `assets/fonts/BIZUDPGothic-Regular.woff2` | npm の `@fontsource/biz-udpgothic`（`files/biz-udpgothic-japanese-400-normal.woff2`、jsDelivr 経由で 1 回だけ取得） | 1,319,288 バイト |
-| `assets/fonts/BIZUDPGothic-Bold.woff2` | 同上（`…-700-normal.woff2`） | 1,335,452 バイト |
-| `assets/fonts/OFL.txt` | Google Fonts リポジトリ `ofl/bizudpgothic/OFL.txt` | 4,408 バイト |
+| BIZ UDPGothic（`assets/fonts/`） | npm の `@fontsource/biz-udpgothic`（jsDelivr 経由で 1 回だけ取得）。ライセンス文は Google Fonts リポジトリ `ofl/bizudpgothic/OFL.txt` | SIL Open Font License 1.1（`assets/fonts/OFL.txt`） |
+| QR コードの作成（`js/lib/qrcode.js`） | qrcode-generator 1.4.4（Kazuhiko Arase） | MIT（`js/lib/qrcode.LICENSE.txt`） |
+
+フォントのファイルは、通常が 1,319,288 バイト、太字が 1,335,452 バイトです。
+
+### 公開の手順
+
+公開用の `pages` ブランチには、アプリに必要なファイル（`index.html`、`check.html`、`css`、`js`、`assets`）だけを入れます。
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/pages-branch.ps1
+git push origin master
+git push origin pages
+```
+
+初めてのときは、GitHub の Settings → Pages で、Branch を `pages` / (root) にします。公開する前に、先生が `docs/firebase/setup.md` を終えて、`js/firebase-config.js` に値を入れておく必要があります。
+
+### 資料
+
+- [要件定義書](docs/requirements.md)
+- [設計書](docs/superpowers/specs/2026-11-11-classpulse-design.md)
+- [試作1の実装計画](docs/superpowers/plans/2026-11-11-classpulse-prototype1.md)
+- [Firebase の準備の手順書](docs/firebase/setup.md)
+- [試作1の確認の記録](docs/reports/prototype1-check.md)

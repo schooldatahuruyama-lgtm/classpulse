@@ -129,7 +129,7 @@ export function mount(root, ctx) {
   function buildPoll(slide) {
     const options = Array.isArray(slide.options) ? slide.options.slice(0, OPTION_MARKS.length) : [];
     const ui = { options, cards: [], resultsKey: null };
-    ui.statusChip = el('span', { class: 'st-chip-status' });
+    ui.statusChip = el('span', { class: 'st-chip-status', 'aria-live': 'polite' });
     ui.cards = options.map((opt, i) => {
       const selTag = el('span', { class: 'st-tag st-tag-selected', text: '選択中', hidden: true });
       const sentTag = el('span', { class: 'st-tag st-tag-sent', hidden: true },
@@ -137,6 +137,7 @@ export function mount(root, ctx) {
         el('span', { text: '送信済み' }));
       const btn = el('button', {
         type: 'button', class: 'st-option', 'aria-pressed': 'false',
+        'aria-label': `${OPTION_MARKS[i]} ${typeof opt === 'string' ? opt : String(opt ?? '')}`,
         onclick: () => { if (alive && !isOff(btn)) client.select(i); },
       },
       el('span', { class: 'st-mark', text: OPTION_MARKS[i] }),
@@ -188,6 +189,8 @@ export function mount(root, ctx) {
       const isSel = state.selected === i;
       const isSent = d.sentChoice === i;
       c.btn.setAttribute('aria-pressed', isSel ? 'true' : 'false');
+      // 読み上げの名前: 「A はい」＋ 状態（選択中／送信済み）。中身の文字の組み立てに頼らず、いつも同じ形にする
+      c.btn.setAttribute('aria-label', `${OPTION_MARKS[i]} ${typeof ui.options[i] === 'string' ? ui.options[i] : String(ui.options[i] ?? '')}${isSel ? '、選択中' : ''}${isSent ? '、送信済み' : ''}`);
       c.btn.classList.toggle('is-selected', isSel);
       c.btn.classList.toggle('is-sent', isSent);
       c.selTag.hidden = !isSel;

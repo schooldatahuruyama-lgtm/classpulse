@@ -65,7 +65,7 @@
 .dash-recent { padding: var(--s-2); }
 .dash-recent-list { gap: var(--s-1); }
 .dash-recent-link {
-  display: flex; flex-direction: column; min-height: 44px; padding: 8px 12px; border: 2px solid var(--c-line);
+  display: flex; flex-direction: column; min-height: 44px; padding: 8px 12px; border: 2px solid var(--c-border);
   border-radius: var(--r-1); color: var(--c-navy); text-decoration: none;
 }
 .dash-recent-link:hover { background: var(--c-bg); }

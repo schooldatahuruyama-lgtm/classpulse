@@ -26,7 +26,9 @@
   --c-card: #FFFFFF;
   --c-line: #DCE4F5;
   --c-danger-text: #B3243A; /* 白い文字を載せる危険色（濃い色） */
-  --c-border: #8A97C9;      /* 操作部品の枠（薄い区切り線だけに頼らない） */
+  --c-border: #6B79B3;      /* 操作部品の枠（隣の色と 3:1 以上。薄い区切り線だけに頼らない） */
+  --c-ok-border: #2E8B57;   /* 成功の枠（--c-ok を濃くして白や背景と 3:1 以上にしたもの） */
+  --c-warn-border: #8F6F00; /* 注意の枠（--c-warn を濃くして淡黄と 3:1 以上にしたもの） */
   --r-1: 12px; --r-2: 16px; --r-3: 24px;
   --s-1: 8px; --s-2: 16px; --s-3: 24px; --s-4: 32px;
   --shadow: 0 2px 8px rgba(31, 42, 107, 0.10);
@@ -92,17 +94,17 @@ input[type='text'], input[type='email'], input[type='password'], textarea, selec
 .chip {
   display: inline-flex; align-items: center; gap: 6px;
   min-height: 28px; padding: 2px 12px;
-  border: 2px solid var(--c-line); border-radius: 999px;
+  border: 2px solid var(--c-border); border-radius: 999px;
   background: var(--c-card); color: var(--c-navy); font-size: 14px; font-weight: 700;
 }
 .chip-icon { font-weight: 700; }
-.chip-ok { border-color: var(--c-ok); }
-.chip-warn { border-color: var(--c-warn); background: #FFF6D6; }
+.chip-ok { border-color: var(--c-ok-border); }
+.chip-warn { border-color: var(--c-warn-border); background: #FFF6D6; }
 .chip-danger { border-color: var(--c-danger); }
 .chip-info { border-color: var(--c-main); }
 
 /* メッセージ */
-.notice { padding: var(--s-2); border: 2px solid var(--c-warn); border-radius: var(--r-1); background: #FFF6D6; }
+.notice { padding: var(--s-2); border: 2px solid var(--c-warn-border); border-radius: var(--r-1); background: #FFF6D6; }
 .error { padding: 12px var(--s-2); border: 2px solid var(--c-danger-text); border-radius: var(--r-1); color: var(--c-danger-text); background: var(--c-card); font-weight: 700; margin-bottom: var(--s-2); }
 
 /* 結果の棒 */

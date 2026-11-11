@@ -247,15 +247,17 @@ export function mount(root, ctx) {
     const l = {};
     l.banner = el('div', { class: 'pr-offline', role: 'alert', hidden: true, text: '接続が切れています。つなぎ直しています…' });
     l.stage = el('section', { class: 'pr-stage', 'aria-label': 'スライド' });
-    l.poll = el('aside', { class: 'pr-poll', 'aria-label': 'アンケートの状況', hidden: true });
+    l.poll = el('aside', { class: 'pr-poll', 'aria-label': 'アンケートの状況', 'aria-live': 'polite', hidden: true });
     l.prevBtn = btn('pr-prev', '← 前へ', () => go(-1));
+    l.prevBtn.setAttribute('aria-label', '前へ'); // 矢印の記号は読み上げない
     l.pos = el('span', { class: 'pr-pos' });
     l.nextBtn = btn('btn-primary pr-next', '次へ →', () => go(1));
+    l.nextBtn.setAttribute('aria-label', '次へ');
     l.last = el('span', { class: 'pr-last', hidden: true, text: '最後のスライドです' });
     l.pauseBtn = btn('pr-pause', '受付を止める', togglePause);
     l.resultsBtn = btn('pr-results-btn', '結果を表示', toggleResults);
     l.pollGroup = el('div', { class: 'pr-group pr-group-poll', hidden: true }, l.pauseBtn, l.resultsBtn);
-    l.count = el('span', { class: 'pr-count' });
+    l.count = el('span', { class: 'pr-count', 'aria-live': 'polite' });
     l.qrBtn = btn('pr-qr-btn', 'QR コード', openQr);
     l.endBtn = btn('btn-danger pr-end', '授業を終了', endClass);
     l.bar = el('div', { class: 'pr-bar', role: 'toolbar', 'aria-label': '発表の操作' },
