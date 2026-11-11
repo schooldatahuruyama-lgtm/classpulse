@@ -164,3 +164,39 @@ test('登録されていない uid は先生でない', async () => {
   assert.equal(await repo.isTeacher(), true);
   assert.equal(await createRepo(net, 'u2').isTeacher(), false);
 });
+
+// ---- 終了の後片づけが途中で止まった授業（履歴と「発表中」の印が両方ある） ----
+
+test('履歴を消すとき、その授業を指す「発表中」の印も同じ update で消す', async () => {
+  const { net, repo } = setup();
+  await repo.saveHistory('S1', { title: 'T', deckId: 'd1', startedAt: 1, endedAt: 2, participants: 1, questions: [] });
+  await net.set('sessions/S1', { owner: 'u1', pub: { state: 'ended' } });
+  await repo.setActive({ sid: 'S1', deckId: 'd1', startedAt: 1 });
+  const calls = [];
+  const orig = net.update.bind(net);
+  net.update = (path, patch) => { calls.push([path, Object.keys(patch).sort()]); return orig(path, patch); };
+  net.remove = async () => { throw new Error('remove は使わない（1 回の update で消す）'); };
+  await repo.deleteHistory('S1');
+  assert.deepEqual(calls, [['', ['sessions/S1', 'teachers/u1/active', 'teachers/u1/history/S1']]]);
+  assert.equal(await repo.getActive(), null);
+  assert.equal(await net.get('sessions/S1'), null);
+});
+
+test('履歴を消しても、別の授業を指す「発表中」の印は残す', async () => {
+  const { net, repo } = setup();
+  await repo.saveHistory('S1', { title: 'T', deckId: 'd1', startedAt: 1, endedAt: 2, participants: 1, questions: [] });
+  await net.set('sessions/S1', { owner: 'u1', pub: { state: 'ended' } });
+  await repo.setActive({ sid: 'S2', deckId: 'd1', startedAt: 5 });
+  await repo.deleteHistory('S1');
+  assert.deepEqual(await repo.getActive(), { sid: 'S2', deckId: 'd1', startedAt: 5 });
+});
+
+test('clearActiveIf: 印がその授業を指しているときだけ外す', async () => {
+  const { repo } = setup();
+  await repo.setActive({ sid: 'S1', deckId: 'd1', startedAt: 1 });
+  assert.equal(await repo.clearActiveIf('S2'), false);
+  assert.equal((await repo.getActive()).sid, 'S1');
+  assert.equal(await repo.clearActiveIf('S1'), true);
+  assert.equal(await repo.getActive(), null);
+  assert.equal(await repo.clearActiveIf('S1'), false);
+});

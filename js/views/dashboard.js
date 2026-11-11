@@ -5,7 +5,10 @@ import { createDeck, newId } from '../model.js';
 import { formatDateTime } from '../format.js';
 import { routeHash } from '../router.js';
 import { backgroundSaver, useAuth } from './editor/background.js';
-import { runStartPresenting, sessionDeps, reasonsNodes, MSG_ACTIVE, MSG_FAILED } from './start-presenting.js';
+import {
+  runStartPresenting, sessionDeps, reasonsNodes, checkActive, openPresenter,
+  MSG_ACTIVE, MSG_FAILED, MSG_CREATED, LABEL_OPEN_CREATED, MSG_ENDED_PENDING, LABEL_FINISH_ENDED, MSG_UNSAVED,
+} from './start-presenting.js';
 
 const UNTITLED = '無題の教材';
 const RECENT_COUNT = 5;
@@ -13,6 +16,8 @@ const RECENT_COUNT = 5;
 export function mount(root, ctx) {
   let alive = true;
   let busy = false; // 作成・発表開始・削除の最中は、ほかの操作を受けつけない
+  let createdSid = null; // 作ったが、まだ発表の画面へ移れていない授業（作り直さず、これを開き直す）
+  let opening = false;
   const message = el('div', { class: 'dash-message' });
   const activeBox = el('div', { class: 'dash-active' });
   const decksBox = el('div', { class: 'dash-decks' });
@@ -43,11 +48,34 @@ export function mount(root, ctx) {
     }
   }
 
+  // 作成済みの授業の発表画面へ移る。移れなかったら（通信できないなど）、同じ授業を開き直すボタンを出す。
+  // 授業はもう作ってあるので、作り直さない
+  async function openCreated(sid) {
+    if (opening || !alive) return;
+    opening = true;
+    createdSid = sid;
+    try {
+      const moved = await openPresenter({ navigate: ctx.navigate, sid, isAlive: () => alive });
+      if (moved || !alive) return;
+      showMessage(el('p', { text: MSG_CREATED }),
+        el('button', { type: 'button', class: 'btn btn-primary', text: LABEL_OPEN_CREATED, onclick: () => openCreated(sid) }));
+    } finally {
+      opening = false;
+    }
+  }
+
   async function startPresent(d) {
     if (busy) return;
     setBusy(true);
     message.replaceChildren();
     try {
+      // 前に作った授業へまだ移れていなければ、新しく作らずにそれを開く
+      if (createdSid) { await openCreated(createdSid); return; }
+      // 編集画面を離れたあとの保存が済むのを待つ（保存の前の古い教材で、授業の写しを作らないように）
+      useAuth(ctx.auth);
+      const saved = await backgroundSaver().whenIdle(ctx.auth.user.uid, d.id);
+      if (!alive) return;
+      if (!saved) { showMessage(el('p', { text: MSG_UNSAVED })); return; }
       let deck;
       try {
         deck = await ctx.repo.loadDeck(d.id);
@@ -59,11 +87,14 @@ export function mount(root, ctx) {
       if (!deck) { showMessage(el('p', { text: 'この教材が見つかりません。' })); return; }
       const r = await runStartPresenting({ ...sessionDeps(ctx), deckId: d.id, getDeck: () => deck, isAlive: () => alive });
       if (!alive) return;
-      if (r.status === 'started') ctx.navigate('present', { sid: r.sid });
+      if (r.status === 'started') await openCreated(r.sid);
       else if (r.status === 'invalid') showMessage(...reasonsNodes(r.reasons));
       else if (r.status === 'active') {
         showMessage(el('p', { text: MSG_ACTIVE }),
           el('button', { type: 'button', class: 'btn btn-primary', text: '発表中の授業へ', onclick: () => ctx.navigate('present', { sid: r.sid }) }));
+      } else if (r.status === 'ended') {
+        showMessage(el('p', { text: MSG_ENDED_PENDING }),
+          el('button', { type: 'button', class: 'btn btn-primary', text: LABEL_FINISH_ENDED, onclick: () => ctx.navigate('present', { sid: r.sid }) }));
       } else if (r.status === 'failed') showMessage(el('p', { text: MSG_FAILED }));
     } finally {
       if (alive) setBusy(false);
@@ -108,13 +139,26 @@ export function mount(root, ctx) {
         act('削除', () => remove(d), 'btn dash-delete')));
   }
 
-  function renderActive(active) {
+  // ended: 授業は終了済みで、後片づけが残っている（発表の画面を開くと、残りの処理が行われる）
+  function renderActive(active, ended = false) {
     if (!(active && active.sid)) { activeBox.replaceChildren(); return; }
-    activeBox.replaceChildren(el('div', { class: 'dash-active-card', role: 'region', 'aria-label': '発表中の授業' },
+    const label = ended ? '終了の処理が終わっていない授業' : '発表中の授業';
+    activeBox.replaceChildren(el('div', { class: 'dash-active-card', role: 'region', 'aria-label': label },
       el('div', {},
-        el('strong', { text: '発表中の授業があります' }),
+        el('strong', { text: ended ? '終了の処理が終わっていない授業があります' : '発表中の授業があります' }),
         active.startedAt ? el('span', { class: 'small', text: ` （${formatDateTime(active.startedAt)} 開始）` }) : null),
-      el('a', { class: 'btn btn-primary', href: routeHash('present', { sid: active.sid }), text: '発表に戻る' })));
+      el('a', { class: 'btn btn-primary', href: routeHash('present', { sid: active.sid }), text: ended ? LABEL_FINISH_ENDED : '発表に戻る' })));
+  }
+
+  // 「発表中」の印が指す授業が、いまも続いているかを確かめる（帯を出す前に。あとから帯が入ると、ボタンの位置がずれる）。
+  // 授業が消えていれば印を外して帯を出さない。確かめられないときは、発表中として出す
+  async function findActive(active) {
+    if (!(active && active.sid)) return { kind: 'none' };
+    try {
+      return await checkActive({ ...sessionDeps(ctx), getActive: async () => active });
+    } catch {
+      return { kind: 'live', active };
+    }
   }
 
   function renderDecks(decks) {
@@ -151,8 +195,10 @@ export function mount(root, ctx) {
   async function load() {
     try {
       const [decks, active, history] = await Promise.all([ctx.repo.listDecks(), ctx.repo.getActive(), ctx.repo.listHistory()]);
+      const found = await findActive(active);
       if (!alive) return;
-      renderActive(active);
+      if (found.kind === 'none') renderActive(null);
+      else renderActive(found.active, found.kind === 'ended');
       renderDecks(decks);
       renderRecent(history);
     } catch {

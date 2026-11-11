@@ -94,10 +94,13 @@ async function start() {
     (main || appRoot).replaceChildren(loading);
   }
 
+  // 画面のプログラムを読みこめなかったとき。アドレス（ハッシュ）はそのままなので、読み直せば同じ画面を開ける
+  // （発表を始めた直後なら、作成済みの授業の発表画面がそのまま開く。授業は作り直さない）
   function placeholder(root) {
     root.replaceChildren(el('main', { class: 'page-pad' },
-      el('h2', { text: '準備中' }),
-      el('p', { text: 'この画面はまだ使えません。' })));
+      el('h2', { text: '画面を読みこめませんでした' }),
+      el('p', { role: 'alert', text: '接続を確かめて、もう一度ためしてください。' }),
+      el('p', {}, el('button', { type: 'button', class: 'btn btn-primary', text: 'もう一度ためす', onclick: () => location.reload() }))));
     return () => {};
   }
 

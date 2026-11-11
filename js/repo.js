@@ -111,9 +111,22 @@ export function createRepo(net, uid) {
       await net.set(`${base}/history/${sid}`, history);
     },
 
-    // 履歴と、終わった授業のデータ（sessions/<sid>）を、ルートへの 1 回の update で一緒に消す
+    // 履歴と、終わった授業のデータ（sessions/<sid>）を、ルートへの 1 回の update で一緒に消す。
+    // 終了の後片づけが途中で止まっていて「発表中」の印がこの授業を指したままなら、その印も一緒に消す
+    // （消えた授業を指す印が残ると、次の授業を始められなくなる）
     async deleteHistory(sid) {
-      await net.update('', { [`${base}/history/${sid}`]: null, [`sessions/${sid}`]: null });
+      const patch = { [`${base}/history/${sid}`]: null, [`sessions/${sid}`]: null };
+      const active = await net.get(`${base}/active`);
+      if (active && active.sid === sid) patch[`${base}/active`] = null;
+      await net.update('', patch);
+    },
+
+    // 「発表中」の印が sid を指しているときだけ外す。外したら true
+    async clearActiveIf(sid) {
+      const active = await net.get(`${base}/active`);
+      if (!active || active.sid !== sid) return false;
+      await net.remove(`${base}/active`);
+      return true;
     },
   };
 }

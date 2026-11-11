@@ -7,7 +7,10 @@ import {
   updateSlide, deckImageBytes,
 } from '../model.js';
 import { createAutosaver } from '../autosave.js';
-import { runStartPresenting, sessionDeps, reasonsNodes, MSG_ACTIVE, MSG_FAILED } from './start-presenting.js';
+import {
+  runStartPresenting, sessionDeps, reasonsNodes, openPresenter,
+  MSG_ACTIVE, MSG_FAILED, MSG_CREATED, LABEL_OPEN_CREATED, MSG_ENDED_PENDING, LABEL_FINISH_ENDED,
+} from './start-presenting.js';
 import { compressImage, dataUrlBytes } from '../image.js';
 import { mountCanvas } from './editor/canvas.js';
 import { renderSlideList, updateThumb, addButtons } from './editor/slide-list.js';
@@ -121,6 +124,8 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
   let saveState = 'saved';
   let leaving = false;
   let starting = false;
+  let createdSid = null; // 作ったが、まだ発表の画面へ移れていない授業（作り直さず、これを開き直す）
+  let opening = false;
   let canvas = null;
   let thumbTimer = null;
   let imageTask = null;              // 画像の追加中の Promise（同時に 1 つだけ）
@@ -468,6 +473,8 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
     presentBtn.textContent = '準備しています…';
     messages.replaceChildren();
     try {
+      // 前に作った授業へまだ移れていなければ、新しく作らずにそれを開く
+      if (createdSid) { await openCreated(createdSid); return; }
       // 読みこみ中の画像が入った教材で始める（starting の間は新しい画像を受けつけない）
       await waitImage();
       if (!alive) return;
@@ -481,11 +488,30 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
         showMessage(el('p', { text: MSG_ACTIVE }),
           el('button', { type: 'button', class: 'btn btn-primary', text: '発表中の授業へ', onclick: () => goTo('present', { sid: r.sid }) }));
       } else if (r.status === 'failed') showMessage(el('p', { text: MSG_FAILED }));
-      else if (r.status === 'started') ctx.navigate('present', { sid: r.sid });
+      else if (r.status === 'ended') {
+        showMessage(el('p', { text: MSG_ENDED_PENDING }),
+          el('button', { type: 'button', class: 'btn btn-primary', text: LABEL_FINISH_ENDED, onclick: () => goTo('present', { sid: r.sid }) }));
+      } else if (r.status === 'started') await openCreated(r.sid);
     } finally {
       starting = false;
       presentBtn.disabled = false;
       presentBtn.textContent = '発表を開始';
+    }
+  }
+
+  // 作成済みの授業の発表画面へ移る。移れなかったら（通信できないなど）、同じ授業を開き直すボタンを出す。
+  // 授業はもう作ってあるので、作り直さない
+  async function openCreated(sid) {
+    if (opening || !alive) return;
+    opening = true;
+    createdSid = sid;
+    try {
+      const moved = await openPresenter({ navigate: ctx.navigate, sid, isAlive: () => alive });
+      if (moved || !alive) return;
+      showMessage(el('p', { text: MSG_CREATED }),
+        el('button', { type: 'button', class: 'btn btn-primary', text: LABEL_OPEN_CREATED, onclick: () => openCreated(sid) }));
+    } finally {
+      opening = false;
     }
   }
 

@@ -17,6 +17,8 @@
 // isDeleted(uid, deckId) … このタブで削除に成功した教材なら true
 // deleting(uid, deckId, doDelete) … 教材の削除を 1 つの手続きで行う（下の説明）
 // whenNotDeleting(uid, deckId) … 削除の手続き中なら、終わるまで待つ
+// whenIdle(uid, deckId) … 進行中の処理と保存の試みが済むまで待つ。保存待ちが残っていなければ true。
+//   保存に失敗して再試行を待っている（まだ保存できていない）なら false（発表を始める前に確かめる）
 export function createBackgroundSaver({ setTimeout, clearTimeout, retryMs, onGuard, onEvent, getCurrentUid }) {
   const entries = new Map();   // key → { owner, deck, save, title, failed, warned, timer, running }
   const tasks = new Map();     // key → Set<Promise>（画像の追加など、外から数に入れた処理）
@@ -209,6 +211,16 @@ export function createBackgroundSaver({ setTimeout, clearTimeout, retryMs, onGua
     async whenNotDeleting(uid, deckId) {
       const key = keyOf(uid, deckId);
       while (deletes.has(key)) await deletes.get(key);
+    },
+
+    async whenIdle(uid, deckId) {
+      const key = keyOf(uid, deckId);
+      for (;;) {
+        while (deletes.has(key)) await deletes.get(key);
+        await settleKey(key);
+        if (!deletes.has(key)) break;
+      }
+      return !entries.has(key);
     },
 
     hasPending(uid, deckId) {

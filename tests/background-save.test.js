@@ -491,3 +491,56 @@ test('関門: 同じ教材 ID でも、別の先生の教材には影響しな�
   assert.equal(await bg.guardedSave('A', 'x', { t: 'a' }, write), false);
   assert.deepEqual(written, [d1, d2]);
 });
+// ---- ホームから発表を始める前に、背景の保存が落ち着くのを待つ ----
+
+test('whenIdle: 何も預かっていなければ、すぐ true', async () => {
+  const { bg } = setup();
+  assert.equal(await bg.whenIdle('A', 'a'), true);
+});
+
+test('whenIdle: 保存の途中なら終わるまで待ち、保存できたら true', async () => {
+  let release;
+  const saved = [];
+  const save = async (deck) => { await new Promise((r) => { release = r; }); saved.push(deck); };
+  const { bg } = setup();
+  const d = { title: 't' };
+  bg.hand('A', 'a', { deck: d, save, title: 't' });
+  let done = null;
+  bg.whenIdle('A', 'a').then((v) => { done = v; });
+  await tick();
+  assert.equal(done, null); // まだ保存中
+  release();
+  await tick();
+  assert.equal(done, true);
+  assert.deepEqual(saved, [d]);
+});
+
+test('whenIdle: 保存に失敗して再試行を待っているなら false（待ち続けない）', async () => {
+  const save = async () => { throw new Error('通信なし'); };
+  const { bg, timers } = setup();
+  bg.hand('A', 'a', { deck: { title: 't' }, save, title: 't' });
+  assert.equal(await bg.whenIdle('A', 'a'), false);
+  assert.equal(timers.size, 1); // 再試行は続いている
+  assert.equal(await bg.whenIdle('A', 'other'), true); // 別の教材には関係しない
+  assert.equal(await bg.whenIdle('B', 'a'), true);     // 別の先生にも関係しない
+});
+
+test('whenIdle: 編集画面の最後の保存（after）と画像の追加も待つ', async () => {
+  let finishAfter;
+  let finishTask;
+  const { bg } = setup();
+  const save = async () => {};
+  bg.track('A', 'a', new Promise((r) => { finishTask = r; }));
+  bg.hand('A', 'a', { deck: { title: 't' }, save, title: 't', after: new Promise((r) => { finishAfter = r; }) });
+  let done = null;
+  bg.whenIdle('A', 'a').then((v) => { done = v; });
+  await tick();
+  assert.equal(done, null);
+  finishAfter(true); // 編集画面の保存で、もう保存できていた
+  await tick();
+  assert.equal(done, null); // 画像の追加がまだ
+  finishTask();
+  await tick();
+  await tick();
+  assert.equal(done, true);
+});
