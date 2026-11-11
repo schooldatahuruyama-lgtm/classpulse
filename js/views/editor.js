@@ -67,6 +67,11 @@ function simplePage(root, title, text, button) {
     el('p', {}, button)));
 }
 
+function notFoundPage(root, ctx) {
+  simplePage(root, 'スライド編集', 'この教材は見つかりません。',
+    el('button', { type: 'button', class: 'btn btn-primary', text: '一覧へ戻る', onclick: () => ctx.navigate('dashboard') }));
+}
+
 export function mount(root, ctx) {
   const deckId = ctx.params.deckId;
   let alive = true;
@@ -83,6 +88,8 @@ export function mount(root, ctx) {
     if (!alive) return;
     await bg.settle(uid, deckId);
     if (!alive) return;
+    // このタブで削除した教材は開かない（読みこみもしない）
+    if (bg.isDeleted(uid, deckId)) { notFoundPage(root, ctx); return; }
     const adopted = bg.adopt(uid, deckId);
     if (adopted) {
       stopEditor = startEditor(root, ctx, deckId, adopted, { adopted: true });
@@ -98,11 +105,7 @@ export function mount(root, ctx) {
       return;
     }
     if (!alive) return;
-    if (!deck) {
-      simplePage(root, 'スライド編集', 'この教材は見つかりません。',
-        el('button', { type: 'button', class: 'btn btn-primary', text: '一覧へ戻る', onclick: () => ctx.navigate('dashboard') }));
-      return;
-    }
+    if (!deck) { notFoundPage(root, ctx); return; }
     stopEditor = startEditor(root, ctx, deckId, deck);
   }
 
@@ -122,9 +125,27 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
   let thumbTimer = null;
   let imageTask = null;              // 画像の追加中の Promise（同時に 1 つだけ）
   let flushDone = Promise.resolve(); // 画面を離れたときの最後の保存
+  let gone = false;                  // この教材が（このタブで）削除された
   const uid = ctx.auth.user.uid;     // この教材の持ち主。保存はいつも、この先生の repo で書く
-  const repo = ctx.repo;
-  const saveDeck = (deck) => repo.saveDeck(deckId, forSave(deck), Date.now());
+  const bg = backgroundSaver();
+
+  // この画面からの保存は、すべてここを通る。書くのは画面の外の保存の関門（guardedSave）だけ。
+  // 削除中・削除済みで断られたときは失敗として扱う（「保存済み」と出さない）
+  async function saveDeck(deck) {
+    const written = await bg.guardedSave(uid, deckId, deck, (d) => ctx.repo.saveDeck(deckId, forSave(d), Date.now()));
+    if (written) return;
+    if (bg.isDeleted(uid, deckId)) markGone();
+    throw new Error('保存を断られた');
+  }
+
+  // 削除済みの教材だった: 保存をやめる。この画面がまだ出ていれば「見つかりません」に替える
+  function markGone() {
+    if (gone) return;
+    gone = true;
+    if (!alive) return;
+    closeAllDialogs();
+    notFoundPage(root, ctx);
+  }
 
   const state = {
     deck: initialDeck,
@@ -142,7 +163,8 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
     retryMs: CONFIG.autosaveRetryMs,
     onState: (s) => { saveState = s; renderSaveState(); },
     // 画面を離れたあとは再試行しない（次に開いた編集画面の保存と食い違わないように）
-    setTimeout: (fn, ms) => window.setTimeout(() => { if (alive) fn(); }, ms),
+    // 削除済みの教材にも再試行しない
+    setTimeout: (fn, ms) => window.setTimeout(() => { if (alive && !gone) fn(); }, ms),
     clearTimeout: (t) => window.clearTimeout(t),
   });
 
@@ -357,7 +379,7 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
           if (message) showImageError(message);
         }
       })();
-      backgroundSaver().track(uid, deckId, imageTask);
+      bg.track(uid, deckId, imageTask);
     },
 
     // アンケートの一部を変える（入力欄はそのまま。縮小表示だけ描き直す）
@@ -391,7 +413,7 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
     if (!alive) {
       // 画面を離れたあと: 最後の保存（flushDone）が済んでから、画面の外で保存する
       state.deck = next;
-      backgroundSaver().hand(uid, deckId, {
+      bg.hand(uid, deckId, {
         deck: next, save: saveDeck, title: forSave(next).title, failed: saveState === 'failed',
         after: flushDone.then(() => false, () => false),
       });
@@ -417,10 +439,14 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
 
   // 保存を待ち、失敗していれば確かめる。移ってよければ true
   async function readyToLeave() {
+    if (gone) return true; // 削除済みの教材: 保存するものはない
     if (canvas) canvas.finishEdit();
     await waitImage(); // 読みこみ中の画像を教材に入れてから保存する
+    if (!alive) return false; // 待つ間に画面を離れた。保存は画面の外の保存に任せてある
+    if (gone) return true;
     await autosaver.flush();
     if (!alive) return false;
+    if (gone) return true;
     if (saveState !== 'failed') return true;
     return confirmDialog({ title: LEAVE_TITLE, body: LEAVE_BODY, okLabel: '移動する', danger: true });
   }
@@ -480,6 +506,7 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
 
   // タブを閉じる・読み直すとき、保存がまだなら確かめる
   function onBeforeUnload(ev) {
+    if (gone) return;
     if (autosaver.hasPending() || saveState === 'failed') {
       ev.preventDefault();
       ev.returnValue = '';
@@ -512,12 +539,12 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
     window.removeEventListener('beforeunload', onBeforeUnload);
     document.removeEventListener('visibilitychange', onVisibility);
     if (thumbTimer !== null) window.clearTimeout(thumbTimer);
-    const unsaved = autosaver.hasPending() || saveState === 'failed';
+    const unsaved = !gone && (autosaver.hasPending() || saveState === 'failed');
     alive = false; // これより後、この画面の自動保存は再試行しない（画面の外の保存が引きつぐ）
     flushDone = autosaver.flush();
     if (unsaved) {
       // 最後の保存が済めばそれで終わり。失敗したら、画面の外の保存が再試行を続ける
-      backgroundSaver().hand(uid, deckId, {
+      bg.hand(uid, deckId, {
         deck: state.deck, save: saveDeck, title: forSave(state.deck).title, failed: saveState === 'failed',
         after: flushDone.then(() => saveState === 'saved' && !autosaver.hasPending(), () => false),
       });

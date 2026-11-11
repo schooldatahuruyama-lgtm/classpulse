@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createBackgroundSaver } from '../js/views/editor/background-save.js';
+import { createAutosaver } from '../js/autosave.js';
 
 // 手で進めるタイマー
 function fakeTimers() {
@@ -310,4 +311,183 @@ test('削除: 保存待ちが無くても、成功・失敗のどちらのあと
   await assert.rejects(bg.deleting('A', 'a', async () => { throw new Error('x'); }));
   assert.equal(bg._hasState('A', 'a'), false);
   assert.deepEqual(guards, []);
+});
+
+// ---- 保存の関門（guardedSave）と、削除済みの印 ----
+
+// 編集画面と同じ形の保存: 関門を通し、断られたら失敗として扱う
+function viewSave(bg, uid, deckId, write) {
+  return async (deck) => {
+    if (!(await bg.guardedSave(uid, deckId, deck, write))) throw new Error('断られた');
+  };
+}
+
+test('関門: ふつうは write で書いて true を返す。write の失敗はそのまま投げる', async () => {
+  const written = [];
+  const { bg } = setup();
+  const d = { v: 1 };
+  assert.equal(await bg.guardedSave('A', 'a', d, async (deck) => { written.push(deck); }), true);
+  assert.deepEqual(written, [d]);
+  const err = new Error('通信なし');
+  await assert.rejects(bg.guardedSave('A', 'a', d, async () => { throw err; }), (e) => e === err);
+  assert.equal(bg.isDeleted('A', 'a'), false);
+  assert.equal(bg._hasState('A', 'a'), false);
+});
+
+test('関門: 削除に成功したあとは、直接の保存・待っていた再試行・遅れて届いた画像のどれも書かない', async () => {
+  let calls = 0;
+  let fail = true;
+  const write = async () => { calls += 1; if (fail) throw new Error('通信なし'); };
+  const { bg, timers, guards } = setup();
+  const save = viewSave(bg, 'A', 'a', write);
+  bg.hand('A', 'a', { deck: { v: 1 }, save });
+  await tick();
+  assert.equal(calls, 1);
+  assert.equal(timers.size, 1, '再試行を待っている');
+
+  await bg.deleting('A', 'a', async () => {});
+  fail = false;
+  assert.equal(bg.isDeleted('A', 'a'), true);
+  // 待っていた再試行
+  timers.runAll();
+  await tick();
+  // 古い編集画面からの直接の保存
+  assert.equal(await bg.guardedSave('A', 'a', { v: 2 }, write), false, '断ったことを返す');
+  await assert.rejects(save({ v: 2 }), /断られた/, '編集画面の保存は失敗になる（「保存済み」にならない）');
+  // 遅れて届いた画像の結果
+  bg.hand('A', 'a', { deck: { v: 3, image: true }, save });
+  bg.hand('A', 'a', { deck: { v: 4, image: true }, save, after: Promise.resolve(false) });
+  await bg.settle('A', 'a');
+  timers.runAll();
+  await tick();
+  assert.equal(calls, 1, '削除のあとは一度も書かない');
+  assert.equal(timers.size, 0);
+  assert.equal(bg.adopt('A', 'a'), null);
+  assert.equal(bg._hasState('A', 'a'), false, '保存待ちは残さない');
+  assert.equal(guards[guards.length - 1], false, '閉じる前の確認も残さない');
+});
+
+test('関門: 未保存の変更と処理中の画像 → 離れる → 離れるときの保存が失敗 → 削除成功 → 画像完了、でも書かない', async () => {
+  const written = [];
+  let fail = true;
+  const write = async (deck) => { if (fail) throw new Error('通信なし'); written.push(deck); };
+  const { bg, timers } = setup();
+  const viewTimers = fakeTimers();
+  const states = [];
+  const save = viewSave(bg, 'A', 'a', write);
+  // 編集画面の自動保存
+  const autosaver = createAutosaver({
+    save, delayMs: 800, retryMs: 5000, maxWaitMs: 0, onState: (st) => states.push(st),
+    setTimeout: viewTimers.setTimeout, clearTimeout: viewTimers.clearTimeout,
+  });
+  const image = deferred();
+  bg.track('A', 'a', image.promise);       // 画像を処理中
+  const d1 = { v: 1 };
+  autosaver.touch(d1);                     // 未保存の変更
+  // 「一覧へ」を押した古い処理は、画像を待っている（待ったあとの確認が抜けていた場合を再現する）
+  const staleLeave = image.promise.then(() => autosaver.flush());
+
+  // ブラウザの「戻る」で画面を離れる: 最後の保存を始め、画面の外の保存へ渡す
+  const flushDone = autosaver.flush();
+  bg.hand('A', 'a', { deck: d1, save, after: flushDone.then(() => false, () => false) });
+  await flushDone;                         // 離れるときの保存は失敗
+  await tick();
+  assert.equal(states[states.length - 1], 'failed');
+  assert.deepEqual(written, []);
+
+  // 一覧で削除する（成功）。通信は戻っている
+  fail = false;
+  let deleteCalls = 0;
+  const del = bg.deleting('A', 'a', async () => { deleteCalls += 1; });
+  await tick();
+  assert.equal(deleteCalls, 1);
+  assert.equal(bg.isDeleted('A', 'a'), true, '成功した時点で印が付く（画像を待っている間も）');
+
+  // 画像が完了: 教材に入れて渡し、待っていた古い処理が保存しようとする
+  const d2 = { v: 2, image: true };
+  autosaver.touch(d2);
+  bg.hand('A', 'a', { deck: d2, save, after: flushDone.then(() => false, () => false) });
+  image.resolve();
+  await staleLeave;
+  await del;
+  await bg.settle('A', 'a');
+  timers.runAll();
+  viewTimers.runAll();
+  await tick();
+  timers.runAll();
+  await tick();
+  assert.deepEqual(written, [], '削除した教材を書き直さない');
+  assert.notEqual(states[states.length - 1], 'saved', '「保存済み」と出さない');
+  assert.equal(bg._hasState('A', 'a'), false);
+  assert.equal(timers.size, 0);
+});
+
+test('関門: 削除の手続き中（終わる前）は書かない。書いている途中の保存は、済んでから doDelete を呼ぶ', async () => {
+  const order = [];
+  const inFlight = deferred();
+  const { bg } = setup();
+  const first = bg.guardedSave('A', 'a', { v: 1 }, () => { order.push('write-start'); return inFlight.promise.then(() => { order.push('write-end'); }); });
+  const del = deferred();
+  const p = bg.deleting('A', 'a', () => { order.push('delete'); return del.promise; });
+  await tick();
+  assert.deepEqual(order, ['write-start'], '書いている途中は削除を始めない');
+  let calls = 0;
+  assert.equal(await bg.guardedSave('A', 'a', { v: 2 }, async () => { calls += 1; }), false, '削除を待っている間');
+  inFlight.resolve();
+  assert.equal(await first, true);
+  await tick();
+  assert.deepEqual(order, ['write-start', 'write-end', 'delete']);
+  assert.equal(await bg.guardedSave('A', 'a', { v: 3 }, async () => { calls += 1; }), false, '削除の要求中');
+  assert.equal(bg.isDeleted('A', 'a'), false, 'まだ成功していない');
+  del.resolve();
+  await p;
+  assert.equal(calls, 0);
+  assert.equal(bg.isDeleted('A', 'a'), true);
+});
+
+test('関門: 削除に失敗したら印は付かず、また書ける。預かっていた未保存の内容は再試行で保存される', async () => {
+  const written = [];
+  let fail = true;
+  const write = async (deck) => { if (fail) throw new Error('通信なし'); written.push(deck); };
+  const { bg, timers } = setup();
+  const save = viewSave(bg, 'A', 'a', write);
+  const kept = { v: 1 };
+  bg.hand('A', 'a', { deck: kept, save });
+  await tick();
+  const del = deferred();
+  const p = bg.deleting('A', 'a', () => del.promise);
+  await tick();
+  assert.equal(await bg.guardedSave('A', 'a', { v: 9 }, write), false, '手続き中は書かない');
+  del.reject(new Error('削除できない'));
+  await assert.rejects(p);
+  assert.equal(bg.isDeleted('A', 'a'), false, '失敗では印を付けない');
+  assert.equal(bg.hasPending('A', 'a'), true, '未保存の内容は残っている');
+  await bg.settle('A', 'a'); // 削除の失敗の直後に再開した保存（まだ通信なし）が終わるのを待つ
+  assert.deepEqual(written, []);
+  fail = false;
+  timers.runAll();
+  await tick();
+  assert.deepEqual(written, [kept], '再試行で保存される');
+  const direct = { v: 2 };
+  assert.equal(await bg.guardedSave('A', 'a', direct, write), true, '直接の保存もまた通る');
+  assert.deepEqual(written, [kept, direct]);
+  assert.equal(bg._hasState('A', 'a'), false);
+});
+
+test('関門: 同じ教材 ID でも、別の先生の教材には影響しない', async () => {
+  const written = [];
+  const { bg, login } = setup({ uid: 'A' });
+  await bg.deleting('A', 'x', async () => {});
+  assert.equal(bg.isDeleted('A', 'x'), true);
+  assert.equal(bg.isDeleted('B', 'x'), false);
+  login.uid = 'B';
+  const write = async (deck) => { written.push(deck); };
+  const d1 = { t: 'b1' };
+  const d2 = { t: 'b2' };
+  assert.equal(await bg.guardedSave('B', 'x', d1, write), true);
+  bg.hand('B', 'x', { deck: d2, save: viewSave(bg, 'B', 'x', write) });
+  await bg.settle('B', 'x');
+  assert.deepEqual(written, [d1, d2]);
+  assert.equal(await bg.guardedSave('A', 'x', { t: 'a' }, write), false);
+  assert.deepEqual(written, [d1, d2]);
 });
