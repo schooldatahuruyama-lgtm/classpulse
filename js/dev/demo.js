@@ -1,4 +1,5 @@
 // 練習モードは手動で試すための道具。2 つのタブが同じ瞬間に書きこむ場合の競合は守っていない。
+// 別のタブへは「書きこみそのもの」を BroadcastChannel で順に知らせる（保存先は読み直し用）。
 // 練習モード: Firebase の代わりに、このパソコンの中だけで動く net / auth を作る。
 // データは localStorage に保存し、BroadcastChannel でほかのタブへ変更を知らせる。
 // ブラウザのものは引数で受け取る（Node のテストでも動かせる）。
@@ -58,9 +59,10 @@ export function createDemoBackend({ storage, sessionStorage, BroadcastChannel, n
     now,
     deny,
     initial,
-    onChange: (root) => {
+    onChange: (root, writes) => {
       try { storage.setItem(DEMO_DB_KEY, JSON.stringify(root)); } catch { /* 容量不足でも続ける */ }
-      if (channel) channel.postMessage('changed');
+      // 書きこみそのものを知らせる（保存先の最新だけを読む方式だと、続けて起きた変更の途中を取りこぼす）
+      if (channel) channel.postMessage({ type: 'ops', writes });
     },
   });
 
@@ -70,17 +72,27 @@ export function createDemoBackend({ storage, sessionStorage, BroadcastChannel, n
     if (latest === undefined) return; // 読めないときは今のデータのまま
     mem.replaceRoot(latest === null ? seedDb() : latest); // キーが無い = 削除された
   }
-  if (channel) channel.onmessage = sync;
+  // 届いた書きこみを順に適用する。消去は初期の状態へ。それ以外の知らせは保存先から読み直す
+  if (channel) {
+    channel.onmessage = (ev) => {
+      const d = ev && ev.data;
+      if (d && d.type === 'ops' && Array.isArray(d.writes)) mem.applyRemote(d.writes);
+      else if (d && d.type === 'clear') mem.replaceRoot(seedDb());
+      else sync();
+    };
+  }
 
-  // 書く前・読む前に最新へ追いつく（2 つのタブが同時に書いても、古い内容で上書きしない）
+  // BroadcastChannel が使えない環境では、操作の前に保存先の最新へ追いつく
   const net = { ...mem };
-  for (const op of ['get', 'set', 'update', 'remove']) {
-    net[op] = (...args) => { sync(); return mem[op](...args); };
+  if (!channel) {
+    for (const op of ['get', 'set', 'update', 'remove']) {
+      net[op] = (...args) => { sync(); return mem[op](...args); };
+    }
   }
   net.clear = () => {
     storage.removeItem(DEMO_DB_KEY);
     mem.replaceRoot(seedDb());
-    if (channel) channel.postMessage('changed');
+    if (channel) channel.postMessage({ type: 'clear' });
   };
 
   // 先生: どんなメールアドレスとパスワードでも入れる。状態は localStorage に残す

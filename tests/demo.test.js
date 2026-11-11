@@ -161,3 +161,81 @@ test('保存先が壊れていても、今のデータを残す', async () => {
   shared.setItem('classpulse:demo:db', '{broken');
   assert.equal(await b.net.get('k'), 1);
 });
+
+// 非同期に届ける BroadcastChannel の代役（本物と同じく、届くのは書いたあと）
+function asyncHub() {
+  const all = new Set();
+  const FakeBC = class {
+    constructor(name) { this.name = name; this.onmessage = null; all.add(this); }
+    postMessage(data) {
+      for (const c of all) {
+        if (c !== this && c.name === this.name) setTimeout(() => { if (c.onmessage) c.onmessage({ data }); }, 0);
+      }
+    }
+    close() { all.delete(this); }
+  };
+  return FakeBC;
+}
+const tick = () => new Promise((r) => setTimeout(r, 30));
+
+test('非同期の通知: A が x を書き、B が（受け取って）y を書くと、A の購読は y を受け取る', async () => {
+  const shared = fakeStorage();
+  const BC = asyncHub();
+  const a = make(shared, BC);
+  const b = make(shared, BC);
+  const seenA = [];
+  a.net.subscribe('pub/results', (v) => seenA.push(v));
+  b.net.subscribe('inbox/x', async (v) => { if (v === 1) await b.net.set('pub/results/s1', { n: 7 }); });
+  await a.net.set('inbox/x', 1);
+  await tick();
+  assert.deepEqual(seenA[seenA.length - 1], { s1: { n: 7 } });
+  assert.deepEqual(await a.net.get('pub/results/s1'), { n: 7 });
+});
+
+test('非同期の通知: 自分の書きこみの直後に届いた相手の 2 回の書きこみを、順に全部受け取る', async () => {
+  const shared = fakeStorage();
+  const BC = asyncHub();
+  const a = make(shared, BC);
+  const b = make(shared, BC);
+  const seenA = [];
+  a.net.subscribe('r', (v) => seenA.push(v));
+  await b.net.set('r', 1);
+  await a.net.set('own', 1); // B の通知が届く前の、A 自身の書きこみ
+  await b.net.set('r', 2);
+  await b.net.set('r', 3);
+  await a.net.set('own', 2);
+  await tick();
+  assert.deepEqual(seenA.filter((v) => v !== null).filter((v, i, arr) => i === 0 || v !== arr[i - 1]), [1, 2, 3]);
+  assert.equal(seenA[seenA.length - 1], 3);
+});
+
+test('非同期の通知: 3 つの backend で、互いの書きこみが全員の購読に届く', async () => {
+  const shared = fakeStorage();
+  const BC = asyncHub();
+  const [a, b, c] = [make(shared, BC), make(shared, BC), make(shared, BC)];
+  const last = { a: null, b: null, c: null };
+  a.net.subscribe('k', (v) => { last.a = v; });
+  b.net.subscribe('k', (v) => { last.b = v; });
+  c.net.subscribe('k', (v) => { last.c = v; });
+  await a.net.set('k/a', 1);
+  await b.net.set('k/b', 2);
+  await c.net.set('k/c', 3);
+  await a.net.set('k/a2', 4);
+  await tick();
+  const want = { a: 1, b: 2, c: 3, a2: 4 };
+  assert.deepEqual(last, { a: want, b: want, c: want });
+});
+
+test('同期的に届く通知: B の返信の書きこみが A 自身の通知より先に届いても、A は最後の値を受け取る', async () => {
+  const shared = fakeStorage();
+  const BC = fakeBroadcastHub();
+  const a = make(shared, BC);
+  const b = make(shared, BC);
+  const seenA = [];
+  a.net.subscribe('', (v) => seenA.push(v));
+  b.net.subscribe('inbox/x', (v) => { if (v === 1) b.net.set('pub/y', 7); });
+  await a.net.set('inbox/x', 1);
+  assert.deepEqual(seenA[seenA.length - 1], { inbox: { x: 1 }, pub: { y: 7 }, teacherList: { 'demo-teacher': true } });
+  assert.equal(await a.net.get('pub/y'), 7);
+  assert.equal(JSON.parse(shared.getItem('classpulse:demo:db')).pub.y, 7);
+});

@@ -39,7 +39,7 @@ function view(v) {
 
 const segs = (path) => String(path).split('/').filter((s) => s !== '');
 
-// initial: 最初の中身（整えて取り込む）、onChange(root): 書きこみのたびに呼ぶ（練習モードの保存用）
+// initial: 最初の中身（整えて取り込む）、onChange(root, writes): 書きこみのたびに呼ぶ（練習モードの保存用）
 export function createMemoryNet({ now = Date.now, deny = () => false, initial = null, onChange = null } = {}) {
   let root = normalize(initial, now);
   let online = true;
@@ -104,25 +104,29 @@ export function createMemoryNet({ now = Date.now, deny = () => false, initial = 
     },
     async set(path, value) {
       guard('set', path, value);
-      write(path, normalize(value, now));
-      if (onChange) onChange(root); // 保存してから購読に知らせる（通知中の読み取りで巻き戻らないように）
+      const v = normalize(value, now);
+      write(path, v);
+      if (onChange) onChange(root, [[path, v]]); // 保存してから購読に知らせる（通知中の読み取りで巻き戻らないように）
       notify([path]);
     },
     async update(path, patch) {
       guard('update', path, patch);
       const paths = [];
+      const writes = [];
       for (const [k, v] of Object.entries(patch)) {
         const full = [...segs(path), ...segs(k)].join('/');
-        write(full, normalize(v, now));
+        const n = normalize(v, now);
+        write(full, n);
         paths.push(full);
+        writes.push([full, n]);
       }
-      if (onChange) onChange(root);
+      if (onChange) onChange(root, writes);
       notify(paths);
     },
     async remove(path) {
       guard('remove', path);
       write(path, null);
-      if (onChange) onChange(root); // 保存してから購読に知らせる（通知中の読み取りで巻き戻らないように）
+      if (onChange) onChange(root, [[path, null]]); // 保存してから購読に知らせる（通知中の読み取りで巻き戻らないように）
       notify([path]);
     },
     serverTimestamp() { return { '.sv': 'timestamp' }; },
@@ -141,6 +145,17 @@ export function createMemoryNet({ now = Date.now, deny = () => false, initial = 
 
     // 全体の写し
     dump() { return view(root); },
+
+    // 別のタブが行った書きこみ（[パス, 整えた値] の並び）を、届いた順にそのまま適用して購読に知らせる。
+    // onChange は呼ばない。途中の状態も飛ばさずに順に届く
+    applyRemote(writes) {
+      const paths = [];
+      for (const [path, value] of writes) {
+        write(path, normalize(value, now));
+        paths.push(path);
+      }
+      notify(paths);
+    },
 
     // 外から中身をまるごと入れかえる（別のタブの変更の取りこみ用）。onChange は呼ばない。
     // 値が変わった場所の購読にだけ知らせる
