@@ -1,6 +1,10 @@
 // 先生側: 授業を始め、スライドを進め、受付を止め、結果を公開し、授業を終える。
 // DOM・グローバルに触れない（net・repo・タイマー・now は引数で受け取る）。
 // 状態の変更は、すべて session-logic のパッチを通す（規則をここで作り直さない）。
+// 同じ授業を別のタブでも開けるので、pub は自分の書きこみだけで決めない:
+// - pub を購読して、別のタブの変更（かくす・進める・終える）を state.pub に取りこむ
+// - 操作（次へ・停止・公開など）は、順番が来た時点でサーバーの最新の pub を読んでからパッチを作る
+// - 集計を書くかどうかは、その時点の state.pub で決める（かくした質問の集計は、規則でも書けない）
 import { CONFIG } from './config.js';
 import { validateDeck, newSessionId, normalizeDeck } from './model.js';
 import {
@@ -42,7 +46,9 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
   };
   let meta = { deckId: '', startedAt: 0 };
   let inbox = null;
-  let unsubscribe = null;
+  let unsubscribe = null;      // inbox の購読
+  let unsubscribePub = null;   // pub の購読（別のタブの変更を知る）
+  const online = { inbox: true, pub: true };
   let stopped = false;
   let ending = false;          // end の途中は結果を書かない
   const pendingResults = new Set(); // 結果の書きこみが順番待ち・実行中の質問
@@ -129,7 +135,9 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
       await net.update(pubPath, patch);
       state.pub = applyPatch(state.pub, patch);
       emit();
-    }).catch(() => {
+    }).catch(async (e) => {
+      // 規則に拒否された: 別のタブがかくしたのかもしれない。最新の pub を読み直す（読めなければ下の再試行に任せる）
+      if (e && e.code === 'denied') { try { await refreshPub(); } catch { /* あとでやり直す */ } }
       // 書けなかったら、少し待ってもう一度試す
       if (stopped || ending || timers.has(id)) return;
       timers.set(id, setT(() => { timers.delete(id); syncResults(); }, CONFIG.resultsThrottleMs));
@@ -148,10 +156,47 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
     syncResults();
   }
 
-  function onStatus(status) {
+  // 2 つの購読（inbox と pub）の両方がつながっていれば connected
+  function onStatus(which, status) {
     if (stopped) return;
-    state.connection = status === 'connected' ? 'connected' : 'disconnected';
+    online[which] = status === 'connected';
+    state.connection = online.inbox && online.pub ? 'connected' : 'disconnected';
     emit();
+  }
+
+  function unsubscribeAll() {
+    if (unsubscribe) { unsubscribe(); unsubscribe = null; }
+    if (unsubscribePub) { unsubscribePub(); unsubscribePub = null; }
+  }
+
+  // サーバーの pub を state.pub に取りこむ。変わったら true。
+  // 別のタブが授業を終えていたら、このタブも ended にする（以後は集計を書かない）
+  function adoptPub(value) {
+    if (value === null || typeof value !== 'object' || !state.pub) return false;
+    if (JSON.stringify(value) === JSON.stringify(state.pub)) return false;
+    state.pub = value;
+    if (value.state === 'ended' && state.phase === 'live') {
+      state.phase = 'ended';
+      clearTimers();
+      unsubscribeAll();
+    }
+    return true;
+  }
+
+  // pub の購読。自分の書きこみも、別のタブの書きこみも届く
+  function onPub(value) {
+    if (stopped || state.phase !== 'live') return;
+    if (!adoptPub(value)) return;
+    emit();
+    syncResults();
+  }
+
+  // サーバーの最新の pub を読んで取りこむ（購読が遅れていても、古い状態からパッチを作らないように）
+  async function refreshPub() {
+    const latest = await net.get(pubPath);
+    if (stopped) return;
+    if (latest === null || typeof latest !== 'object') throw new Error('授業が見つかりません');
+    if (adoptPub(latest)) emit();
   }
 
   // パッチを書き、成功してから state.pub を変える
@@ -171,6 +216,10 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
     return enqueue(async () => {
       if (stopped) throw stoppedError();
       if (state.phase !== 'live' || ending) return;
+      // 別のタブの操作も含めた最新の状態から、パッチを作る
+      await refreshPub();
+      if (stopped) throw stoppedError();
+      if (state.phase !== 'live') return;
       await commit(makePatch(state.pub));
     });
   }
@@ -198,7 +247,7 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
       await repo.saveHistory(sid, history);
       await commit(endPatch(state.pub));
       state.phase = 'ended';
-      if (unsubscribe) { unsubscribe(); unsubscribe = null; }
+      unsubscribeAll();
       emit();
     }
     // 4. 回答と教材の写しを消し、発表中の印を外す（どこで失敗しても end をやり直せる）
@@ -244,8 +293,9 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
       inbox = session.inbox || null;
       recompute();
       emit();
-      unsubscribe = net.subscribe(inboxPath, onInbox, onStatus);
-      if (stopped && unsubscribe) { unsubscribe(); unsubscribe = null; }
+      unsubscribe = net.subscribe(inboxPath, onInbox, (st) => onStatus('inbox', st));
+      if (!stopped && state.phase === 'live') unsubscribePub = net.subscribe(pubPath, onPub, (st) => onStatus('pub', st));
+      if (stopped || state.phase !== 'live') unsubscribeAll();
       syncResults();
     },
 
@@ -282,6 +332,9 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
         ending = true;
         clearTimers();
         try {
+          // 別のタブがもう終えていたら、残りの後片づけだけを行う
+          if (state.phase === 'live') await refreshPub();
+          guard();
           await finish();
         } finally {
           ending = false;
@@ -294,7 +347,7 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
     stop() {
       stopped = true;
       clearTimers();
-      if (unsubscribe) { unsubscribe(); unsubscribe = null; }
+      unsubscribeAll();
       // 前の host の分と自分の分をつなぐ（置きかえない）。登録中のものが済んだら表から消す
       const own = tail.then(() => {}, () => {});
       const earlier = drains.get(sid);

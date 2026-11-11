@@ -640,3 +640,140 @@ test('slideId を渡し、それが今のスライドなら、受付の停止と
   assert.deepEqual(sessionOf(env, sid).pub.results.s2, { counts: [0, 0], total: 0 });
   host.stop();
 });
+
+// ---- 同じ授業を 2 つのタブで開いている（公開の状態を、pub の購読で合わせる） ----
+
+test('別のタブが結果をかくしたあとは、回答が変わっても集計を pub に書かない', async () => {
+  const env = setup();
+  const sid = await begin(env);
+  const a = await openHost(env, sid);
+  const b = await openHost(env, sid);
+  await a.host.next();
+  await a.host.next(); // s2（manual）
+  await answer(env, sid, 's2', 'u1', 0);
+  await a.host.setResultsVisible(true);
+  assert.deepEqual(sessionOf(env, sid).pub.results.s2, { counts: [1, 0], total: 1 });
+  assert.equal(b.last().pub.current.slideId, 's2'); // B も、A の移動を知っている
+  assert.equal(b.last().pub.polls.s2.resultsVisible, true);
+
+  await b.host.setResultsVisible(false); // 別のタブでかくす
+  assert.equal(sessionOf(env, sid).pub.results, undefined);
+  assert.equal(a.last().pub.polls.s2.resultsVisible, false); // A も、かくされたことを知っている
+
+  const before = env.updates.length;
+  await answer(env, sid, 's2', 'u2', 1); // 回答が変わる
+  await env.clock.advance(5000);
+  await settle();
+  assert.equal(sessionOf(env, sid).pub.results, undefined); // A は集計を書き直さない
+  assert.equal(env.updates.slice(before).some((u) => Object.keys(u.patch).some((k) => k.startsWith('results/'))), false);
+  assert.equal(a.last().pub.results, undefined);
+  await a.host.stop();
+  await b.host.stop();
+});
+
+test('別のタブがスライドを進めていたら、その続きから操作する（古い位置から計算しない）', async () => {
+  const env = setup();
+  const sid = await begin(env);
+  const a = await openHost(env, sid);
+  const b = await openHost(env, sid);
+  await a.host.next(); // s1
+  await a.host.next(); // s2（受付中）
+  await b.host.next(); // B からは s3 へ（s2 は締切）
+  const pub = sessionOf(env, sid).pub;
+  assert.deepEqual(pub.current, { slideId: 's3', index: 2 });
+  assert.equal(pub.polls.s2.status, 'closed');
+  assert.equal(a.last().pub.current.slideId, 's3');
+  await a.host.setPaused(true); // A の「受付を止める」は、今のスライド（s3）に効く
+  assert.equal(sessionOf(env, sid).pub.polls.s3.status, 'paused');
+  assert.equal(sessionOf(env, sid).pub.polls.s2.status, 'closed'); // 締切済みは開かない
+  await a.host.stop();
+  await b.host.stop();
+});
+
+test('購読が届いていなくても、操作の直前に最新の pub を読んでから計算する', async () => {
+  const env = setup();
+  const sid = await begin(env);
+  // pub の購読を止める（別のタブの変更が届かない状態）
+  const origSubscribe = env.net.subscribe;
+  env.net.subscribe = (path, onValue, onStatus) => (path.endsWith('/pub') ? () => {} : origSubscribe(path, onValue, onStatus));
+  const a = await openHost(env, sid);
+  env.net.subscribe = origSubscribe;
+  const b = await openHost(env, sid);
+  await b.host.next(); // s1
+  await b.host.next(); // s2
+  await b.host.next(); // s3（s2 は締切）
+  assert.equal(a.last().pub.current.index, -1); // A には届いていない
+  await a.host.prev(); // 最新（s3）から計算して s2 へ戻る。締切済みの s2 は開かない
+  const pub = sessionOf(env, sid).pub;
+  assert.deepEqual(pub.current, { slideId: 's2', index: 1 });
+  assert.equal(pub.polls.s2.status, 'closed');
+  await a.host.stop();
+  await b.host.stop();
+});
+
+test('別のタブが授業を終えたら、このタブも ended になり、集計を書かない', async () => {
+  const env = setup();
+  const sid = await begin(env);
+  const a = await openHost(env, sid);
+  const b = await openHost(env, sid);
+  await a.host.next();
+  await a.host.next();
+  await a.host.next(); // s3（live）
+  await b.host.end();
+  assert.equal(a.last().phase, 'ended');
+  const before = env.updates.length;
+  await env.clock.advance(5000);
+  assert.equal(env.updates.length, before);
+  await a.host.end(); // 残りの後片づけは、やり直しても失敗しない
+  assert.equal(env.net.dump().teachers[UID].active, undefined);
+  await a.host.stop();
+  await b.host.stop();
+});
+
+test('画面を離れたあとは、別のタブの変更で state を出さない（pub の購読も解除する）', async () => {
+  const env = setup();
+  const sid = await begin(env);
+  const a = await openHost(env, sid);
+  const b = await openHost(env, sid);
+  await a.host.stop();
+  const n = a.states.length;
+  await b.host.next();
+  assert.equal(a.states.length, n);
+  await b.host.stop();
+});
+
+test('集計の書きこみが規則に拒否されたら、最新の pub を読み直して、かくされていれば書くのをやめる', async () => {
+  const env = setup();
+  const sid = await begin(env);
+  // pub の購読を止める（かくされたことが届かない状態）
+  const origSubscribe = env.net.subscribe;
+  env.net.subscribe = (path, onValue, onStatus) => (path.endsWith('/pub') ? () => {} : origSubscribe(path, onValue, onStatus));
+  const a = await openHost(env, sid);
+  env.net.subscribe = origSubscribe;
+  // 規則の代わり: かくしている質問の集計は書けない
+  env.ctl.extraDeny = (op, path, value) => {
+    if (op !== 'update' || !path.endsWith('/pub')) return false;
+    const pub = sessionOf(env, sid).pub;
+    return Object.keys(value).some((k) => {
+      if (!k.startsWith('results/') || value[k] === null) return false;
+      const id = k.slice(8);
+      const vis = value[`polls/${id}/resultsVisible`];
+      return !(vis === undefined ? pub.polls?.[id]?.resultsVisible === true : vis === true);
+    });
+  };
+  await a.host.next();
+  await a.host.next(); // s2
+  await a.host.setResultsVisible(true);
+  await env.net.update(`sessions/${sid}/pub`, { 'polls/s2/resultsVisible': false, 'results/s2': null }); // 別のタブがかくした
+  await answer(env, sid, 's2', 'u1', 0);
+  await settle();
+  await env.clock.advance(600);
+  await settle();
+  const tries = env.updates.filter((u) => u.patch['results/s2']).length;
+  await env.clock.advance(10000); // 拒否され続けて書こうとし続けない
+  await settle();
+  assert.equal(env.updates.filter((u) => u.patch['results/s2']).length, tries);
+  assert.equal(sessionOf(env, sid).pub.results, undefined);
+  assert.equal(a.last().pub.polls.s2.resultsVisible, false);
+  await a.host.stop();
+});

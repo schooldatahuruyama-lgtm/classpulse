@@ -21,7 +21,14 @@
       "$sid": {
         ".read": "auth != null && root.child('teacherList').child(auth.uid).val() === true && data.child('owner').val() === auth.uid",
         ".write": "auth != null && root.child('teacherList').child(auth.uid).val() === true && (data.exists() ? data.child('owner').val() === auth.uid : newData.child('owner').val() === auth.uid)",
-        "pub": { ".read": "auth != null" },
+        "pub": {
+          ".read": "auth != null",
+          "results": {
+            "$slideId": {
+              ".validate": "newData.parent().parent().child('polls').child($slideId).child('resultsVisible').val() === true"
+            }
+          }
+        },
         "deck": { ".read": "auth != null" },
         "inbox": {
           "participants": {

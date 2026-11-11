@@ -28,6 +28,46 @@ function readDb(storage) {
   }
 }
 
+// 規則の代わり（docs/firebase/rules.json の pub/results/$slideId の .validate と同じ）:
+// 集計は、書きこんだあとのデータで、その質問の結果を公開している（resultsVisible が true）ときだけ書ける。
+// 消すのはいつでもよい。root は今の中身、op・path・value は書きこみ。拒否するなら true
+export function resultsWriteDenied(root, op, path, value) {
+  if (op !== 'set' && op !== 'update') return false;
+  const join = (a, b) => [a, b].filter((x) => x !== '').join('/');
+  const writes = op === 'set'
+    ? [[String(path), value]]
+    : Object.entries(value || {}).map(([k, v]) => [join(String(path), String(k).replace(/^\/+|\/+$/g, '')), v]);
+  const isObj = (v) => v !== null && typeof v === 'object';
+  const exists = (v) => v !== null && v !== undefined;
+  // 書きこんだあとの resultsVisible（同じ書きこみに入っていればその値、無ければ今の値）
+  const visibleAfter = (sid, id) => {
+    let vis = root?.sessions?.[sid]?.pub?.polls?.[id]?.resultsVisible;
+    for (const [p, v] of writes) {
+      if (p === `sessions/${sid}/pub/polls/${id}/resultsVisible`) vis = v;
+      else if (p === `sessions/${sid}/pub/polls/${id}`) vis = isObj(v) ? v.resultsVisible : undefined;
+      else if (p === `sessions/${sid}/pub/polls`) vis = isObj(v) && isObj(v[id]) ? v[id].resultsVisible : undefined;
+    }
+    return vis === true;
+  };
+  // まるごと置きかえる書きこみ: 置きかえたあとの pub の中だけで確かめる
+  const pubDenied = (pub) => isObj(pub) && isObj(pub.results)
+    && Object.keys(pub.results).some((id) => exists(pub.results[id]) && pub.polls?.[id]?.resultsVisible !== true);
+  for (const [p, v] of writes) {
+    if (!exists(v)) continue;
+    let m;
+    if ((m = /^sessions\/([^/]+)\/pub\/results\/([^/]+)(\/.*)?$/.exec(p))) {
+      if (!visibleAfter(m[1], m[2])) return true;
+    } else if ((m = /^sessions\/([^/]+)\/pub\/results$/.exec(p))) {
+      if (isObj(v) && Object.keys(v).some((id) => exists(v[id]) && !visibleAfter(m[1], id))) return true;
+    } else if (/^sessions\/[^/]+\/pub$/.test(p)) {
+      if (pubDenied(v)) return true;
+    } else if (/^sessions\/[^/]+$/.test(p)) {
+      if (isObj(v) && pubDenied(v.pub)) return true;
+    }
+  }
+  return false;
+}
+
 // 先生の登録だけが入った初期の中身
 const seedDb = () => ({ teacherList: { [DEMO_TEACHER_UID]: true } });
 
@@ -42,9 +82,11 @@ export function createDemoBackend({ storage, sessionStorage, BroadcastChannel, n
   let channel = null;
   try { channel = BroadcastChannel ? new BroadcastChannel(CHANNEL) : null; } catch { channel = null; }
 
-  // 規則の代わり: 参加は授業が live のときだけ。回答は授業が live で、その質問が open のときだけ
+  // 規則の代わり: 参加は授業が live のときだけ。回答は授業が live で、その質問が open のときだけ。
+  // かくしている質問の集計は pub に書けない
   let mem;
-  const deny = (op, path) => {
+  const deny = (op, path, value) => {
+    if (resultsWriteDenied(mem.dump(), op, path, value)) return true;
     if (op !== 'set') return false;
     const part = /^sessions\/([^/]+)\/inbox\/participants\/[^/]+$/.exec(path);
     const ans = /^sessions\/([^/]+)\/inbox\/answers\/([^/]+)\/[^/]+$/.exec(path);

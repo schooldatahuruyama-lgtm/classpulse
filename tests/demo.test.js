@@ -239,3 +239,24 @@ test('同期的に届く通知: B の返信の書きこみが A 自身の通知�
   assert.equal(await a.net.get('pub/y'), 7);
   assert.equal(JSON.parse(shared.getItem('classpulse:demo:db')).pub.y, 7);
 });
+
+test('かくしている質問の集計は pub に書けない（規則と同じ。公開と同時に書くのは通る。消すのは通る）', async () => {
+  const d = make(fakeStorage(), fakeBroadcastHub());
+  const { net } = d;
+  const PUB = 'sessions/s1/pub';
+  await net.set('sessions/s1', { owner: 't', pub: { state: 'live', polls: { p1: { status: 'open', resultsVisible: false }, p2: { status: 'open', resultsVisible: true } } } });
+  const r = { counts: [1, 0], total: 1 };
+  await assert.rejects(net.update(PUB, { 'results/p1': r }), { code: 'denied' });
+  await assert.rejects(net.set(`${PUB}/results/p1`, r), { code: 'denied' });
+  await assert.rejects(net.update('', { [`${PUB}/results/p1`]: r }), { code: 'denied' });
+  assert.equal(await net.get(`${PUB}/results`), null);
+  await net.update(PUB, { 'results/p2': r }); // 公開中の質問は書ける
+  await net.update(PUB, { 'polls/p1/resultsVisible': true, 'results/p1': r }); // 公開と同時に書く
+  assert.deepEqual(await net.get(`${PUB}/results/p1`), { counts: [1, 0], total: 1 });
+  // かくすのと同時に集計を書くのは通らない。消すのは通る
+  await assert.rejects(net.update(PUB, { 'polls/p1/resultsVisible': false, 'results/p1': r }), { code: 'denied' });
+  await net.update(PUB, { 'polls/p1/resultsVisible': false, 'results/p1': null });
+  assert.equal(await net.get(`${PUB}/results/p1`), null);
+  await net.update(PUB, { state: 'ended', results: null });
+  assert.equal(await net.get(`${PUB}/results`), null);
+});

@@ -52,3 +52,15 @@ test('先生のデータは本人だけが読み書きできる', () => {
   assert.ok(t['.read'].includes('auth.uid === $uid'));
   assert.ok(t['.write'].includes('auth.uid === $uid'));
 });
+
+test('集計（pub/results/<質問>）は、その質問の結果を公開しているときだけ書ける', () => {
+  const pub = rules().sessions.$sid.pub;
+  assert.equal(pub['.read'], 'auth != null');
+  const v = pub.results.$slideId['.validate'];
+  // 書きこんだあとのデータ（newData）で確かめる。公開と集計を 1 回の update で書いても通る
+  assert.equal(v, "newData.parent().parent().child('polls').child($slideId).child('resultsVisible').val() === true");
+  // 集計の場所に、読み書きを広げる規則は置かない（書けるのは授業の持ち主だけのまま）
+  assert.equal(pub.results['.write'], undefined);
+  assert.equal(pub.results.$slideId['.write'], undefined);
+  assert.equal(pub['.write'], undefined);
+});
