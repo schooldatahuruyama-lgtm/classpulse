@@ -1,0 +1,40 @@
+/* 画面の骨組み: 先生の画面（左ナビ + 本体）、ログイン、練習モードの帯 */
+#banner:empty { display: none; }
+.demo-banner {
+  position: sticky; top: 0; z-index: 10;
+  display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: var(--s-1) var(--s-2);
+  padding: var(--s-1) var(--s-2); background: var(--c-warn); color: var(--c-navy); font-weight: 700;
+}
+.demo-banner .btn { background: var(--c-card); }
+
+.loading { padding: var(--s-3); }
+.center-page { max-width: 480px; margin: 0 auto; padding: var(--s-4) var(--s-2); }
+.center-page h1 { text-align: center; }
+.page-pad { max-width: 720px; margin: 0 auto; padding: var(--s-4) var(--s-2); }
+
+.shell { display: grid; grid-template-columns: 220px 1fr; min-height: 100vh; }
+.shell-nav { padding: var(--s-3) var(--s-2); background: var(--c-navy); color: #FFFFFF; display: flex; flex-direction: column; gap: var(--s-1); }
+.shell-brand { font-size: 20px; font-weight: 700; margin-bottom: var(--s-2); }
+.shell-links { display: flex; flex-direction: column; gap: var(--s-1); }
+.shell-link, .shell-nav .btn {
+  display: flex; align-items: center; min-height: 44px; padding: 0 var(--s-2);
+  border: 2px solid transparent; border-radius: var(--r-1);
+  color: #FFFFFF; background: transparent; font: inherit; font-weight: 700; text-decoration: none; cursor: pointer; text-align: left;
+}
+.shell-link:hover, .shell-nav .btn:hover { background: rgba(255, 255, 255, 0.12); }
+.shell-link[aria-current='page'] { background: #FFFFFF; color: var(--c-navy); }
+.shell-nav :focus-visible { outline-color: #FFFFFF; box-shadow: none; }
+.shell-spacer { flex: 1; }
+.shell-main { padding: var(--s-3); min-width: 0; }
+
+/* 幅 900px 未満: 上のメニュー */
+@media (max-width: 899px) {
+  .shell { grid-template-columns: 1fr; }
+  .shell-nav { flex-direction: row; align-items: center; flex-wrap: wrap; padding: var(--s-1) var(--s-2); }
+  .shell-brand { margin: 0 var(--s-2) 0 0; }
+  .shell-links { flex-direction: row; flex-wrap: wrap; }
+  .shell-spacer { display: none; }
+  .shell-nav .shell-logout { margin-left: auto; }
+  .shell-main { padding: var(--s-2); }
+  h1 { font-size: 32px; }
+}
