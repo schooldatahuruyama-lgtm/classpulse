@@ -86,6 +86,14 @@ async function start() {
     }
   }
 
+  // 前の画面を片づけたあと、次の画面の読みこみを待つ間、古いボタンが残らないよう中身を置きかえる。
+  // 先生の骨組み（ナビゲーション）は残し、本体だけを置きかえる。
+  function showLoading(keepShell) {
+    const loading = el('p', { class: 'loading page-pad', role: 'status', text: '読みこんでいます…' });
+    const main = keepShell ? appRoot.querySelector('.shell-main') : null;
+    (main || appRoot).replaceChildren(loading);
+  }
+
   function placeholder(root) {
     root.replaceChildren(el('main', { class: 'page-pad' },
       el('h2', { text: '準備中' }),
@@ -120,6 +128,7 @@ async function start() {
     if (route.name === 'join') {
       teardown();
       shownHash = location.hash;
+      showLoading(false);
       const view = await loadView('join');
       if (stale()) return;
       const ctx = { net: backend.studentNet, auth: studentAuth, navigate, params: route.params, storage: window.localStorage };
@@ -175,6 +184,7 @@ async function start() {
     if (!user && needsTeacher(route.name)) { location.hash = routeHash('login'); return; } // hashchange で描き直す
     if (user && route.name === 'login') { navigate('dashboard'); return; }
 
+    showLoading(route.name !== 'login');
     const view = await loadView(route.name);
     if (stale()) return;
     const repo = user ? createRepo(backend.net, user.uid) : undefined;

@@ -22,7 +22,7 @@ export function mount(root, ctx) {
   function failure(retry) {
     page.replaceChildren(el('div', { class: 'notice', role: 'alert' },
       el('p', { text: MSG_LOAD_FAILED }),
-      el('button', { type: 'button', class: 'btn btn-primary', text: 'もう一度', onclick: () => { loading(); retry(); } })));
+      el('button', { type: 'button', class: 'btn btn-primary', text: 'もう一度', onclick: () => { if (!alive) return; loading(); retry(); } })));
   }
 
   const backLink = () => el('a', { class: 'btn hist-back', href: routeHash('history'), text: '← 授業履歴へ' });
@@ -61,7 +61,7 @@ export function mount(root, ctx) {
   }
 
   async function remove(message) {
-    if (busy) return;
+    if (!alive || busy) return;
     const ok = await confirmDialog({ title: 'この授業の記録を削除しますか？', body: '元に戻せません。', okLabel: '削除する', danger: true });
     if (!ok || !alive) return;
     busy = true;
