@@ -164,3 +164,94 @@ test('ログアウトで保存が消える', async () => {
   assert.equal(auth.user, null);
   await assert.rejects(() => auth.getToken(), (e) => e instanceof NetError && e.code === 'auth');
 });
+
+// ---- 修正ラウンド 1: 一時的な失敗・古い応答・壊れた本文 ----
+
+// 応答を手で返せる fetch（このファイル内だけで使う）
+function deferredFetch(handler) {
+  const pending = [];
+  const calls = [];
+  const fn = (url, init = {}) => {
+    calls.push({ url: String(url), init });
+    return new Promise((resolve, reject) => pending.push({ url: String(url), resolve, reject }));
+  };
+  fn.calls = calls;
+  fn.pending = pending;
+  fn.respond = (i, status, body) => pending[i].resolve({ ok: status < 300, status, json: async () => body });
+  return fn;
+}
+
+const SAVED = JSON.stringify({ uid: 'S1', refreshToken: 'old' });
+const tick = () => new Promise((r) => setImmediate(r));
+
+for (const status of [503, 429]) {
+  test(`一時的な HTTP エラー ${status}: 保存を残し、signUp せず、拒否する`, async () => {
+    const storage = fakeStorage();
+    storage.setItem('classpulse:auth:student', SAVED);
+    const { auth, fetch } = make((url) => (isToken(url) ? { status, body: { error: { message: 'BUSY' } } } : { status: 200, body: {} }), 'student', storage);
+    await assert.rejects(() => auth.signInAnonymous(), (e) => e instanceof NetError && e.code === 'unknown');
+    assert.equal(storage.getItem('classpulse:auth:student'), SAVED);
+    assert.equal(fetch.calls.filter((c) => isSignUp(c.url)).length, 0);
+  });
+}
+
+test('更新中にログアウトすると、後から届いた応答で復活しない', async () => {
+  const storage = fakeStorage();
+  const fetch = deferredFetch();
+  const auth = createAuth({ apiKey: 'FAKE_KEY', fetch, storage, now: fakeClock(1000).now, role: 'teacher' });
+  const p = auth.signInTeacher('t@example.com', 'x');
+  fetch.respond(0, 200, { localId: 'T1', email: 't@example.com', idToken: 'tok1', refreshToken: 'r1', expiresIn: '3600' });
+  await p;
+  const r = auth.forceRefresh();
+  const rejected = assert.rejects(r, (e) => e instanceof NetError);
+  await tick();
+  auth.signOut();
+  fetch.respond(1, 200, { user_id: 'T1', id_token: 'tok2', refresh_token: 'r2', expires_in: '3600' });
+  await rejected;
+  assert.equal(auth.user, null);
+  assert.equal(storage.getItem('classpulse:auth:teacher'), null);
+});
+
+test('更新中に別のアカウントでログインしても、古い応答で上書きされない', async () => {
+  const storage = fakeStorage();
+  const fetch = deferredFetch();
+  const auth = createAuth({ apiKey: 'FAKE_KEY', fetch, storage, now: fakeClock(1000).now, role: 'teacher' });
+  const a = auth.signInTeacher('a@example.com', 'x');
+  fetch.respond(0, 200, { localId: 'A', email: 'a@example.com', idToken: 'tokA', refreshToken: 'rA', expiresIn: '3600' });
+  await a;
+  const r = auth.forceRefresh();
+  const rejected = assert.rejects(r, (e) => e instanceof NetError);
+  await tick();
+  const b = auth.signInTeacher('b@example.com', 'x');
+  fetch.respond(2, 200, { localId: 'B', email: 'b@example.com', idToken: 'tokB', refreshToken: 'rB', expiresIn: '3600' });
+  await b;
+  fetch.respond(1, 200, { user_id: 'A', id_token: 'tokA2', refresh_token: 'rA2', expires_in: '3600' });
+  await rejected;
+  assert.deepEqual(auth.user, { uid: 'B', email: 'b@example.com' });
+  assert.deepEqual(JSON.parse(storage.getItem('classpulse:auth:teacher')), { uid: 'B', email: 'b@example.com', refreshToken: 'rB' });
+  assert.equal(await auth.getToken(), 'tokB');
+});
+
+test('本文を読めない応答: network で拒否し、保存を残し、signUp しない', async () => {
+  const storage = fakeStorage();
+  storage.setItem('classpulse:auth:student', SAVED);
+  const fetch = fakeFetch((url) => (isToken(url) ? { status: 200, body: null } : { status: 200, body: {} }));
+  const broken = async (url, init) => {
+    const res = await fetch(url, init);
+    return { ...res, json: async () => { throw new Error('切断'); } };
+  };
+  broken.calls = fetch.calls;
+  const auth = createAuth({ apiKey: 'FAKE_KEY', fetch: broken, storage, now: fakeClock(1000).now, role: 'student' });
+  await assert.rejects(() => auth.signInAnonymous(), (e) => e instanceof NetError && e.code === 'network');
+  assert.equal(storage.getItem('classpulse:auth:student'), SAVED);
+  assert.equal(fetch.calls.filter((c) => isSignUp(c.url)).length, 0);
+});
+
+test('必須項目が足りない 200 応答: unknown で拒否し、保存を残し、signUp しない', async () => {
+  const storage = fakeStorage();
+  storage.setItem('classpulse:auth:student', SAVED);
+  const { auth, fetch } = make((url) => (isToken(url) ? { status: 200, body: { user_id: 'S1', id_token: 'tok2' } } : { status: 200, body: {} }), 'student', storage);
+  await assert.rejects(() => auth.signInAnonymous(), (e) => e instanceof NetError && e.code === 'unknown');
+  assert.equal(storage.getItem('classpulse:auth:student'), SAVED);
+  assert.equal(fetch.calls.filter((c) => isSignUp(c.url)).length, 0);
+});
