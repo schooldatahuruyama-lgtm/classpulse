@@ -4,7 +4,7 @@ import { CONFIG } from '../js/config.js';
 import { normalizeDeck, validateDeck } from '../js/model.js';
 import {
   checkPdfFile, checkPageCount, pageBudget, fitToSlide, titleFromFileName,
-  buildDeckFromPages, importMessage,
+  buildDeckFromPages, importMessage, abortable,
 } from '../js/pdf-import-logic.js';
 
 test('CONFIG.pdf の上限', () => {
@@ -96,4 +96,86 @@ test('importMessage', () => {
     assert.equal(typeof importMessage({ code }), 'string');
   }
   assert.ok(importMessage({ code: 'too-large' }).includes('50MB'));
+});
+
+// 登録されている abort の聞き手の数がわかる合図の代役
+function fakeSignal() {
+  const listeners = new Set();
+  return {
+    aborted: false,
+    addEventListener: (type, fn) => { if (type === 'abort') listeners.add(fn); },
+    removeEventListener: (type, fn) => { if (type === 'abort') listeners.delete(fn); },
+    abort() { this.aborted = true; for (const fn of [...listeners]) fn(); },
+    get count() { return listeners.size; },
+  };
+}
+const cancelError = () => Object.assign(new Error('cancelled'), { code: 'cancelled' });
+const deferred = () => {
+  let resolve;
+  let reject;
+  const promise = new Promise((a, b) => { resolve = a; reject = b; });
+  return { promise, resolve, reject };
+};
+
+test('abortable: 中止されなければ、元の結果・失敗をそのまま返し、聞き手を外す', async () => {
+  const s = fakeSignal();
+  assert.equal(await abortable(Promise.resolve(7), s, cancelError), 7);
+  assert.equal(s.count, 0);
+  await assert.rejects(abortable(Promise.reject(Object.assign(new Error('x'), { code: 'broken' })), s, cancelError), { code: 'broken' });
+  assert.equal(s.count, 0);
+  // 合図が無ければ、ただ待つ
+  assert.equal(await abortable(Promise.resolve(8), undefined, cancelError), 8);
+});
+
+test('abortable: 待っている間に中止されたら、すぐに中止のエラーで終わり、聞き手を外す', async () => {
+  const s = fakeSignal();
+  const d = deferred();
+  const p = abortable(d.promise, s, cancelError);
+  assert.equal(s.count, 1);
+  s.abort();
+  await assert.rejects(p, { code: 'cancelled' });
+  assert.equal(s.count, 0);
+  d.resolve('おそい'); // あとから終わっても何も起きない
+  await new Promise((r) => setTimeout(r, 0));
+});
+
+test('abortable: もう中止されている合図なら、待たずに中止のエラー。聞き手は付けない', async () => {
+  const s = fakeSignal();
+  s.aborted = true;
+  const d = deferred();
+  await assert.rejects(abortable(d.promise, s, cancelError), { code: 'cancelled' });
+  assert.equal(s.count, 0);
+  d.reject(new Error('おそい失敗'));
+  await new Promise((r) => setTimeout(r, 0));
+});
+
+test('abortable: 中止のあとに元の約束が失敗しても、処理されない失敗（unhandledRejection）にならない', async () => {
+  const unhandled = [];
+  const onUnhandled = (e) => unhandled.push(e);
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    const s = fakeSignal();
+    const d = deferred();
+    const p = abortable(d.promise, s, cancelError);
+    s.abort();
+    await assert.rejects(p, { code: 'cancelled' });
+    d.reject(new Error('おそい失敗'));
+    const s2 = fakeSignal();
+    s2.aborted = true;
+    const d2 = deferred();
+    await assert.rejects(abortable(d2.promise, s2, cancelError), { code: 'cancelled' });
+    d2.reject(new Error('おそい失敗 2'));
+    await new Promise((r) => setTimeout(r, 20));
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+  }
+  assert.deepEqual(unhandled, []);
+});
+
+test('abortable: 本物の AbortController でも動く', async () => {
+  const ac = new AbortController();
+  const d = deferred();
+  const p = abortable(d.promise, ac.signal, cancelError);
+  ac.abort();
+  await assert.rejects(p, { code: 'cancelled' });
 });

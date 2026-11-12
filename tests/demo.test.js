@@ -260,3 +260,61 @@ test('かくしている質問の集計は pub に書けない（規則と同じ
   await net.update(PUB, { state: 'ended', results: null });
   assert.equal(await net.get(`${PUB}/results`), null);
 });
+
+// 入る量に上限がある保存先（localStorage の容量不足の代役）。上限を超える setItem は例外を投げ、中身を変えない
+function limitedStorage(limit) {
+  const s = fakeStorage();
+  const setItem = s.setItem;
+  s.setItem = (k, v) => {
+    if (String(v).length > limit) throw new Error('QuotaExceededError');
+    setItem(k, v);
+  };
+  return s;
+}
+
+test('容量不足で保存できない書きこみは失敗になり、メモリも戻り、購読・ほかのタブに知らせない（set・update）', async () => {
+  const shared = limitedStorage(400);
+  const BC = fakeBroadcastHub();
+  const a = make(shared, BC);
+  const b = make(shared, BC);
+  await a.net.set('decks/d1', { title: 'もと' });
+  const seenA = [];
+  const seenB = [];
+  a.net.subscribe('decks', (v) => seenA.push(v));
+  b.net.subscribe('decks', (v) => seenB.push(v));
+  const before = shared.getItem('classpulse:demo:db');
+  const big = 'x'.repeat(1000);
+
+  const e1 = await a.net.set('decks/d2', { title: 'おおきい', img: big }).then(() => null, (e) => e);
+  assert.equal(e1 && e1.name, 'NetError');
+  assert.equal(e1.code, 'unknown');
+  const e2 = await a.net.update('decks', { 'd1/title': 'かえた', 'd3/img': big }).then(() => null, (e) => e);
+  assert.equal(e2 && e2.code, 'unknown');
+
+  // メモリ・保存先とも、前のまま。購読（自分のタブ・ほかのタブ）には最初の値しか届いていない
+  assert.deepEqual(await a.net.get('decks'), { d1: { title: 'もと' } });
+  assert.equal(shared.getItem('classpulse:demo:db'), before);
+  assert.deepEqual(seenA, [{ d1: { title: 'もと' } }]);
+  assert.deepEqual(seenB, [{ d1: { title: 'もと' } }]);
+
+  // 入る大きさの書きこみは、そのあともできて、保存される
+  await a.net.update('decks', { 'd1/title': 'あたらしい' });
+  assert.deepEqual(await a.net.get('decks'), { d1: { title: 'あたらしい' } });
+  assert.deepEqual(JSON.parse(shared.getItem('classpulse:demo:db')).decks, { d1: { title: 'あたらしい' } });
+  assert.deepEqual(seenA[seenA.length - 1], { d1: { title: 'あたらしい' } });
+  assert.deepEqual(seenB[seenB.length - 1], { d1: { title: 'あたらしい' } });
+  assert.deepEqual(await make(shared, BC).net.get('decks'), { d1: { title: 'あたらしい' } });
+});
+
+test('容量不足の書きこみの失敗は、BroadcastChannel が無いときも同じ', async () => {
+  const shared = limitedStorage(400);
+  const a = make(shared, null);
+  await a.net.set('decks/d1', { title: 'もと' });
+  const seen = [];
+  a.net.subscribe('decks', (v) => seen.push(v));
+  await assert.rejects(a.net.set('decks/d2', { img: 'x'.repeat(1000) }), { name: 'NetError', code: 'unknown' });
+  assert.deepEqual(await a.net.get('decks'), { d1: { title: 'もと' } });
+  assert.deepEqual(seen, [{ d1: { title: 'もと' } }]);
+  await a.net.set('decks/d2', { title: 'ちいさい' });
+  assert.deepEqual(JSON.parse(shared.getItem('classpulse:demo:db')).decks, { d1: { title: 'もと' }, d2: { title: 'ちいさい' } });
+});

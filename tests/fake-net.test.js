@@ -171,3 +171,22 @@ test('通知の中で get しても、保存済みの内容と同じ値が見え
   assert.deepEqual(log.filter((x) => 'got' in x).map((x) => x.got), [null, 1, 2, null]);
   assert.equal(await net.get('a/b'), null);
 });
+
+test('onChange が例外を投げた書きこみは取り消され、購読に知らせず失敗になる（set・update・remove）', async () => {
+  let fail = false;
+  const net = createFakeNet({ onChange: () => { if (fail) throw new Error('保存できない'); } });
+  await net.set('a', { b: 1, c: { d: 2 } });
+  const seen = [];
+  net.subscribe('a', (v) => seen.push(v));
+  fail = true;
+  await assert.rejects(net.set('a/c/d', 3), /保存できない/);
+  await assert.rejects(net.set('a/x/y', 3), /保存できない/);
+  await assert.rejects(net.update('a', { b: null, 'c/e': 4 }), /保存できない/);
+  await assert.rejects(net.remove('a/c'), /保存できない/);
+  assert.deepEqual(await net.get('a'), { b: 1, c: { d: 2 } });
+  assert.deepEqual(seen, [{ b: 1, c: { d: 2 } }]);
+  fail = false;
+  await net.set('a/c/d', 5);
+  assert.deepEqual(await net.get('a'), { b: 1, c: { d: 5 } });
+  assert.deepEqual(seen[seen.length - 1], { b: 1, c: { d: 5 } });
+});

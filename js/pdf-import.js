@@ -3,7 +3,7 @@
 // 失敗は { code } を持つ Error を投げる（code は pdf-import-logic.js の importMessage に渡す）。
 import { CONFIG } from './config.js';
 import { compressCanvas } from './image.js';
-import { checkPdfFile, checkPageCount, pageBudget, titleFromFileName } from './pdf-import-logic.js';
+import { checkPdfFile, checkPageCount, pageBudget, titleFromFileName, abortable } from './pdf-import-logic.js';
 
 // pdf.js の部品の場所（このファイルからの相対。公開先の /classpulse/ の下でも動くように）。URL は / で終える
 const lib = (path) => new URL(`./lib/pdfjs/${path}`, import.meta.url).href;
@@ -36,6 +36,8 @@ const MIN_EDGE = 16; // これより小さくはしない（compressImage と同
 export async function importPdf(file, { onProgress = () => {}, signal } = {}) {
   const aborted = () => !!(signal && signal.aborted);
   const stopIfAborted = () => { if (aborted()) throw importError('cancelled'); };
+  // 待つところはすべて、中止されたらすぐに cancelled で終える（pdf.js やファイルの読みこみが遅れていても）
+  const wait = (promise) => abortable(promise, signal, () => importError('cancelled'));
 
   const bad = checkPdfFile({ name: file && file.name, type: file && file.type, size: file && file.size });
   if (bad) throw importError(bad.code);
@@ -44,7 +46,8 @@ export async function importPdf(file, { onProgress = () => {}, signal } = {}) {
   let pdfjs;
   let data;
   try {
-    [pdfjs, data] = await Promise.all([loadPdfjs(), file.arrayBuffer()]);
+    // 中止したあとで読みこみが終わっても、ここから先（getDocument）へは進まない
+    [pdfjs, data] = await wait(Promise.all([loadPdfjs(), file.arrayBuffer()]));
   } catch (e) {
     stopIfAborted();
     throw e && e.code === 'load-failed' ? e : importError('broken');
@@ -73,7 +76,7 @@ export async function importPdf(file, { onProgress = () => {}, signal } = {}) {
   try {
     let doc;
     try {
-      doc = await task.promise;
+      doc = await wait(task.promise);
     } catch (e) {
       stopIfAborted();
       if (e && e.name === 'PasswordException') throw importError('password');
@@ -93,7 +96,7 @@ export async function importPdf(file, { onProgress = () => {}, signal } = {}) {
     for (let n = 1; n <= total; n++) {
       let page;
       try {
-        page = await doc.getPage(n);
+        page = await wait(doc.getPage(n));
       } catch {
         stopIfAborted();
         throw importError('broken');
@@ -114,7 +117,7 @@ export async function importPdf(file, { onProgress = () => {}, signal } = {}) {
           g.fillRect(0, 0, canvas.width, canvas.height);
           renderTask = page.render({ canvasContext: g, viewport, background: '#FFFFFF' });
           try {
-            await renderTask.promise;
+            await wait(renderTask.promise);
           } catch {
             stopIfAborted();
             throw importError('broken');

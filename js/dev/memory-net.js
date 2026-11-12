@@ -39,7 +39,8 @@ function view(v) {
 
 const segs = (path) => String(path).split('/').filter((s) => s !== '');
 
-// initial: 最初の中身（整えて取り込む）、onChange(root, writes): 書きこみのたびに呼ぶ（練習モードの保存用）
+// initial: 最初の中身（整えて取り込む）、onChange(root, writes): 書きこみのたびに呼ぶ（練習モードの保存用）。
+// onChange が例外を投げたら、その書きこみは取り消して（購読にも知らせず）呼び出し元へ失敗を返す
 export function createMemoryNet({ now = Date.now, deny = () => false, initial = null, onChange = null } = {}) {
   let root = normalize(initial, now);
   let online = true;
@@ -55,25 +56,32 @@ export function createMemoryNet({ now = Date.now, deny = () => false, initial = 
     return node === undefined ? null : node;
   }
 
-  // 1 か所に書く（値は整えたもの。null なら削除）。空になった親は取り除く
+  // node の keys[i] 以下に value を書いた「新しい」入れ物を返す（元の入れ物は書きかえない。空になったら null）
+  function written(node, keys, i, value) {
+    if (i === keys.length) return value;
+    const out = isObj(node) ? { ...node } : {};
+    const child = written(out[keys[i]], keys, i + 1, value);
+    if (child === null) delete out[keys[i]];
+    else out[keys[i]] = child;
+    return Object.keys(out).length === 0 ? null : out;
+  }
+
+  // 1 か所に書く（値は整えたもの。null なら削除）。空になった親は取り除く。
+  // 通った道の入れ物は写しを作って置きかえる（前の root をそのまま残せば、保存に失敗したときに戻せる）
   function write(path, value) {
-    const keys = segs(path);
-    if (keys.length === 0) { root = value; return; }
-    if (!isObj(root)) root = {};
-    const chain = [root];
-    for (let i = 0; i < keys.length - 1; i++) {
-      let child = chain[i][keys[i]];
-      if (!isObj(child)) { child = {}; chain[i][keys[i]] = child; }
-      chain.push(child);
+    root = written(root, segs(path), 0, value);
+  }
+
+  // 書きこみを保存先に渡す。保存に失敗したら（練習モードの容量不足など）、書く前の中身に戻して失敗を伝える。
+  // 購読へはまだ知らせていないので、戻したことは知らせなくてよい
+  function persist(before, writes) {
+    if (!onChange) return;
+    try {
+      onChange(root, writes);
+    } catch (e) {
+      root = before;
+      throw e;
     }
-    const last = keys[keys.length - 1];
-    if (value === null) delete chain[chain.length - 1][last];
-    else chain[chain.length - 1][last] = value;
-    for (let i = chain.length - 1; i >= 1; i--) {
-      if (Object.keys(chain[i]).length > 0) break;
-      delete chain[i - 1][keys[i - 1]];
-    }
-    if (isObj(root) && Object.keys(root).length === 0) root = null;
   }
 
   // a が b の先祖か同じ、または b が a の先祖（= 重なる）か
@@ -104,13 +112,15 @@ export function createMemoryNet({ now = Date.now, deny = () => false, initial = 
     },
     async set(path, value) {
       guard('set', path, value);
+      const before = root;
       const v = normalize(value, now);
       write(path, v);
-      if (onChange) onChange(root, [[path, v]]); // 保存してから購読に知らせる（通知中の読み取りで巻き戻らないように）
+      persist(before, [[path, v]]); // 保存してから購読に知らせる（通知中の読み取りで巻き戻らないように）
       notify([path]);
     },
     async update(path, patch) {
       guard('update', path, patch);
+      const before = root;
       const paths = [];
       const writes = [];
       for (const [k, v] of Object.entries(patch)) {
@@ -120,13 +130,14 @@ export function createMemoryNet({ now = Date.now, deny = () => false, initial = 
         paths.push(full);
         writes.push([full, n]);
       }
-      if (onChange) onChange(root, writes);
+      persist(before, writes);
       notify(paths);
     },
     async remove(path) {
       guard('remove', path);
+      const before = root;
       write(path, null);
-      if (onChange) onChange(root, [[path, null]]); // 保存してから購読に知らせる（通知中の読み取りで巻き戻らないように）
+      persist(before, [[path, null]]); // 保存してから購読に知らせる（通知中の読み取りで巻き戻らないように）
       notify([path]);
     },
     serverTimestamp() { return { '.sv': 'timestamp' }; },

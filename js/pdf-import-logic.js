@@ -82,3 +82,28 @@ export function importMessage(error) {
   if (code === 'load-failed') return 'PDF を読む準備ができませんでした。通信の状態を確かめて、もう一度ためしてください。';
   return 'この PDF を読みこめませんでした。ファイルがこわれていないか確かめてください。';
 }
+
+// promise を待つ。signal で中止されたら、終わるのを待たずに makeError() の失敗にする（「やめる」をすぐ効かせるため）。
+// 中止のあとで promise が終わっても何も起きない（失敗しても、処理されない失敗にしない）。終わったら聞き手を外す
+export function abortable(promise, signal, makeError) {
+  const p = Promise.resolve(promise);
+  if (!signal) return p;
+  if (signal.aborted) {
+    p.catch(() => {});
+    return Promise.reject(makeError());
+  }
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      signal.removeEventListener('abort', onAbort);
+      reject(makeError());
+    };
+    signal.addEventListener('abort', onAbort);
+    p.then((v) => {
+      signal.removeEventListener('abort', onAbort);
+      resolve(v);
+    }, (e) => {
+      signal.removeEventListener('abort', onAbort);
+      reject(e);
+    });
+  });
+}

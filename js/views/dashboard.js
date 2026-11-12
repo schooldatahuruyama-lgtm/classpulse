@@ -2,7 +2,7 @@
 // 左のナビゲーションとログアウトは先生の骨組み（main.js）が出す。
 import { el, confirmDialog, toast } from '../ui.js';
 import { createDeck, newId } from '../model.js';
-import { buildDeckFromPages, importMessage } from '../pdf-import-logic.js';
+import { buildDeckFromPages, importMessage, abortable } from '../pdf-import-logic.js';
 import { formatDateTime } from '../format.js';
 import { routeHash } from '../router.js';
 import { backgroundSaver, useAuth } from './editor/background.js';
@@ -95,7 +95,9 @@ export function mount(root, ctx) {
     try {
       let result;
       try {
-        const { importPdf } = await import('../pdf-import.js');
+        // 取込みの部品の読みこみ中でも「やめる」をすぐ効かせる（あとから読みこみが終わっても何もしない）
+        const cancelled = () => Object.assign(new Error('cancelled'), { code: 'cancelled' });
+        const { importPdf } = await abortable(import('../pdf-import.js'), ac.signal, cancelled);
         if (!alive || ac.signal.aborted) return;
         result = await importPdf(file, {
           signal: ac.signal,
