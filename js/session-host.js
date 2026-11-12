@@ -57,12 +57,56 @@ function cleanHidden(...sources) {
   return out;
 }
 
-export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: setT, clearTimeout: clearT }) {
+// かくした回答の表から、Firebase のキーに使えないものを外す（端末に残した値は信用しない）
+function validHidden(v) {
+  const out = Object.create(null);
+  const all = cleanHidden(v);
+  for (const slideId of Object.keys(all)) {
+    if (!validKey(slideId)) continue;
+    for (const uid of Object.keys(all[slideId])) {
+      if (!validKey(uid)) continue;
+      if (!out[slideId]) out[slideId] = Object.create(null);
+      out[slideId][uid] = true;
+    }
+  }
+  return out;
+}
+
+// storage（localStorage と同じ形。無くてもよい）: この端末でかくした回答を授業ごとに残す。
+// 再読み込みのとき、host/hidden に書けていなかったものを失わないため。
+// storage の操作はどれも例外を投げうるので、失敗しても無視する（無いときと同じに動く）
+export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: setT, clearTimeout: clearT, storage }) {
   const base = `sessions/${sid}`;
   const pubPath = `${base}/pub`;
   const inboxPath = `${base}/inbox`;
   const hostPath = `${base}/host`;
   const hiddenPath = `${hostPath}/hidden`;
+  const storeKey = `classpulse:hidden:${sid}`;
+
+  // 端末に残したかくした回答を読む。無い・こわれている・読めないときは空
+  function readStored() {
+    if (!storage) return cleanHidden();
+    try {
+      const raw = storage.getItem(storeKey);
+      if (typeof raw !== 'string') return cleanHidden();
+      const v = JSON.parse(raw);
+      return v && typeof v === 'object' && !Array.isArray(v) ? validHidden(v) : cleanHidden();
+    } catch {
+      return cleanHidden();
+    }
+  }
+  // 端末に 1 件足す（この端末でかくしたものをすべて残す）
+  function addStored(slideId, uid) {
+    if (!storage) return;
+    try {
+      storage.setItem(storeKey, JSON.stringify(cleanHidden(readStored(), { [slideId]: { [uid]: true } })));
+    } catch { /* 残せなくても、かくすことは続ける */ }
+  }
+  // 授業が終わったら、端末に残したものを消す
+  function removeStored() {
+    if (!storage) return;
+    try { storage.removeItem(storeKey); } catch { /* 消せなくても続ける */ }
+  }
 
   // onChange に渡す状態。自由記述のための項目（kind・answerCount・freeItems・hiddenUnsaved）は
   // emit のときに freeState() で足す。文章は「結果を表示」中の freeItems にだけ入れる
@@ -167,6 +211,17 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
     hideWrites.add(done);
     const forget = () => { hideWrites.delete(done); };
     done.then(forget, forget);
+  }
+
+  // 書けていないものとして登録し、host/hidden への書きこみを始める。返すのは登録したもの
+  function queueHide(slideId, uid) {
+    const key = `${slideId}/${uid}`;
+    const e = { slideId, uid };
+    e.promise = new Promise((resolve, reject) => { e.resolve = resolve; e.reject = reject; });
+    e.promise.catch(() => {}); // 呼び出し側が待たなくても、未処理の拒否にしない
+    unsaved.set(key, e);
+    saveHidden(key);
+    return e;
   }
 
   // 実行中の host/hidden の書きこみが、成否にかかわらず落ち着くまで待つ
@@ -293,6 +348,8 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
       unsubscribeAll();
       // 別のタブが後片づけで host を消している。書けていないかくしたものは、もう書かない
       closeHide((e) => e.reject(new Error('授業は終わっています')));
+      // 端末に残したものも消す。自分の end の途中なら、後片づけが済んでから finish で消す
+      if (!ending) removeStored();
     }
     return true;
   }
@@ -382,6 +439,8 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
     const active = await repo.getActive();
     guard();
     if (active && active.sid === sid) await repo.setActive(null);
+    // 後片づけが済んだ。端末に残したかくしたものも消す（履歴に入れてある）
+    removeStored();
   }
 
   return {
@@ -395,13 +454,17 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
       if (stopped) return;
       if (session === null || typeof session !== 'object' || !session.pub) {
         state.phase = 'not-found';
+        removeStored(); // 授業はもう無い
         emit();
         return;
       }
       state.pub = session.pub;
       state.title = String(session.pub.title || '');
-      // かくした回答（host/hidden）は、開いたときに 1 回だけ読む（授業全体の読みこみに含まれる）
-      hidden = cleanHidden(session.host && session.host.hidden, hidden);
+      // かくした回答（host/hidden）は、開いたときに 1 回だけ読む（授業全体の読みこみに含まれる）。
+      // 端末に残したもの（前の画面で書けていなかったかもしれない）も合わせ、サーバーに無いものは下で再送する
+      const serverHidden = cleanHidden(session.host && session.host.hidden);
+      const stored = readStored();
+      hidden = cleanHidden(serverHidden, stored, hidden);
       meta = { deckId: String(session.deckId || ''), startedAt: Number(session.startedAt) || 0 };
       if (session.deck) {
         const deck = normalizeDeck(session.deck);
@@ -411,11 +474,19 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
       }
       if (session.pub.state === 'ended') {
         state.phase = 'ended';
+        removeStored(); // 授業は終わっている（かくしたものは、終えたタブが履歴に入れた）
         emit();
         return;
       }
       state.phase = 'live';
       inbox = session.inbox || null;
+      // 端末にだけあるかくしたものを、hide と同じ再試行で書く（書けるまで hiddenUnsaved が true）
+      for (const slideId of Object.keys(stored)) {
+        for (const uid of Object.keys(stored[slideId])) {
+          if (serverHidden[slideId] && serverHidden[slideId][uid] === true) continue;
+          if (!unsaved.has(`${slideId}/${uid}`)) queueHide(slideId, uid);
+        }
+      }
       recompute();
       emit();
       unsubscribe = net.subscribe(inboxPath, onInbox, (st) => onStatus('inbox', st));
@@ -489,16 +560,14 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
         const e = unsaved.get(key);
         return e ? e.promise : Promise.resolve();
       }
+      // 先に端末にも残す（書けないまま再読み込みしても、かくしたままにするため）
+      addStored(slideId, uid);
       hidden = cleanHidden(hidden, { [slideId]: { [uid]: true } });
       if (freeView && freeView.slideId === slideId) {
         freeView = { ...freeView, items: freeView.items.filter((x) => x.uid !== uid) };
       }
-      const e = { slideId, uid };
-      e.promise = new Promise((resolve, reject) => { e.resolve = resolve; e.reject = reject; });
-      e.promise.catch(() => {}); // 呼び出し側が待たなくても、未処理の拒否にしない
-      unsaved.set(key, e);
+      const e = queueHide(slideId, uid);
       emit();
-      saveHidden(key);
       return e.promise;
     },
 

@@ -78,3 +78,16 @@ test('回答の検証は free の質問では text（1〜200 文字の文字列�
   assert.ok(other.includes("'text'") && other.includes("'choice'") && other.includes("'at'"));
   assert.ok(other.includes("'free'"));
 });
+
+test('自由記述の text は空白だけでは通らない（空白以外の文字を 1 つ以上含む）', () => {
+  const raw = read('docs/firebase/rules.json');
+  assert.doesNotThrow(() => JSON.parse(raw));
+  const v = rules().sessions.$sid.inbox.answers.$slideId.$uid['.validate'];
+  const cond = String.raw`newData.child('text').val().matches(/\S/)`;
+  assert.ok(v.includes(cond));
+  // free の枝（choice の枝より前）に入っている
+  const freeBranch = v.split('||')[0];
+  assert.ok(freeBranch.includes("=== 'free'") && freeBranch.includes(cond));
+  // ファイルの中では、バックスラッシュを 2 つ重ねて書く
+  assert.ok(raw.includes(String.raw`matches(/\\S/)`));
+});

@@ -84,11 +84,12 @@ async function begin(env, deck = makeDeck()) {
   return startSession({ net: env.net, repo: env.repo, uid: UID, deckId: 'deck1', deck, now: env.clock.now, getRandomValues: rnd });
 }
 
-async function openHost(env, sid) {
+async function openHost(env, sid, { storage } = {}) {
   const states = [];
   const host = createSessionHost({
     net: env.net, repo: env.repo, sid, onChange: (s) => states.push(s),
     now: env.clock.now, setTimeout: env.clock.setTimeout, clearTimeout: env.clock.clearTimeout,
+    storage,
   });
   await host.start();
   return { host, states, last: () => states[states.length - 1] };
@@ -794,9 +795,9 @@ const write = (env, sid, slideId, uid, text, at) =>
   env.net.set(`sessions/${sid}/inbox/answers/${slideId}/${uid}`, { text, at });
 
 // s2（自由記述・受付中）にいる host を開く
-async function openFree(env) {
+async function openFree(env, opts) {
   const sid = await begin(env, freeDeck());
-  const h = await openHost(env, sid);
+  const h = await openHost(env, sid, opts);
   await h.host.next(); await h.host.next();
   return { sid, ...h };
 }
@@ -1085,4 +1086,140 @@ test('自由記述: 結果をかくしたまま締切済みに戻っても、文
   assert.equal(states[states.length - 1].freeItems, null);
   for (const s of states) assert.ok(!JSON.stringify(s).includes('ひみつ'));
   host.stop();
+});
+
+// ---- 自由記述: かくしたものを端末にも残す（storage） ----
+
+// localStorage の代わり（メモリ上）
+function memStorage() {
+  const m = new Map();
+  return {
+    getItem: (k) => (m.has(k) ? m.get(k) : null),
+    setItem: (k, v) => { m.set(k, String(v)); },
+    removeItem: (k) => { m.delete(k); },
+    map: m,
+  };
+}
+const storeKey = (sid) => `classpulse:hidden:${sid}`;
+
+test('自由記述: 書けていない hide は、同じ storage で作り直した host でも出ず、再送されて書ける', async () => {
+  const env = setup();
+  const storage = memStorage();
+  const a = await openFree(env, { storage });
+  const { sid } = a;
+  await write(env, sid, 's2', 'u1', 'よい', 10);
+  await write(env, sid, 's2', 'u2', 'わるい', 20);
+  await a.host.setResultsVisible(true, 's2');
+  let fail = true;
+  env.ctl.extraDeny = (op, path) => fail && op === 'set' && path.includes('/host/hidden/');
+  a.host.hide('s2', 'u2').catch(() => {});
+  await settle();
+  assert.equal(a.last().hiddenUnsaved, true);
+  assert.deepEqual(JSON.parse(storage.getItem(storeKey(sid))), { s2: { u2: true } });
+  await a.host.stop(); // 再読み込み
+  assert.equal(sessionOf(env, sid).host?.hidden, undefined);
+  const b = await openHost(env, sid, { storage });
+  assert.equal(b.last().kind, 'free');
+  assert.deepEqual(texts(b.last()), ['よい']);
+  for (const s of b.states) assert.ok(!JSON.stringify(s.freeItems || []).includes('わるい'));
+  assert.equal(b.last().hiddenUnsaved, true);
+  fail = false;
+  await env.clock.advance(CONFIG.reconnectDelayMs);
+  assert.equal(b.last().hiddenUnsaved, false);
+  assert.equal(sessionOf(env, sid).host.hidden.s2.u2, true);
+  assert.equal(env.clock.pending(), 0);
+  b.host.stop();
+});
+
+test('自由記述: storage の中身がこわれていても無視する', async () => {
+  for (const bad of ['{こわれた', '[1,2]', '"s2"', 'null', '{"s2":{"u1":"yes"}}', '{"s2":5}']) {
+    const env = setup();
+    const storage = memStorage();
+    const sid = await begin(env, freeDeck());
+    storage.setItem(storeKey(sid), bad);
+    const h = await openHost(env, sid, { storage });
+    await h.host.next(); await h.host.next();
+    await write(env, sid, 's2', 'u1', 'よい', 10);
+    await h.host.setResultsVisible(true, 's2');
+    assert.deepEqual(texts(h.last()), ['よい'], bad);
+    assert.equal(h.last().hiddenUnsaved, false, bad);
+    await h.host.hide('s2', 'u1');
+    assert.deepEqual(h.last().freeItems, []);
+    assert.deepEqual(JSON.parse(storage.getItem(storeKey(sid))), { s2: { u1: true } }, bad);
+    h.host.stop();
+  }
+});
+
+test('自由記述: storage が例外を投げても、hide・開き直し・end は動く', async () => {
+  const env = setup();
+  const boom = () => { throw new Error('使えません'); };
+  const storage = { getItem: boom, setItem: boom, removeItem: boom };
+  const a = await openFree(env, { storage });
+  const { sid } = a;
+  await write(env, sid, 's2', 'u1', 'よい', 10);
+  await write(env, sid, 's2', 'u2', 'わるい', 20);
+  await a.host.setResultsVisible(true, 's2');
+  await a.host.hide('s2', 'u2');
+  assert.deepEqual(texts(a.last()), ['よい']);
+  assert.equal(sessionOf(env, sid).host.hidden.s2.u2, true);
+  await a.host.stop();
+  const b = await openHost(env, sid, { storage });
+  assert.deepEqual(texts(b.last()), ['よい']);
+  await b.host.end();
+  assert.equal(b.last().phase, 'ended');
+  assert.deepEqual(env.net.dump().teachers[UID].history[sid].questions[0].hiddenTexts, ['わるい']);
+  b.host.stop();
+});
+
+test('自由記述: end() は storage のかくしたものを履歴に入れ、片づけのあとキーを消す', async () => {
+  const env = setup();
+  const storage = memStorage();
+  const a = await openFree(env, { storage });
+  const { sid } = a;
+  storage.setItem('classpulse:hidden:ほかの授業', '{"s2":{"x":true}}');
+  await write(env, sid, 's2', 'u1', 'よい', 10);
+  await write(env, sid, 's2', 'u2', 'わるい', 20);
+  env.ctl.extraDeny = (op, path) => op === 'set' && path.includes('/host/hidden/');
+  a.host.hide('s2', 'u2').catch(() => {});
+  await settle();
+  await a.host.stop();
+  const b = await openHost(env, sid, { storage });
+  // 後片づけの途中で失敗した end では、キーを残す
+  let failed = 0;
+  env.ctl.extraDeny = (op, path) => {
+    if (op === 'set' && path.includes('/host/hidden/')) return true;
+    if (op === 'remove' && path === `sessions/${sid}/deck` && failed === 0) { failed += 1; return true; }
+    return false;
+  };
+  await assert.rejects(b.host.end());
+  assert.ok(storage.getItem(storeKey(sid)));
+  await b.host.end();
+  assert.equal(storage.getItem(storeKey(sid)), null);
+  assert.ok(storage.getItem('classpulse:hidden:ほかの授業')); // ほかの授業のものは残す
+  const q = env.net.dump().teachers[UID].history[sid].questions[0];
+  assert.deepEqual(q.texts, ['よい']);
+  assert.deepEqual(q.hiddenTexts, ['わるい']);
+  b.host.stop();
+});
+
+test('自由記述: 別のタブが授業を終えたら、storage のキーを消す（開いたときに終わっていた場合も）', async () => {
+  const env = setup();
+  const storage = memStorage();
+  const a = await openFree(env, { storage });
+  const { sid } = a;
+  await write(env, sid, 's2', 'u1', 'よい', 10);
+  await a.host.hide('s2', 'u1');
+  assert.ok(storage.getItem(storeKey(sid)));
+  const other = await openHost(env, sid);
+  await other.host.end();
+  assert.equal(a.last().phase, 'ended');
+  assert.equal(storage.getItem(storeKey(sid)), null);
+  await a.host.stop();
+  // 終わった授業を開いたとき
+  storage.setItem(storeKey(sid), '{"s2":{"u1":true}}');
+  const c = await openHost(env, sid, { storage });
+  assert.equal(c.last().phase, 'ended');
+  assert.equal(storage.getItem(storeKey(sid)), null);
+  c.host.stop();
+  other.host.stop();
 });
