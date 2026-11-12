@@ -33,6 +33,17 @@ function loadImage(file) {
 // 画質（0.85 → 0.45 を 0.1 ずつ）。小数の誤差を避けるため整数で数える
 const QUALITIES = [85, 75, 65, 55, 45].map((q) => q / 100);
 
+// 描いた canvas を JPEG のデータ URL にする。画質を下げていき、maxBytes 以下になった所で返す。
+// 0.45 でも超えるなら null（呼ぶ側が小さく描き直す）。canvas は toDataURL を持つものなら何でもよい
+export function compressCanvas(canvas, { maxBytes }) {
+  for (const q of QUALITIES) {
+    const url = canvas.toDataURL('image/jpeg', q);
+    if (!String(url).startsWith('data:image/jpeg')) throw new Error('JPEG にできませんでした');
+    if (dataUrlBytes(url) <= maxBytes) return url;
+  }
+  return null;
+}
+
 // JPEG のデータ URL にする。maxBytes 以下になった所で返す。0.45 でも超えるなら長辺を 0.75 倍にしてやり直す
 export async function compressImage(file, { maxEdge, maxBytes }) {
   if (!file || !/^image\//.test(file.type || '')) throw new Error('画像のファイルではありません');
@@ -51,11 +62,8 @@ export async function compressImage(file, { maxEdge, maxBytes }) {
     g.fillStyle = '#FFFFFF';
     g.fillRect(0, 0, width, height);
     g.drawImage(img, 0, 0, width, height);
-    for (const q of QUALITIES) {
-      const url = canvas.toDataURL('image/jpeg', q);
-      if (!url.startsWith('data:image/jpeg')) throw new Error('JPEG にできませんでした');
-      if (dataUrlBytes(url) <= maxBytes) return url;
-    }
+    const url = compressCanvas(canvas, { maxBytes });
+    if (url) return url;
     edge = Math.floor(edge * 0.75);
   }
   throw new Error('画像を小さくできませんでした');

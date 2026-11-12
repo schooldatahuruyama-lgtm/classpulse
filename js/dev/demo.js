@@ -102,7 +102,13 @@ export function createDemoBackend({ storage, sessionStorage, BroadcastChannel, n
     deny,
     initial,
     onChange: (root, writes) => {
-      try { storage.setItem(DEMO_DB_KEY, JSON.stringify(root)); } catch { /* 容量不足でも続ける */ }
+      // 保存できない（容量不足など）ときは失敗にする。memory-net が書く前の中身に戻し、呼び出し元の保存失敗の表示に届く。
+      // ほかのタブにも知らせない（保存先と、どのタブのメモリも前のまま）
+      try {
+        storage.setItem(DEMO_DB_KEY, JSON.stringify(root));
+      } catch {
+        throw new NetError('unknown', '練習モードの保存先がいっぱいで保存できませんでした');
+      }
       // 書きこみそのものを知らせる（保存先の最新だけを読む方式だと、続けて起きた変更の途中を取りこぼす）
       if (channel) channel.postMessage({ type: 'ops', writes });
     },
