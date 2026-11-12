@@ -102,3 +102,53 @@ dialog.pr-qr-dialog::backdrop { background: #FFFFFF; }
 .pr-last[hidden] { display: none; }
 .pr-count { font-size: 18px; font-weight: 700; white-space: nowrap; }
 .pr-group-end { margin-left: auto; padding-left: var(--s-2); border-left: 2px solid var(--c-line); }
+
+/* 自由記述: 「かくした回答を保存できていません」の帯（接続の帯と同じ見た目） */
+.pr-hidden-unsaved { border-bottom-color: var(--c-danger-text); }
+
+/* 自由記述の回答の一覧（結果の表示中だけ）。教室の後ろから読める大きさ。多いときは縦にスクロール */
+.pr-stage.is-board { align-items: stretch; justify-content: stretch; }
+.pr-free-board {
+  position: relative; flex: 1 1 auto; min-width: 0; min-height: 0;
+  display: flex; flex-direction: column; gap: var(--s-2);
+  padding: var(--s-2); background: var(--c-card); border: 1px solid var(--c-line); border-radius: var(--r-2);
+  box-shadow: var(--shadow);
+}
+.pr-free-question { flex: none; margin: 0; font-size: 28px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.pr-free-empty { margin: 0; font-size: 24px; font-weight: 700; }
+.pr-free-list {
+  flex: 1 1 auto; min-height: 0; overflow: auto; margin: 0; padding: 4px; list-style: none;
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr));
+  gap: var(--s-2); align-content: start;
+}
+.pr-free-card {
+  display: flex; flex-direction: column; min-width: 0;
+  border: 2px solid var(--c-border); border-radius: var(--r-2); background: var(--c-card);
+}
+.pr-free-open {
+  flex: 1 1 auto; min-height: 96px; padding: var(--s-2); border: 0; border-radius: var(--r-2) var(--r-2) 0 0;
+  background: transparent; color: var(--c-navy); font: inherit; font-size: 28px; font-weight: 700; line-height: 1.4;
+  text-align: left; cursor: zoom-in; touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+}
+.pr-free-open:hover { background: var(--c-bg); }
+.pr-free-text { display: block; white-space: pre-wrap; overflow-wrap: anywhere; }
+.pr-free-hide {
+  align-self: flex-end; margin: 0 var(--s-1) var(--s-1); min-height: 44px; padding: 0 var(--s-2);
+  font-size: 16px; color: var(--c-danger-text); border-color: var(--c-danger-text);
+}
+
+/* 1 件を大きく表示（一覧の上に重ねる。一覧のスクロールの位置は残る） */
+.pr-free-zoom {
+  position: absolute; inset: 0; z-index: 2;
+  display: flex; flex-direction: column; align-items: center; gap: var(--s-2);
+  padding: var(--s-3); background: var(--c-card); border-radius: var(--r-2);
+}
+.pr-free-zoom-body {
+  flex: 1 1 auto; min-height: 0; width: 100%; overflow: auto;
+  display: flex; /* 中の文は margin: auto で中央に（長い文でも上が切れない） */
+  padding: var(--s-2); border: 0; background: transparent; color: var(--c-navy);
+  font: inherit; font-weight: 700; font-size: clamp(32px, 5.5cqw, 72px); line-height: 1.4; cursor: zoom-out;
+  touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+}
+.pr-free-zoom-text { margin: auto; max-width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; text-align: left; }
+.pr-free-back { flex: none; min-width: 200px; min-height: 56px; font-size: 20px; }

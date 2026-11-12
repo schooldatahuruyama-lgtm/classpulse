@@ -8,13 +8,36 @@
 // それ以外（保留・失敗・拒否・照合の結果・送られなかった選びなおし）は unconfirmed になる。
 // 終了後の「回答が無い」は、受信されなかったことの証拠にならない（先生が回答を消すため）。
 // freeze の前に sent / rejected だったものは変えない。
-// send は成功したら何も返さないか、サーバーに別の回答が残っていたとき { choice } を返す（その値を送信済みとする）。
+// 値（value）は、アンケートの選択（整数）か、自由記述の文章（normalizeText を通った文字列）。
+// 保管・表示の形は { choice, state } か { text, state }（古い { choice, state } もそのまま読める）。
+// send は成功したら何も返さないか、サーバーに別の回答が残っていたとき { choice } か { text } を返す（その値を送信済みとする）。
+import { normalizeText } from './session-logic.js';
+
 const STATES = new Set(['sending', 'sent', 'queued', 'rejected', 'failed', 'unconfirmed']);
 
 // 同じ質問の送信の順番。outbox を作り直しても（同じタブで授業を出て入り直しても）保つ。
 // 保存先ごとに、「保存の鍵（授業と生徒の ID の組）| 質問」 -> 最後の送信の Promise。
 // 作り直す前の遅い送信が、新しい回答のあとから届いて上書きしないようにする
 const chainsByStorage = new WeakMap();
+
+// 回答の値として使えるか（整数、または前後の空白が無く上限以内の、空でない文字列）
+function isValue(v) {
+  return Number.isInteger(v) || (typeof v === 'string' && normalizeText(v) === v);
+}
+
+// 保管・表示の形 { choice } / { text } から値を取り出す。両方ある・どちらも無い・不正なら null
+function valueOf(o) {
+  if (!o || typeof o !== 'object') return null;
+  const hasChoice = o.choice !== undefined;
+  const hasText = o.text !== undefined;
+  if (hasChoice === hasText) return null;
+  const v = hasChoice ? o.choice : o.text;
+  if (hasChoice ? !Number.isInteger(v) : typeof v !== 'string') return null;
+  return isValue(v) ? v : null;
+}
+
+// 値を保管・表示の形にする
+const shape = (value, state) => (typeof value === 'string' ? { text: value, state } : { choice: value, state });
 function chainsFor(storage) {
   if (!chainsByStorage.has(storage)) chainsByStorage.set(storage, new Map());
   return chainsByStorage.get(storage);
@@ -39,9 +62,10 @@ export function createOutbox({ storage, send, onSettle = () => {}, canSend = () 
       const parsed = raw ? JSON.parse(raw) : null;
       if (parsed && typeof parsed === 'object') {
         for (const [slideId, e] of Object.entries(parsed)) {
-          if (!e || !Number.isInteger(e.choice) || !STATES.has(e.state)) continue;
+          const value = valueOf(e);
+          if (value === null || !STATES.has(e.state)) continue;
           // 前回の送信が終わったか分からないものは、保留として送り直す
-          data[slideId] = { choice: e.choice, state: e.state === 'sending' ? 'queued' : e.state, unsaved: false };
+          data[slideId] = { value, state: e.state === 'sending' ? 'queued' : e.state, unsaved: false };
         }
       }
     } catch { /* こわれたデータは無いものとして扱う */ }
@@ -55,13 +79,13 @@ export function createOutbox({ storage, send, onSettle = () => {}, canSend = () 
     const out = {};
     const b = bucket(sid);
     for (const [k, e] of Object.entries(b.data)) {
-      out[k] = { choice: e.choice, state: b.frozen && e.state === 'sending' ? 'unconfirmed' : e.state };
+      out[k] = shape(e.value, b.frozen && e.state === 'sending' ? 'unconfirmed' : e.state);
     }
     try { storage.setItem(keyOf(sid), JSON.stringify(out)); return true; } catch { return false; }
   }
 
   // 終了後は、まだ決まっていない送信中のものも未確認として見せる（成功すれば sent になる）
-  const view = (b, e) => (e ? { choice: e.choice, state: b.frozen && e.state === 'sending' ? 'unconfirmed' : e.state } : null);
+  const view = (b, e) => (e ? shape(e.value, b.frozen && e.state === 'sending' ? 'unconfirmed' : e.state) : null);
 
   function classify(e) {
     if (e && e.name === 'NetError' && e.code === 'network') return 'queued';
@@ -88,24 +112,24 @@ export function createOutbox({ storage, send, onSettle = () => {}, canSend = () 
             onSettle(sid, slideId);
             break;
           }
-          const sentChoice = entry.choice;
-          entry.inflight = sentChoice;
+          const sentValue = entry.value;
+          entry.inflight = sentValue;
           let result = 'sent';
           let confirmed = null;
           try {
-            const r = await send(sid, slideId, sentChoice);
-            if (r && Number.isInteger(r.choice)) confirmed = r.choice;
+            const r = await send(sid, slideId, sentValue);
+            confirmed = valueOf(r);
           } catch (e) {
             result = classify(e);
           }
           if (buckets.get(sid) !== b) break; // 送信中に clear された
           const now = b.data[slideId];
           if (!now || now.state !== 'sending') break;
-          if (now.choice !== sentChoice) continue; // 送信中に選びなおされた。新しい値を送る
-          if (confirmed !== null) now.choice = confirmed;
+          if (now.value !== sentValue) continue; // 送信中に選びなおされた（書き直された）。新しい値を送る
+          if (confirmed !== null) now.value = confirmed;
           now.inflight = null;
           if (b.frozen) { // 授業が終わった。実際に送った値が成功したときだけ sent。それ以外は未確認
-            now.choice = sentChoice;
+            now.value = sentValue;
             now.state = result === 'sent' && confirmed === null ? 'sent' : 'unconfirmed';
             save(sid);
             onSettle(sid, slideId);
@@ -135,15 +159,17 @@ export function createOutbox({ storage, send, onSettle = () => {}, canSend = () 
   }
 
   return {
-    async put(sid, slideId, choice) {
+    // value は整数（選択）か文章（normalizeText を通った文字列）。それ以外は受け付けない
+    async put(sid, slideId, value) {
       const b = bucket(sid);
+      if (!isValue(value)) return view(b, b.data[slideId]);
       if (b.frozen) { // 終わった授業には送らない
-        b.data[slideId] = { choice, state: 'unconfirmed', unsaved: false };
+        b.data[slideId] = { value, state: 'unconfirmed', unsaved: false };
         save(sid);
         return view(b, b.data[slideId]);
       }
       const inflight = b.data[slideId] ? b.data[slideId].inflight ?? null : null; // 送信中のものは引き継ぐ
-      b.data[slideId] = { choice, state: 'sending', unsaved: false, inflight };
+      b.data[slideId] = { value, state: 'sending', unsaved: false, inflight };
       b.data[slideId].unsaved = !save(sid);
       return drive(sid, slideId);
     },
@@ -185,8 +211,8 @@ export function createOutbox({ storage, send, onSettle = () => {}, canSend = () 
       for (const [slideId, e] of Object.entries(b.data)) {
         if (e.state === 'queued' || e.state === 'failed') { e.state = 'unconfirmed'; changed = true; }
         else if (e.state === 'sending') {
-          if (b.active.has(slideId) && Number.isInteger(e.inflight)) {
-            e.choice = e.inflight; // 実際に送った値。結果は送信が終わったときに決まる
+          if (b.active.has(slideId) && isValue(e.inflight)) {
+            e.value = e.inflight; // 実際に送った値。結果は送信が終わったときに決まる
           } else { e.state = 'unconfirmed'; changed = true; } // まだ送っていない（順番待ち）
         }
       }
@@ -214,12 +240,12 @@ export function createOutbox({ storage, send, onSettle = () => {}, canSend = () 
         .filter(([slideId, e]) => (e.state === 'queued' || e.state === 'failed') && isClosed(slideId))
         .map(([slideId]) => slideId);
     },
-    // サーバーとの照合結果を反映する。choice が数ならその値を送信済みに、null なら rejected。変えたら true
-    settle(sid, slideId, choice) {
+    // サーバーとの照合結果を反映する。value が値（整数か文章）ならその値を送信済みに、null なら rejected。変えたら true
+    settle(sid, slideId, value) {
       const b = bucket(sid);
       const e = b.data[slideId];
       if (b.frozen || !e || (e.state !== 'queued' && e.state !== 'failed')) return false;
-      if (Number.isInteger(choice)) { e.choice = choice; e.state = 'sent'; } else e.state = 'rejected';
+      if (isValue(value)) { e.value = value; e.state = 'sent'; } else e.state = 'rejected';
       e.unsaved = false;
       save(sid);
       return true;

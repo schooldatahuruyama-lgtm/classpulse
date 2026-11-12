@@ -4,6 +4,7 @@
 import { NetError } from './errors.js';
 import { normalizeDeck } from './model.js';
 import { createOutbox } from './outbox.js';
+import { normalizeText } from './session-logic.js';
 
 function toArray(v) {
   if (Array.isArray(v)) return [...v];
@@ -31,12 +32,24 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
 
   // 拒否されたあとの再送は、受付中のまま拒否され続けても無限に繰り返さない
   const openRetried = new Set();
+  // 同じ値で 1 回だけ再送するための鍵（選択の 1 と文章の "1" を分ける）
+  const retryKey = (slideId, value) => `${slideId}:${typeof value}:${value}`;
 
-  async function sendAnswer(slideId, choice) {
+  // サーバーに残っていた自分の回答から、送った値と同じ種類（選択か文章か）の値を取り出す。無ければ null
+  function serverValue(mine, isText) {
+    if (!mine || typeof mine !== 'object') return null;
+    if (isText) return normalizeText(mine.text);
+    return Number.isInteger(mine.choice) ? mine.choice : null;
+  }
+
+  // value は選択（整数）か文章（normalizeText を通った文字列）
+  async function sendAnswer(slideId, value) {
     const answerPath = `sessions/${sid}/inbox/answers/${slideId}/${uid}`;
+    const isText = typeof value === 'string';
     try {
-      await net.set(answerPath, { choice, at: net.serverTimestamp() });
-      openRetried.delete(`${slideId}:${choice}`);
+      const at = net.serverTimestamp();
+      await net.set(answerPath, isText ? { text: value, at } : { choice: value, at });
+      openRetried.delete(retryKey(slideId, value));
       return undefined;
     } catch (e) {
       if (!(e instanceof NetError) || e.code !== 'denied') throw e;
@@ -62,7 +75,7 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
     if (!final) {
       if (poll.status === 'paused') throw new NetError('network', '受付が止まっています');
       // open で今のスライド: 読み直している間に再開された。すぐ送り直す（同じ値で 1 回だけ）
-      const key = `${slideId}:${choice}`;
+      const key = retryKey(slideId, value);
       if (openRetried.has(key)) throw new Error('受付中なのに拒否されました');
       openRetried.add(key);
       flush();
@@ -77,17 +90,19 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
     }
     // 読んでいる間に授業が終わったら、「無い」は削除されただけかもしれないので結果を使わない
     if (ended) throw new NetError('network', '授業が終わりました');
-    if (mine && Number.isInteger(mine.choice)) {
+    const server = serverValue(mine, isText);
+    if (server !== null) {
+      if (isText) return { text: server }; // 文章は outbox の記録から state.text になる
       const cur = pub && pub.current;
-      if (mine.choice !== choice && cur && cur.slideId === slideId) selected = mine.choice;
-      return { choice: mine.choice };
+      if (server !== value && cur && cur.slideId === slideId) selected = server;
+      return { choice: server };
     }
     throw new NetError('denied', '受付が終わっています');
   }
 
   const outbox = createOutbox({
     storage,
-    send: (_sid, slideId, choice) => sendAnswer(slideId, choice),
+    send: (_sid, slideId, value) => sendAnswer(slideId, value),
     // 送信が終わるたびに、締切になっていないか見なおす（送信中に締切が届いた場合）
     onSettle: () => { reconcile(); },
     canSend: (_sid, slideId) => !ended && !isClosedSlide(slideId),
@@ -97,6 +112,27 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
   function markEnded() {
     ended = true;
     outbox.freeze(okey());
+    clearDrafts();
+  }
+
+  // 書きかけの文章（自由記述）。{ [slideId]: 文字列 } を端末に保存する。授業が終わったら消す。
+  // 保存できない端末でも、このページの中では覚えておく
+  const draftKey = () => `classpulse:draft:${sid}:${uid}`;
+  let drafts = null; // 読みこんだ書きかけ（uid が決まってから読む）
+  function loadDrafts() {
+    if (drafts) return drafts;
+    drafts = {};
+    try {
+      const parsed = JSON.parse(storage.getItem(draftKey()) || 'null');
+      if (parsed && typeof parsed === 'object') {
+        for (const [k, v] of Object.entries(parsed)) if (typeof v === 'string') drafts[k] = v;
+      }
+    } catch { /* こわれたデータは無いものとして扱う */ }
+    return drafts;
+  }
+  function clearDrafts() {
+    drafts = {};
+    try { storage.removeItem(draftKey()); } catch { /* 無視 */ }
   }
 
   const isClosedSlide = (slideId) => {
@@ -124,10 +160,13 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
           if (!(e instanceof NetError) || e.code !== 'denied') continue; // 読めない。あとでやり直す
         }
         if (stopped || ended) return; // 終了をまたいだ照合は使わない
-        const server = mine && Number.isInteger(mine.choice) ? mine.choice : null;
+        // 保管中の回答と同じ種類（選択か文章か）の値だけを照合に使う
+        const pending = outbox.get(okey(), slideId);
+        const isText = !!pending && typeof pending.text === 'string';
+        const server = serverValue(mine, isText);
         if (outbox.settle(okey(), slideId, server)) {
           const cur = pub && pub.current;
-          if (server !== null && cur && cur.slideId === slideId) selected = server;
+          if (!isText && server !== null && cur && cur.slideId === slideId) selected = server;
           emit();
         }
       } finally {
@@ -145,6 +184,9 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
       phase, connection, title: pub ? String(pub.title || '') : '',
       slide: null, slideId: '', index: -1, total: deck ? deck.order.length : 0,
       images: deck ? deck.images : {}, poll: null, results: null, selected: null, answer: null,
+      // 自由記述: 今のスライドが自由記述なら kind は 'free'（ほかは null）。
+      // text は、送信済み・送信中など、最後に送ろうとした文章（無ければ null）。answer.text と同じ
+      kind: null, text: null,
       // この授業で、届いたか確かめられなかった回答の数（今のスライドや、教材を読めたかによらない）
       unconfirmedCount: uid ? outbox.unconfirmedCount(okey()) : 0,
     };
@@ -165,6 +207,11 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
       base.answer = outbox.get(okey(), slideId);
       base.selected = selected;
     }
+    if (base.slide && base.slide.type === 'free') {
+      base.kind = 'free';
+      base.selected = null;
+      base.text = base.answer && typeof base.answer.text === 'string' ? base.answer.text : null;
+    }
     return base;
   }
 
@@ -180,7 +227,7 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
     if (key === slideKey) return;
     slideKey = key;
     const prev = key ? outbox.get(okey(), key) : null;
-    selected = prev ? prev.choice : null;
+    selected = prev && Number.isInteger(prev.choice) ? prev.choice : null; // 文章の回答は選択に戻さない
   }
 
   function onPub(value) {
@@ -270,11 +317,48 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
       const cur = pub.current || {};
       const slideId = cur.slideId;
       const poll = slideId && pub.polls ? pub.polls[slideId] : null;
-      if (!poll || poll.status !== 'open' || selected === null) return;
+      const slide = slideId && deck ? deck.slides[slideId] : null;
+      if (!poll || poll.status !== 'open' || selected === null || !slide || slide.type !== 'poll') return;
       const p = outbox.put(okey(), slideId, selected);
       emit(); // 送信中
       await p;
       emit();
+    },
+
+    // 自由記述: 今のスライドが自由記述で受付中のときだけ、normalizeText を通った文章を送る。
+    // 通らない（空白だけ・上限をこえる・文字列でない）なら何もしない。送信済み・送信中と同じ文章なら送らない
+    async submitText(raw) {
+      if (stopped || !pub || !deck || phase !== 'live') return;
+      const slideId = (pub.current && pub.current.slideId) || '';
+      const poll = slideId && pub.polls ? pub.polls[slideId] : null;
+      const slide = slideId ? deck.slides[slideId] : null;
+      if (!poll || poll.status !== 'open' || !slide || slide.type !== 'free') return;
+      const text = normalizeText(raw);
+      if (text === null) return;
+      const cur = outbox.get(okey(), slideId);
+      if (cur && cur.text === text && (cur.state === 'sent' || cur.state === 'sending')) return;
+      const p = outbox.put(okey(), slideId, text);
+      emit(); // 送信中
+      await p;
+      emit();
+    },
+
+    // 書きかけの文章（無ければ ''）。参加する前（uid が決まる前）と、授業が終わったあとは ''
+    draft(slideId) {
+      if (!uid || ended) return '';
+      const v = loadDrafts()[slideId];
+      return typeof v === 'string' ? v : '';
+    },
+
+    // 書きかけの文章を端末に保存する（空なら消す）。授業が終わったあとは保存しない
+    setDraft(slideId, raw) {
+      if (!uid || ended || typeof slideId !== 'string' || !slideId) return;
+      const d = loadDrafts();
+      if (typeof raw === 'string' && raw !== '') d[slideId] = raw; else delete d[slideId];
+      try {
+        if (Object.keys(d).length) storage.setItem(draftKey(), JSON.stringify(d));
+        else storage.removeItem(draftKey());
+      } catch { /* 保存できなくても、このページの中では覚えている */ }
     },
 
     // 保存できなかった、そのほかの失敗（failed）の回答を、今のスライドについて送り直す

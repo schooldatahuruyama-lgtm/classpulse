@@ -2,13 +2,18 @@
 import { el } from '../../ui.js';
 import { renderSlide } from '../../slide-render.js';
 
-const kindLabel = (slide) => (slide && slide.type === 'poll' ? 'アンケート' : '資料');
+const kindLabel = (slide) => {
+  if (slide && slide.type === 'poll') return 'アンケート';
+  if (slide && slide.type === 'free') return '自由記述';
+  return '資料';
+};
 
 // 追加のボタン（左の列と、スライドが無いときの中央で使う）
 export function addButtons(ed) {
   return el('div', { class: 'ed-add' },
     el('button', { type: 'button', class: 'btn', text: '＋ 資料スライド', onclick: () => ed.addSlide('content') }),
-    el('button', { type: 'button', class: 'btn', text: '＋ アンケート', onclick: () => ed.addSlide('poll') }));
+    el('button', { type: 'button', class: 'btn', text: '＋ アンケート', onclick: () => ed.addSlide('poll') }),
+    el('button', { type: 'button', class: 'btn', text: '＋ 自由記述', onclick: () => ed.addSlide('free') }));
 }
 
 function slideActions(ed) {

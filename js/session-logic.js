@@ -7,6 +7,8 @@
 // - waiting の質問は、先生がそのスライドに着いたときに初めて open になる
 // - 結果をかくすときは、公開済みの集計（results/<slideId>）も消す
 
+import { CONFIG } from './config.js';
+
 function toArray(v) {
   if (Array.isArray(v)) return v;
   if (v && typeof v === 'object') {
@@ -21,6 +23,9 @@ export function buildSession(deck, deckId, ownerUid, startedAt) {
     const s = deck.slides[id];
     if (s && s.type === 'poll') {
       polls[id] = { status: 'waiting', resultsVisible: s.resultMode === 'live' };
+    } else if (s && s.type === 'free') {
+      // 自由記述は「結果を表示」を押すまで文章を映さない
+      polls[id] = { status: 'waiting', resultsVisible: false };
     }
   }
   return {
@@ -148,16 +153,58 @@ export function endPatch(pub) {
   return patch;
 }
 
-export function buildHistory(session, inbox, endedAt) {
+// 自由記述の回答の文。前後の空白を取り、文字列でない・空・上限をこえるなら null
+export function normalizeText(raw) {
+  if (typeof raw !== 'string') return null;
+  const t = raw.trim();
+  if (t === '' || t.length > CONFIG.free.maxLength) return null;
+  return t;
+}
+
+// 自由記述の回答の一覧。answers は inbox.answers[slideId]、hidden は { <uid>: true }。
+// 不正な text の回答は数えない。並びは at の古い順、同じなら uid の順
+export function freeList(answers, hidden) {
+  const hid = hidden && typeof hidden === 'object' ? hidden : {};
+  const rows = [];
+  for (const [uid, a] of Object.entries(answers || {})) {
+    const text = normalizeText(a && a.text);
+    if (text === null) continue;
+    const at = a && typeof a.at === 'number' ? a.at : 0;
+    rows.push({ uid, text, at });
+  }
+  rows.sort((x, y) => (x.at - y.at) || (x.uid < y.uid ? -1 : x.uid > y.uid ? 1 : 0));
+  const items = [];
+  const hiddenItems = [];
+  for (const { uid, text } of rows) {
+    (hid[uid] === true ? hiddenItems : items).push({ uid, text });
+  }
+  return { items, hiddenItems, total: rows.length };
+}
+
+// hidden は { <slideId>: { <uid>: true } }（省略可）。履歴には uid を入れない
+export function buildHistory(session, inbox, endedAt, hidden) {
   const deck = session.deck;
   const answers = (inbox && inbox.answers) || {};
   const questions = [];
   for (const slideId of toArray(deck.order)) {
     const slide = (deck.slides || {})[slideId];
-    if (!slide || slide.type !== 'poll') continue;
+    if (!slide) continue;
+    if (slide.type === 'free') {
+      const { items, hiddenItems, total } = freeList(answers[slideId], (hidden || {})[slideId]);
+      questions.push({
+        slideId,
+        type: 'free',
+        question: slide.question || '',
+        texts: items.map((x) => x.text),
+        hiddenTexts: hiddenItems.map((x) => x.text),
+        total,
+      });
+      continue;
+    }
+    if (slide.type !== 'poll') continue;
     const options = toArray(slide.options);
     const { counts, total } = tally(answers[slideId], options.length);
-    questions.push({ slideId, question: slide.question || '', options: [...options], counts, total });
+    questions.push({ slideId, type: 'poll', question: slide.question || '', options: [...options], counts, total });
   }
   return {
     title: session.pub.title,

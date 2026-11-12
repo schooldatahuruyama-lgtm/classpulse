@@ -1,5 +1,6 @@
 // 授業履歴（#/history）と、1 回の授業の結果（#/history/<sid>）。
 // 回答は匿名なので、ここには集計した人数だけを出す（個人ごとの一覧や ID は出さない）。
+// 自由記述は件数と文章の一覧（だれが書いたかは出さない。履歴に uid は無い）。type の無い古い項目はアンケート。
 import { el, confirmDialog, closeAllDialogs, resultBars, toast } from '../ui.js';
 import { formatDateTime } from '../format.js';
 import { routeHash } from '../router.js';
@@ -49,7 +50,30 @@ export function mount(root, ctx) {
   }
 
   // ---- 結果 ----
+  // 自由記述の文章の一覧（文は textContent で入れる）
+  const textList = (texts) => el('ul', { class: 'hist-free-list' },
+    texts.map((t) => el('li', { class: 'hist-free-item', text: t })));
+
+  function freeCard(q, i) {
+    const texts = Array.isArray(q.texts) ? q.texts : [];
+    const hiddenTexts = Array.isArray(q.hiddenTexts) ? q.hiddenTexts : [];
+    const body = el('div', { class: 'hist-q-body' },
+      texts.length ? textList(texts) : el('p', { class: 'muted', text: hiddenTexts.length ? '表示した回答はありません。' : '回答はありませんでした。' }));
+    // 授業中にかくした回答は、あるときだけ分けて出す
+    if (hiddenTexts.length) {
+      body.append(el('section', { class: 'hist-free-hidden' },
+        el('h4', { class: 'hist-free-hidden-title', text: '授業中にかくした回答' }),
+        textList(hiddenTexts)));
+    }
+    return el('li', { class: 'hist-q card' },
+      el('h3', { class: 'hist-q-no', text: `質問 ${i + 1}（自由記述）` }),
+      el('p', { class: 'hist-q-text', text: q.question || '' }),
+      body,
+      el('p', { class: 'small muted', text: `回答 ${q.total} 件` }));
+  }
+
   function questionCard(q, i) {
+    if (q && q.type === 'free') return freeCard(q, i);
     const body = el('div', { class: 'hist-q-body' });
     if (q.total > 0) resultBars(body, { options: q.options, counts: q.counts, total: q.total });
     else body.append(el('p', { class: 'muted', text: '回答はありませんでした。' }));
