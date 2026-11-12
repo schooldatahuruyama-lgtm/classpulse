@@ -48,6 +48,20 @@
 }
 .slide-poll-text { overflow-wrap: anywhere; }
 
+/* 自由記述のスライド: 質問文と、入力欄の見本（押せない） */
+.slide-free { position: absolute; inset: 0; padding: calc(4 * var(--unit)) calc(5 * var(--unit)); display: flex; flex-direction: column; gap: calc(2.5 * var(--unit)); }
+.slide-free-question { margin: 0; font-size: calc(4.5 * var(--unit)); font-weight: 700; white-space: pre-wrap; overflow-wrap: anywhere; }
+.slide-free-sample { display: flex; flex-direction: column; align-items: flex-end; gap: calc(1.5 * var(--unit)); pointer-events: none; user-select: none; }
+.slide-free-box {
+  align-self: stretch; min-height: calc(14 * var(--unit)); padding: calc(1.2 * var(--unit)) calc(1.8 * var(--unit));
+  border: calc(0.25 * var(--unit)) dashed var(--c-line); border-radius: calc(1.2 * var(--unit));
+  font-size: calc(3 * var(--unit)); color: #4B5694; background: #F7F8FD;
+}
+.slide-free-send {
+  padding: calc(1 * var(--unit)) calc(3 * var(--unit)); border-radius: calc(1.2 * var(--unit));
+  background: var(--c-navy); color: #FFFFFF; font-size: calc(2.8 * var(--unit)); font-weight: 700; opacity: 0.45;
+}
+
 /* 縮小表示 */
 .slide-thumb { border: 1px solid var(--c-line); border-radius: 6px; pointer-events: none; }
 .slide-badge {

@@ -4,6 +4,7 @@ import { createDeck, createSlide, addSlide } from '../js/model.js';
 import { buildHistory } from '../js/session-logic.js';
 import { createRepo } from '../js/repo.js';
 import { createSessionHost, startSession } from '../js/session-host.js';
+import { CONFIG } from '../js/config.js';
 import { createFakeNet } from './helpers/fake-net.js';
 
 const UID = 'teacher1';
@@ -776,4 +777,312 @@ test('集計の書きこみが規則に拒否されたら、最新の pub を読
   assert.equal(sessionOf(env, sid).pub.results, undefined);
   assert.equal(a.last().pub.polls.s2.resultsVisible, false);
   await a.host.stop();
+});
+
+// ---- 自由記述 ----
+
+// s1 資料、s2 自由記述、s3 アンケート（manual）
+function freeDeck() {
+  let d = createDeck('自由記述の教材', 1000);
+  d = addSlide(d, createSlide('content'), 's1');
+  d = addSlide(d, { ...createSlide('free'), question: '感想は？' }, 's2');
+  d = addSlide(d, { ...createSlide('poll'), question: '好きな色は？', options: ['赤', '青'], resultMode: 'manual' }, 's3');
+  return d;
+}
+
+const write = (env, sid, slideId, uid, text, at) =>
+  env.net.set(`sessions/${sid}/inbox/answers/${slideId}/${uid}`, { text, at });
+
+// s2（自由記述・受付中）にいる host を開く
+async function openFree(env) {
+  const sid = await begin(env, freeDeck());
+  const h = await openHost(env, sid);
+  await h.host.next(); await h.host.next();
+  return { sid, ...h };
+}
+
+const texts = (s) => (s.freeItems || []).map((x) => x.text);
+
+test('自由記述: 結果を表示する前は、状態に文章が 1 つも無い（件数だけ）', async () => {
+  const env = setup();
+  const { sid, host, states, last } = await openFree(env);
+  await write(env, sid, 's2', 'u1', 'ひみつのぶんしょうA', 10);
+  await write(env, sid, 's2', 'u2', 'ひみつのぶんしょうB', 20);
+  await write(env, sid, 's2', 'u2', 'ひみつのぶんしょうC', 30); // 書き直し
+  await env.clock.advance(5000);
+  assert.equal(last().kind, 'free');
+  assert.equal(last().answerCount, 2);
+  assert.equal(last().freeItems, null);
+  for (const s of states) assert.ok(!JSON.stringify(s).includes('ひみつ'), '状態に文章が入っている');
+  host.stop();
+});
+
+test('自由記述: 表示にすると freeItems が古い順で入り、結果をかくすと消える', async () => {
+  const env = setup();
+  const { sid, host, states, last } = await openFree(env);
+  await write(env, sid, 's2', 'u2', 'あと', 20);
+  await write(env, sid, 's2', 'u1', 'さき', 10);
+  await host.setResultsVisible(true, 's2');
+  assert.deepEqual(last().freeItems, [{ uid: 'u1', text: 'さき' }, { uid: 'u2', text: 'あと' }]);
+  assert.equal(last().answerCount, 2);
+  assert.equal(sessionOf(env, sid).pub.polls.s2.resultsVisible, true);
+  await host.setResultsVisible(false, 's2');
+  assert.equal(last().freeItems, null);
+  const n = states.length;
+  await write(env, sid, 's2', 'u3', 'ひみつ', 40);
+  await env.clock.advance(5000);
+  for (const s of states.slice(n)) assert.ok(!JSON.stringify(s).includes('ひみつ'));
+  assert.equal(last().answerCount, 3);
+  host.stop();
+});
+
+test('自由記述: 表示中の新しい回答・書き直しは 500ms 以内の間隔でまとめて反映される', async () => {
+  const env = setup();
+  const { sid, host, last } = await openFree(env);
+  await write(env, sid, 's2', 'u1', '一', 10);
+  await host.setResultsVisible(true, 's2');
+  assert.deepEqual(texts(last()), ['一']);
+  await env.clock.advance(100);
+  await write(env, sid, 's2', 'u2', '二', 20);
+  await write(env, sid, 's2', 'u1', '一（直した）', 30);
+  assert.deepEqual(texts(last()), ['一']); // まだ反映しない
+  assert.equal(last().answerCount, 2); // 件数は文章ではないので、すぐ変わる
+  await env.clock.advance(CONFIG.resultsThrottleMs - 101);
+  assert.deepEqual(texts(last()), ['一']);
+  await env.clock.advance(1);
+  assert.deepEqual(texts(last()), ['二', '一（直した）']);
+  await env.clock.advance(5000);
+  assert.equal(env.clock.pending(), 0);
+  host.stop();
+});
+
+test('自由記述: hide のあと freeItems から消え、件数は変わらない。書き直しても出てこない', async () => {
+  const env = setup();
+  const { sid, host, last } = await openFree(env);
+  await write(env, sid, 's2', 'u1', 'よい', 10);
+  await write(env, sid, 's2', 'u2', 'わるい', 20);
+  await host.setResultsVisible(true, 's2');
+  const p = host.hide('s2', 'u2');
+  assert.deepEqual(texts(last()), ['よい']); // すぐに消える
+  assert.equal(last().answerCount, 2);
+  await p;
+  assert.equal(last().hiddenUnsaved, false);
+  assert.equal(sessionOf(env, sid).host.hidden.s2.u2, true);
+  await write(env, sid, 's2', 'u2', 'わるい2', 30);
+  await env.clock.advance(5000);
+  assert.deepEqual(texts(last()), ['よい']);
+  assert.equal(last().answerCount, 2);
+  host.stop();
+});
+
+test('自由記述: hide の書きこみが失敗すると hiddenUnsaved、再試行で成功すると false', async () => {
+  const env = setup();
+  const { sid, host, last } = await openFree(env);
+  await write(env, sid, 's2', 'u1', 'よい', 10);
+  await write(env, sid, 's2', 'u2', 'わるい', 20);
+  await host.setResultsVisible(true, 's2');
+  let fail = true;
+  let tries = 0;
+  env.ctl.extraDeny = (op, path) => {
+    if (op === 'set' && path.includes('/host/hidden/')) { tries += 1; return fail; }
+    return false;
+  };
+  let saved = false;
+  const p = host.hide('s2', 'u2').then(() => { saved = true; });
+  await settle();
+  assert.equal(last().hiddenUnsaved, true);
+  assert.deepEqual(texts(last()), ['よい']);
+  assert.equal(tries, 1);
+  await env.clock.advance(CONFIG.reconnectDelayMs);
+  assert.equal(tries, 2);
+  assert.equal(last().hiddenUnsaved, true);
+  // 書けていなくても、「次へ」「前へ」で戻っても出さない
+  await host.next(); await host.prev();
+  assert.deepEqual(texts(last()), ['よい']);
+  fail = false;
+  await env.clock.advance(CONFIG.reconnectDelayMs);
+  await p;
+  assert.equal(saved, true);
+  assert.equal(last().hiddenUnsaved, false);
+  assert.equal(sessionOf(env, sid).host.hidden.s2.u2, true);
+  assert.equal(env.clock.pending(), 0);
+  host.stop();
+});
+
+test('自由記述: 作り直した host（再読み込み）でも、かくしたものが出ない', async () => {
+  const env = setup();
+  const a = await openFree(env);
+  const { sid } = a;
+  await write(env, sid, 's2', 'u1', 'よい', 10);
+  await write(env, sid, 's2', 'u2', 'わるい', 20);
+  await a.host.setResultsVisible(true, 's2');
+  await a.host.hide('s2', 'u2');
+  await a.host.stop();
+  const b = await openHost(env, sid);
+  assert.equal(b.last().kind, 'free');
+  assert.deepEqual(texts(b.last()), ['よい']);
+  assert.equal(b.last().answerCount, 2);
+  assert.equal(b.last().hiddenUnsaved, false);
+  b.host.stop();
+});
+
+test('自由記述: stop は hide の再試行も止める', async () => {
+  const env = setup();
+  const { sid, host } = await openFree(env);
+  await write(env, sid, 's2', 'u1', 'よい', 10);
+  let tries = 0;
+  env.ctl.extraDeny = (op, path) => { if (path.includes('/host/hidden/')) { tries += 1; return true; } return false; };
+  const p = host.hide('s2', 'u1');
+  await settle();
+  assert.equal(tries, 1);
+  await host.stop();
+  await assert.rejects(p);
+  assert.equal(env.clock.pending(), 0);
+  await env.clock.advance(CONFIG.reconnectDelayMs * 3);
+  assert.equal(tries, 1);
+});
+
+test('自由記述: 停止した host の書きこみ中の hide は、次の host が読む前に済む', async () => {
+  const env = setup();
+  const a = await openFree(env);
+  const { sid } = a;
+  await write(env, sid, 's2', 'u1', 'よい', 10);
+  await write(env, sid, 's2', 'u2', 'わるい', 20);
+  await a.host.setResultsVisible(true, 's2');
+  const g = gate();
+  const origSet = env.net.set;
+  env.net.set = async (path, value) => {
+    if (path.includes('/host/hidden/')) await g.wait();
+    return origSet(path, value);
+  };
+  const hiding = a.host.hide('s2', 'u2');
+  await settle();
+  const stopping = a.host.stop();
+  const states = [];
+  const b = createSessionHost({
+    net: env.net, repo: env.repo, sid, onChange: (s) => states.push(s),
+    now: env.clock.now, setTimeout: env.clock.setTimeout, clearTimeout: env.clock.clearTimeout,
+  });
+  const starting = b.start();
+  await settle();
+  g.open();
+  await assert.rejects(hiding); // 書けたかどうかを、閉じた画面は知らせない
+  await stopping;
+  await starting;
+  assert.deepEqual(texts(states[states.length - 1]), ['よい']);
+  b.stop();
+});
+
+test('自由記述では pub/results に何も書かない。アンケートは今までどおり書く', async () => {
+  const env = setup();
+  const { sid, host } = await openFree(env);
+  await write(env, sid, 's2', 'u1', 'ぶんしょう', 10);
+  await host.setResultsVisible(true, 's2');
+  await env.clock.advance(1000);
+  await write(env, sid, 's2', 'u2', 'ぶんしょう2', 20);
+  await env.clock.advance(1000);
+  await host.setResultsVisible(false, 's2');
+  await host.setResultsVisible(true, 's2');
+  await host.next(); // s3 へ（s2 は締切）
+  await env.clock.advance(1000);
+  const touchesFree = env.updates.some((u) => Object.keys(u.patch).some((k) => k === 'results/s2' || k.startsWith('results/s2/')));
+  assert.equal(touchesFree, false);
+  assert.equal(sessionOf(env, sid).pub.results, undefined);
+  for (const u of env.updates) assert.ok(!JSON.stringify(u.patch).includes('ぶんしょう'));
+  assert.ok(!JSON.stringify(sessionOf(env, sid).pub).includes('ぶんしょう'));
+  // アンケート
+  await answer(env, sid, 's3', 'u1', 1);
+  await host.setResultsVisible(true, 's3');
+  assert.deepEqual(sessionOf(env, sid).pub.results.s3, { counts: [0, 1], total: 1 });
+  host.stop();
+});
+
+test('自由記述: end() の履歴で hiddenTexts に分かれ、uid が無く、後片づけのあと host が無い', async () => {
+  const env = setup();
+  const { sid, host, last } = await openFree(env);
+  await write(env, sid, 's2', 'uidA', 'よい', 10);
+  await write(env, sid, 's2', 'uidB', 'わるい', 20);
+  await write(env, sid, 's2', 'uidC', 'ふつう', 30);
+  await write(env, sid, 's2', 'uidD', 'のこる', 40);
+  await host.setResultsVisible(true, 's2');
+  await host.hide('s2', 'uidB'); // 保存できたもの
+  env.ctl.extraDeny = (op, path) => op === 'set' && path.includes('/host/hidden/');
+  host.hide('s2', 'uidC').catch(() => {}); // まだ書けていないもの
+  await settle();
+  assert.equal(last().hiddenUnsaved, true);
+  env.ctl.extraDeny = () => false;
+  const g = gate();
+  env.ctl.holdInboxGet = g.wait;
+  const ending = host.end();
+  await settle();
+  // 締切のあと、読み直す前に（別のタブなどが）書いたもの: end のときに読み直して使う
+  await env.net.set(`sessions/${sid}/host/hidden/s2/uidA`, true);
+  env.ctl.holdInboxGet = null;
+  g.open();
+  await ending;
+  const dump = env.net.dump();
+  const hist = dump.teachers[UID].history[sid];
+  const q = hist.questions.find((x) => x.slideId === 's2');
+  assert.equal(q.type, 'free');
+  assert.deepEqual(q.texts, ['のこる']);
+  assert.deepEqual(q.hiddenTexts, ['よい', 'わるい', 'ふつう']);
+  assert.equal(q.total, 4);
+  assert.ok(!JSON.stringify(hist).includes('uid'));
+  assert.equal(dump.sessions[sid].host, undefined);
+  assert.equal(dump.sessions[sid].inbox, undefined);
+  assert.equal(last().phase, 'ended');
+  assert.equal(last().hiddenUnsaved, false);
+  await env.clock.advance(CONFIG.reconnectDelayMs * 3);
+  assert.equal(env.net.dump().sessions[sid].host, undefined); // 再試行で host を作り直さない
+  assert.equal(env.clock.pending(), 0);
+  host.stop();
+});
+
+test('自由記述: host を消せなかった end は、やり直すと片づけが終わる', async () => {
+  const env = setup();
+  const { sid, host } = await openFree(env);
+  await write(env, sid, 's2', 'u1', 'よい', 10);
+  await host.hide('s2', 'u1');
+  let failed = 0;
+  env.ctl.extraDeny = (op, path) => {
+    if (op === 'remove' && path === `sessions/${sid}/host` && failed === 0) { failed += 1; return true; }
+    return false;
+  };
+  await assert.rejects(host.end());
+  assert.ok(sessionOf(env, sid).host);
+  await host.end();
+  assert.equal(sessionOf(env, sid).host, undefined);
+  assert.equal(env.net.dump().teachers[UID].active, undefined);
+  assert.deepEqual(env.net.dump().teachers[UID].history[sid].questions[0].hiddenTexts, ['よい']);
+  host.stop();
+});
+
+test('自由記述: 締切済みに戻ったとき、表示中なら freeItems が入り、status は closed のまま', async () => {
+  const env = setup();
+  const { sid, host, last } = await openFree(env);
+  await write(env, sid, 's2', 'u1', 'よい', 10);
+  await host.setResultsVisible(true, 's2');
+  await host.next(); // s3
+  assert.equal(last().kind, 'poll');
+  assert.equal(last().freeItems, null);
+  assert.equal(last().answerCount, null);
+  await host.prev(); // s2 に戻る
+  assert.equal(last().pub.polls.s2.status, 'closed');
+  assert.equal(sessionOf(env, sid).pub.polls.s2.status, 'closed');
+  assert.equal(last().kind, 'free');
+  assert.deepEqual(texts(last()), ['よい']);
+  await host.hide('s2', 'u1'); // 締切後もかくせる
+  assert.deepEqual(last().freeItems, []);
+  assert.equal(last().answerCount, 1);
+  host.stop();
+});
+
+test('自由記述: 結果をかくしたまま締切済みに戻っても、文章は状態に無い', async () => {
+  const env = setup();
+  const { sid, host, states } = await openFree(env);
+  await write(env, sid, 's2', 'u1', 'ひみつ', 10);
+  await host.next(); await host.prev();
+  assert.equal(states[states.length - 1].freeItems, null);
+  for (const s of states) assert.ok(!JSON.stringify(s).includes('ひみつ'));
+  host.stop();
 });

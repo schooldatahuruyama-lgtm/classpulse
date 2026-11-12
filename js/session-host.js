@@ -9,7 +9,7 @@ import { CONFIG } from './config.js';
 import { validateDeck, newSessionId, normalizeDeck } from './model.js';
 import {
   buildSession, nextPatch, prevPatch, pausePatch, resultsVisiblePatch,
-  tally, applyPatch, closeAllPatch, endPatch, buildHistory,
+  tally, applyPatch, closeAllPatch, endPatch, buildHistory, freeList,
 } from './session-logic.js';
 
 // 教材を検査し、通れば授業を書いて「発表中」の印を付ける。授業 ID を返す
@@ -34,11 +34,38 @@ function stoppedError() {
   return new Error('この画面は閉じられました');
 }
 
+// Firebase のキーに使えるか（host/hidden のパスに入れる）
+function validKey(k) {
+  return typeof k === 'string' && k !== '' && !/[.#$[\]/]/.test(k);
+}
+
+// かくした回答の表 { <slideId>: { <uid>: true } } を作り直す（true 以外は捨てる）。
+// __proto__ などのキーでこわれないよう、プロトタイプの無いオブジェクトにする
+function cleanHidden(...sources) {
+  const out = Object.create(null);
+  for (const v of sources) {
+    if (!v || typeof v !== 'object') continue;
+    for (const [slideId, m] of Object.entries(v)) {
+      if (!m || typeof m !== 'object') continue;
+      for (const [uid, flag] of Object.entries(m)) {
+        if (flag !== true) continue;
+        if (!out[slideId]) out[slideId] = Object.create(null);
+        out[slideId][uid] = true;
+      }
+    }
+  }
+  return out;
+}
+
 export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: setT, clearTimeout: clearT }) {
   const base = `sessions/${sid}`;
   const pubPath = `${base}/pub`;
   const inboxPath = `${base}/inbox`;
+  const hostPath = `${base}/host`;
+  const hiddenPath = `${hostPath}/hidden`;
 
+  // onChange に渡す状態。自由記述のための項目（kind・answerCount・freeItems・hiddenUnsaved）は
+  // emit のときに freeState() で足す。文章は「結果を表示」中の freeItems にだけ入れる
   const state = {
     phase: 'loading', connection: 'connected', title: '',
     order: [], slides: {}, images: {},
@@ -55,6 +82,16 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
   const timers = new Map();    // slideId → タイマー
   const lastWriteAt = new Map();
 
+  // 自由記述: かくした回答（手元のもの。まだ書けていないものも入る）。start で 1 回読み、end で読み直す
+  let hidden = cleanHidden();
+  const unsaved = new Map();    // "slideId/uid" → { slideId, uid, promise, resolve, reject }（host/hidden に書けていないもの）
+  const hideTimers = new Map(); // "slideId/uid" → 再試行のタイマー
+  const hideWrites = new Set(); // 実行中の host/hidden の書きこみ
+  let hideClosed = false;       // 授業が終わったら、host/hidden に書かない（後片づけで消した host を作り直さない）
+  // 表示中の一覧の写し（新しい回答・書き直しは resultsThrottleMs に 1 回まで反映する）
+  let freeView = null;          // { slideId, items: [{ uid, text }], at }
+  let freeTimer = null;
+
   // 操作は 1 つずつ。失敗しても次の操作は止めない
   let tail = Promise.resolve();
   function enqueue(fn) {
@@ -65,12 +102,86 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
 
   function emit() {
     if (stopped) return;
-    onChange({ ...state, tallies: { ...state.tallies } });
+    onChange({ ...state, tallies: { ...state.tallies }, ...freeState() });
   }
 
   function currentSlideId() {
     const cur = state.pub && state.pub.current;
     return cur && typeof cur.slideId === 'string' ? cur.slideId : '';
+  }
+
+  function clearFreeTimer() {
+    if (freeTimer !== null) { clearT(freeTimer); freeTimer = null; }
+  }
+  function dropFreeView() {
+    freeView = null;
+    clearFreeTimer();
+  }
+
+  // 今のスライドが自由記述のときの項目。結果を表示していない間は、文章も uid も 1 つも入れない
+  // （一覧の写しも捨てる）。freeItems の uid は hide に渡すためだけのもの（画面の DOM には入れない）
+  function freeState() {
+    const id = currentSlideId();
+    const slide = id ? state.slides[id] : null;
+    const out = {
+      kind: slide ? slide.type : null,
+      answerCount: null,
+      freeItems: null,
+      hiddenUnsaved: unsaved.size > 0,
+    };
+    if (!slide || slide.type !== 'free' || state.phase !== 'live') { dropFreeView(); return out; }
+    const answers = (inbox && inbox.answers) || {};
+    const list = freeList(answers[id], hidden[id]);
+    out.answerCount = list.total;
+    const poll = state.pub && state.pub.polls && state.pub.polls[id];
+    if (!poll || poll.resultsVisible !== true) { dropFreeView(); return out; }
+    const t = now();
+    if (!freeView || freeView.slideId !== id) {
+      // 表示を始めた・スライドが変わった: すぐに今の一覧を出す
+      clearFreeTimer();
+      freeView = { slideId: id, items: list.items, at: t };
+    } else if (freeTimer === null && JSON.stringify(list.items) !== JSON.stringify(freeView.items)) {
+      const wait = freeView.at + CONFIG.resultsThrottleMs - t;
+      if (wait <= 0) freeView = { slideId: id, items: list.items, at: t };
+      else freeTimer = setT(() => { freeTimer = null; emit(); }, wait);
+    }
+    // かくしたものは、写しを作ったあとでも、すぐに外す
+    const hid = hidden[id] || {};
+    out.freeItems = freeView.items.filter((x) => hid[x.uid] !== true).map((x) => ({ uid: x.uid, text: x.text }));
+    return out;
+  }
+
+  // host/hidden/<slideId>/<uid> に書く。失敗したら reconnectDelayMs ごとに再試行する
+  function saveHidden(key) {
+    const e = unsaved.get(key);
+    if (!e || stopped || hideClosed) return;
+    const done = net.set(`${hiddenPath}/${e.slideId}/${e.uid}`, true).then(() => {
+      if (unsaved.get(key) !== e) return;
+      unsaved.delete(key);
+      emit();
+      e.resolve();
+    }, () => {
+      if (stopped || hideClosed || unsaved.get(key) !== e || hideTimers.has(key)) return;
+      hideTimers.set(key, setT(() => { hideTimers.delete(key); saveHidden(key); }, CONFIG.reconnectDelayMs));
+    });
+    hideWrites.add(done);
+    const forget = () => { hideWrites.delete(done); };
+    done.then(forget, forget);
+  }
+
+  // 実行中の host/hidden の書きこみが、成否にかかわらず落ち着くまで待つ
+  function settledHideWrites() {
+    return Promise.all([...hideWrites].map((p) => p.then(() => {}, () => {}))).then(() => {});
+  }
+
+  // host/hidden への書きこみをやめる。書けていないものは、settle(entry) で決着させる
+  function closeHide(settleEntry) {
+    hideClosed = true;
+    for (const t of hideTimers.values()) clearT(t);
+    hideTimers.clear();
+    const left = [...unsaved.values()];
+    unsaved.clear();
+    for (const e of left) settleEntry(e);
   }
 
   // 回答の箱から、質問ごとの集計と人数を作り直す
@@ -100,6 +211,7 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
   function clearTimers() {
     for (const t of timers.values()) clearT(t);
     timers.clear();
+    clearFreeTimer();
   }
 
   // 公開中の質問の集計を pub に書く（500ms に 1 回まで。最後の値は必ず書く）
@@ -179,6 +291,8 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
       state.phase = 'ended';
       clearTimers();
       unsubscribeAll();
+      // 別のタブが後片づけで host を消している。書けていないかくしたものは、もう書かない
+      closeHide((e) => e.reject(new Error('授業は終わっています')));
     }
     return true;
   }
@@ -236,12 +350,15 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
       guard();
       const finalInbox = await net.get(inboxPath);
       guard();
+      // かくした回答も読み直し、手元でかくしたもの（まだ書けていないものも）と合わせる
+      const finalHidden = await net.get(hiddenPath);
+      guard();
       const history = buildHistory(
         {
           deckId: meta.deckId, startedAt: meta.startedAt, pub: state.pub,
           deck: { order: state.order, slides: state.slides, images: state.images },
         },
-        finalInbox, now(),
+        finalInbox, now(), cleanHidden(finalHidden, hidden),
       );
       // 3. 履歴を保存できなければここで止める（live のまま、inbox も残す）
       await repo.saveHistory(sid, history);
@@ -250,9 +367,15 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
       unsubscribeAll();
       emit();
     }
-    // 4. 回答と教材の写しを消し、発表中の印を外す（どこで失敗しても end をやり直せる）
+    // 4. 回答・かくした回答・教材の写しを消し、発表中の印を外す（どこで失敗しても end をやり直せる）
     guard();
     await net.remove(inboxPath);
+    guard();
+    // かくしたものは履歴に入れた（または別のタブが終えた）。再試行を止め、実行中の書きこみを待ってから host を消す
+    closeHide((e) => e.resolve());
+    await settledHideWrites();
+    guard();
+    await net.remove(hostPath);
     guard();
     await net.remove(`${base}/deck`);
     guard();
@@ -277,6 +400,8 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
       }
       state.pub = session.pub;
       state.title = String(session.pub.title || '');
+      // かくした回答（host/hidden）は、開いたときに 1 回だけ読む（授業全体の読みこみに含まれる）
+      hidden = cleanHidden(session.host && session.host.hidden, hidden);
       meta = { deckId: String(session.deckId || ''), startedAt: Number(session.startedAt) || 0 };
       if (session.deck) {
         const deck = normalizeDeck(session.deck);
@@ -316,6 +441,12 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
         const id = currentSlideId();
         if (slideId !== undefined && slideId !== id) return null;
         const patch = resultsVisiblePatch(pub, id, visible);
+        // 自由記述は resultsVisible だけを書く（pub/results/<slideId> には、消すことも含めて触れない）
+        const slide = state.slides[id];
+        if (patch && slide && slide.type === 'free') {
+          delete patch[`results/${id}`];
+          return patch;
+        }
         // 公開するときは、今の集計も同時に書く
         if (patch && visible && state.tallies[id]) {
           const t = state.tallies[id];
@@ -343,13 +474,43 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
       });
     },
 
+    // 自由記述の 1 件をかくす。すぐに手元でかくして onChange を呼び、host/hidden への書きこみは裏で行う
+    // （失敗したら reconnectDelayMs ごとに再試行。書けていない間は hiddenUnsaved が true）。
+    // 返す Promise は、書けたとき（または授業の終了で履歴に入れたとき）に解決する。
+    // 画面を閉じた・別のタブが授業を終えたなどで書けなくなったら拒否する
+    hide(slideId, uid) {
+      if (stopped) return Promise.reject(stoppedError());
+      const slide = state.slides[slideId];
+      if (state.phase !== 'live' || hideClosed || !slide || slide.type !== 'free' || !validKey(slideId) || !validKey(uid)) {
+        return Promise.reject(new Error('この回答はかくせません'));
+      }
+      const key = `${slideId}/${uid}`;
+      if (hidden[slideId] && hidden[slideId][uid] === true) {
+        const e = unsaved.get(key);
+        return e ? e.promise : Promise.resolve();
+      }
+      hidden = cleanHidden(hidden, { [slideId]: { [uid]: true } });
+      if (freeView && freeView.slideId === slideId) {
+        freeView = { ...freeView, items: freeView.items.filter((x) => x.uid !== uid) };
+      }
+      const e = { slideId, uid };
+      e.promise = new Promise((resolve, reject) => { e.resolve = resolve; e.reject = reject; });
+      e.promise.catch(() => {}); // 呼び出し側が待たなくても、未処理の拒否にしない
+      unsaved.set(key, e);
+      emit();
+      saveHidden(key);
+      return e.promise;
+    },
+
     // 画面を離れる。授業は終わらせない。実行中の書きこみが落ち着いたら解決する
     stop() {
       stopped = true;
       clearTimers();
       unsubscribeAll();
+      // かくしたものの再試行も止める（書けていないものは拒否する）
+      closeHide((e) => e.reject(stoppedError()));
       // 前の host の分と自分の分をつなぐ（置きかえない）。登録中のものが済んだら表から消す
-      const own = tail.then(() => {}, () => {});
+      const own = Promise.all([tail.then(() => {}, () => {}), settledHideWrites()]).then(() => {});
       const earlier = drains.get(sid);
       const chained = earlier ? Promise.all([earlier, own]).then(() => {}) : own;
       drains.set(sid, chained);

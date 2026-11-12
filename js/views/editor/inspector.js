@@ -17,6 +17,8 @@ const ALIGNS = [
 
 export const POLL_NOTE = 'このアンケートは匿名です。次のスライドへ進むと締め切ります。締め切る前は、生徒は答えを変えられます。';
 
+export const FREE_NOTE = '生徒は文章で答えます。次のスライドへ進むと締め切ります。';
+
 // 押した状態を持つボタンの組（aria-pressed と「✓」の文字で、色だけに頼らない）
 function choiceGroup(id, label, choices, current, onPick, { swatch = false } = {}) {
   return el('div', { class: 'ed-group', role: 'group', 'aria-labelledby': id },
@@ -91,6 +93,19 @@ export function renderPollSettings(host, ed) {
       radio('manual', '先生が表示するまで出さない'),
       radio('live', 'すぐ表示')),
     el('p', { class: 'ed-note', text: POLL_NOTE }));
+}
+
+// 自由記述の右の列（質問文だけ）。入力中は右の列を描き直さず、中央の見本だけ ed.patchSlide で更新する
+export function renderFreeSettings(host, ed) {
+  const slide = ed.currentSlide();
+  const question = el('textarea', {
+    id: 'ed-free-question', rows: '4', value: slide.question || '',
+    oninput: () => ed.patchSlide({ question: question.value }),
+  });
+  host.replaceChildren(
+    el('h2', { class: 'ed-col-title', text: '自由記述の設定' }),
+    el('div', { class: 'field' }, el('label', { class: 'label', for: 'ed-free-question', text: '質問文' }), question),
+    el('p', { class: 'ed-note', text: FREE_NOTE }));
 }
 
 // アンケートの中央（質問文と選択肢）

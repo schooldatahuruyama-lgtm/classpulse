@@ -34,7 +34,7 @@ function stubAuth(uid = 'stu1', storage = null) {
 }
 
 // 規則の代わり: 回答の set は「授業が live・その質問が open・今のスライド」のときだけ通す
-function setup({ storage = fakeStorage(), auth = stubAuth(), seed = true } = {}) {
+function setup({ storage = fakeStorage(), auth = stubAuth(), seed = true, deck = makeDeck() } = {}) {
   let net;
   const deny = (op, path) => {
     const m = /^sessions\/([^/]+)\/inbox\/answers\/([^/]+)\/[^/]+$/.exec(path);
@@ -43,7 +43,7 @@ function setup({ storage = fakeStorage(), auth = stubAuth(), seed = true } = {})
     return !(pub && pub.state === 'live' && pub.polls?.[m[2]]?.status === 'open' && pub.current?.slideId === m[2]);
   };
   net = createFakeNet({ now: () => 12345, deny });
-  const session = buildSession(makeDeck(), 'deck1', 'teacher', 1);
+  const session = buildSession(deck, 'deck1', 'teacher', 1);
   const order = session.deck.order;
   const answerSets = [];
   const origSet = net.set;
@@ -794,4 +794,250 @@ test('送信済みだけなら、未確認の数は 0', async () => {
   await t.client.submit();
   await t.teacher(endPatch);
   assert.equal(t.last().unconfirmedCount, 0);
+});
+
+// ---- 自由記述 ----
+
+// 3 枚の教材: s1 資料、s2 自由記述、s3 アンケート(2択・manual)
+function makeFreeDeck() {
+  let d = createDeck('自由記述の教材', 1000);
+  d = addSlide(d, createSlide('content'), 's1');
+  d = addSlide(d, { ...createSlide('free'), question: 'りゆうを書こう' }, 's2');
+  d = addSlide(d, { ...createSlide('poll'), question: '好きな色は？', options: ['赤', '青'], resultMode: 'manual' }, 's3');
+  return d;
+}
+
+async function freeAtS2(opts = {}) {
+  const t = setup({ ...opts, deck: makeFreeDeck() });
+  await t.ready();
+  await t.client.start();
+  await toS2(t);
+  return t;
+}
+
+test('自由記述: 文章を送ると前後の空白を取って送り、sent と text になる', async () => {
+  const t = await freeAtS2();
+  assert.equal(t.last().kind, 'free');
+  assert.equal(t.last().text, null);
+  await t.client.submitText('  こんにちは  ');
+  assert.deepEqual(t.answers().s2.stu1, { text: 'こんにちは', at: 12345 });
+  assert.equal(t.last().kind, 'free');
+  assert.equal(t.last().text, 'こんにちは');
+  assert.deepEqual(t.last().answer, { text: 'こんにちは', state: 'sent' });
+  assert.equal(t.last().selected, null);
+  assert.equal(JSON.stringify(t.last()).includes('stu1'), false);
+});
+
+test('自由記述: 送信中に別の文章を送ると、最後の文章がサーバーと状態に残る', async () => {
+  const t = await freeAtS2();
+  // 回答の書きこみを、gate を開くまで 1 つずつ止める
+  const gates = [];
+  const origSet = t.net.set;
+  t.net.set = async (path, value) => {
+    if (path.includes('/inbox/answers/')) await new Promise((r) => gates.push(r));
+    return origSet(path, value);
+  };
+  const p1 = t.client.submitText('はじめの文');
+  await settle();
+  const p2 = t.client.submitText('二つ目の文');
+  const p3 = t.client.submitText('さいごの文');
+  assert.equal(t.last().text, 'さいごの文');
+  assert.equal(t.last().answer.state, 'sending');
+  for (let i = 0; i < 6; i++) {
+    await settle();
+    const g = gates.shift();
+    if (g) g();
+  }
+  await Promise.all([p1, p2, p3]);
+  await settle();
+  assert.equal(t.answers().s2.stu1.text, 'さいごの文');
+  assert.deepEqual(t.last().answer, { text: 'さいごの文', state: 'sent' });
+  assert.equal(t.last().text, 'さいごの文');
+  assert.deepEqual(t.answerSets.map((s) => s.value.text), ['はじめの文', 'さいごの文']);
+});
+
+test('自由記述: 送信済みと同じ文章なら送らない。違えば送り直して上書き', async () => {
+  const t = await freeAtS2();
+  await t.client.submitText('おなじ');
+  await t.client.submitText('  おなじ ');
+  assert.equal(t.answerSets.length, 1);
+  await t.client.submitText('ちがう');
+  assert.equal(t.answerSets.length, 2);
+  assert.deepEqual(Object.keys(t.answers().s2), ['stu1']);
+  assert.equal(t.answers().s2.stu1.text, 'ちがう');
+  assert.equal(t.last().text, 'ちがう');
+});
+
+test('自由記述: 切れている間は queued、つながると送られる', async () => {
+  const t = await freeAtS2();
+  t.net.setOnline(false);
+  await t.client.submitText('ほかん');
+  assert.deepEqual(t.last().answer, { text: 'ほかん', state: 'queued' });
+  assert.equal(t.last().text, 'ほかん');
+  t.net.setOnline(true);
+  await settle();
+  assert.deepEqual(t.last().answer, { text: 'ほかん', state: 'sent' });
+  assert.equal(t.answers().s2.stu1.text, 'ほかん');
+});
+
+test('自由記述: 保管中に書き直すと、最後の文章だけを送る', async () => {
+  const t = await freeAtS2();
+  t.net.setOnline(false);
+  await t.client.submitText('まえ');
+  await t.client.submitText('あと');
+  assert.deepEqual(t.last().answer, { text: 'あと', state: 'queued' });
+  const n = t.answerSets.length;
+  t.net.setOnline(true);
+  await settle();
+  assert.deepEqual(t.answerSets.slice(n).map((s) => s.value.text), ['あと']);
+  assert.deepEqual(t.last().answer, { text: 'あと', state: 'sent' });
+});
+
+test('自由記述: 締切後に届いた送信は rejected（画面は受付中のまま）', async () => {
+  const t = await freeAtS2();
+  t.holdUpdates();
+  await t.teacher(closeAllPatch);
+  await t.client.submitText('おそい');
+  assert.deepEqual(t.last().answer, { text: 'おそい', state: 'rejected' });
+  assert.equal(t.answers(), null);
+});
+
+test('自由記述: 締切・一時停止が分かっていれば送らない', async () => {
+  const t = await freeAtS2();
+  await t.teacher((pub) => pausePatch(pub, 's2', true));
+  assert.equal(t.last().poll.status, 'paused');
+  await t.client.submitText('ていし');
+  assert.equal(t.answerSets.length, 0);
+  assert.equal(t.last().answer, null);
+  await t.teacher(closeAllPatch);
+  await t.client.submitText('しめきり');
+  assert.equal(t.answerSets.length, 0);
+});
+
+test('自由記述: 空白だけ・201 文字・文字列でないものは送らない。200 文字は送る', async () => {
+  const t = await freeAtS2();
+  await t.client.submitText('   \n  ');
+  await t.client.submitText('あ'.repeat(201));
+  await t.client.submitText(5);
+  await t.client.submitText(null);
+  assert.equal(t.answerSets.length, 0);
+  assert.equal(t.last().answer, null);
+  await t.client.submitText('あ'.repeat(200));
+  assert.equal(t.answers().s2.stu1.text, 'あ'.repeat(200));
+});
+
+test('アンケートで submitText、自由記述で select・submit をしても何もしない', async () => {
+  const t = await freeAtS2();
+  t.client.select(0);
+  assert.equal(t.last().selected, null);
+  await t.client.submit();
+  assert.equal(t.answerSets.length, 0);
+  await t.teacher(nextPatch); // s3 アンケート
+  assert.equal(t.last().kind, null);
+  assert.equal(t.last().text, null);
+  await t.client.submitText('アンケートに文章');
+  assert.equal(t.answerSets.length, 0);
+  t.client.select(1);
+  await t.client.submit();
+  assert.deepEqual(t.answers().s3.stu1, { choice: 1, at: 12345 });
+});
+
+test('自由記述: 応答が失われ、締切を受けると照合して sent と text になる', async () => {
+  const t = await freeAtS2();
+  loseFirstResponse(t.net);
+  await t.client.submitText('とどいた');
+  assert.deepEqual(t.last().answer, { text: 'とどいた', state: 'queued' });
+  await t.teacher(closeAllPatch);
+  await settle();
+  assert.deepEqual(t.last().answer, { text: 'とどいた', state: 'sent' });
+  assert.equal(t.last().text, 'とどいた');
+});
+
+test('自由記述: サーバーに自分の別の文章があれば、照合のあとその文章で sent', async () => {
+  const t = await freeAtS2();
+  loseFirstResponse(t.net);
+  await t.client.submitText('サーバーの文'); // 届いたが、端末は queued
+  t.holdUpdates();
+  await t.teacher(closeAllPatch);
+  await t.client.submitText('端末の文'); // 画面は受付中のまま。拒否 → 照合
+  await settle();
+  assert.deepEqual(t.last().answer, { text: 'サーバーの文', state: 'sent' });
+  assert.equal(t.last().text, 'サーバーの文');
+  assert.equal(t.answers().s2.stu1.text, 'サーバーの文');
+});
+
+test('自由記述: 送信済みの記録が無い端末でも、保留の照合でサーバーの文章が sent になる', async () => {
+  const storage = fakeStorage();
+  // 端末の記録は保留の別の文章だけ（送信済みの記録は消えた）。サーバーには自分の文章がある
+  storage.setItem(`classpulse:outbox:${SID}:stu1`, JSON.stringify({ s2: { text: '端末', state: 'queued' } }));
+  const t = setup({ storage, deck: makeFreeDeck() });
+  await t.ready();
+  await toS2(t);
+  await t.net.set(`sessions/${SID}/inbox/answers/s2/stu1`, { text: 'サーバー', at: 1 });
+  await t.teacher(closeAllPatch);
+  await t.client.start();
+  await settle();
+  assert.deepEqual(t.last().answer, { text: 'サーバー', state: 'sent' });
+  assert.equal(t.last().text, 'サーバー');
+});
+
+test('自由記述: 保存できず failed のとき、retry で最後の文章を送り直す', async () => {
+  const base = fakeStorage();
+  const storage = { getItem: base.getItem, removeItem: base.removeItem, setItem: () => { throw new Error('容量不足'); } };
+  const t = await freeAtS2({ storage });
+  t.net.setOnline(false);
+  await t.client.submitText('いちど目');
+  await t.client.submitText('さいご');
+  assert.deepEqual(t.last().answer, { text: 'さいご', state: 'failed' });
+  t.net.setOnline(true);
+  await settle();
+  await t.client.retry();
+  assert.deepEqual(t.last().answer, { text: 'さいご', state: 'sent' });
+  assert.equal(t.answers().s2.stu1.text, 'さいご');
+});
+
+test('古い形の保管（choice だけ）も読める', async () => {
+  const storage = fakeStorage();
+  storage.setItem(`classpulse:outbox:${SID}:stu1`, JSON.stringify({ s2: { choice: 1, state: 'queued' } }));
+  const t = setup({ storage });
+  await t.ready();
+  await toS2(t);
+  await t.client.start();
+  await settle();
+  assert.deepEqual(t.last().answer, { choice: 1, state: 'sent' });
+  assert.equal(t.last().selected, 1);
+  assert.equal(t.answers().s2.stu1.choice, 1);
+});
+
+test('書きかけの文章: 保存され、作り直した client で読め、授業の終了で消える', async () => {
+  const storage = fakeStorage();
+  const t = await freeAtS2({ storage });
+  assert.equal(t.client.draft('s2'), '');
+  t.client.setDraft('s2', '書きかけ ');
+  assert.equal(t.client.draft('s2'), '書きかけ ');
+  assert.notEqual(storage.getItem(`classpulse:draft:${SID}:stu1`), null);
+  t.client.stop();
+  const states2 = [];
+  const client2 = createSessionClient({ net: t.net, auth: stubAuth(), storage, sid: SID, onChange: (s) => states2.push(s) });
+  await client2.start();
+  assert.equal(client2.draft('s2'), '書きかけ ');
+  assert.equal(client2.draft('s3'), '');
+  await t.teacher(endPatch);
+  assert.equal(states2[states2.length - 1].phase, 'ended');
+  assert.equal(storage.getItem(`classpulse:draft:${SID}:stu1`), null);
+  assert.equal(client2.draft('s2'), '');
+  client2.setDraft('s2', 'おわったあと'); // 終わったあとは保存しない
+  assert.equal(storage.getItem(`classpulse:draft:${SID}:stu1`), null);
+  client2.stop();
+});
+
+test('書きかけの文章: 終わった授業に入ると消える', async () => {
+  const storage = fakeStorage();
+  storage.setItem(`classpulse:draft:${SID}:stu1`, JSON.stringify({ s2: 'のこり' }));
+  const t = setup({ storage, deck: makeFreeDeck() });
+  await t.ready();
+  await t.teacher(endPatch);
+  await t.client.start();
+  assert.equal(t.last().phase, 'ended');
+  assert.equal(storage.getItem(`classpulse:draft:${SID}:stu1`), null);
 });

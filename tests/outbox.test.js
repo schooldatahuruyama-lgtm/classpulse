@@ -344,3 +344,91 @@ test('unconfirmedCount: 終了後に確かめられなかった回答の数（�
   // 読み直しても同じ（保存先から数える）
   assert.equal(createOutbox({ storage, send }).unconfirmedCount('s'), 2);
 });
+
+// ---- 自由記述（値が文字列） ----
+
+test('文章を送ると { text, state } で sent。保存の形も同じ', async () => {
+  const storage = fakeStorage();
+  const { send, calls } = makeSender();
+  const ob = createOutbox({ storage, send });
+  const e = await ob.put('s', 'q1', 'こんにちは');
+  assert.deepEqual(e, { text: 'こんにちは', state: 'sent' });
+  assert.deepEqual(calls.map((c) => c.choice), ['こんにちは']);
+  assert.deepEqual(JSON.parse(storage.getItem('classpulse:outbox:s')).q1, { text: 'こんにちは', state: 'sent' });
+  assert.deepEqual(createOutbox({ storage, send }).get('s', 'q1'), { text: 'こんにちは', state: 'sent' });
+});
+
+test('文章の送信中に書き直すと、途中のものは送らず最後の文章が最後に送られる', async () => {
+  const gates = [];
+  const server = [];
+  const send = (_s, _q, v) => new Promise((resolve) => gates.push(() => { server.push(v); resolve(); }));
+  const ob = createOutbox({ storage: fakeStorage(), send });
+  const ps = [ob.put('s', 'q1', 'A'), ob.put('s', 'q1', 'B'), ob.put('s', 'q1', 'C')];
+  assert.deepEqual(ob.get('s', 'q1'), { text: 'C', state: 'sending' });
+  for (let i = 0; i < 5; i++) {
+    await tick();
+    const g = gates.shift();
+    if (g) g();
+  }
+  await Promise.all(ps);
+  assert.deepEqual(server, ['A', 'C']);
+  assert.deepEqual(ob.get('s', 'q1'), { text: 'C', state: 'sent' });
+});
+
+test('文章もつながらなければ queued で、flush で送る', async () => {
+  let online = false;
+  const { send, calls } = makeSender(async () => { if (!online) throw new NetError('network'); });
+  const ob = createOutbox({ storage: fakeStorage(), send });
+  await ob.put('s', 'q1', 'あ');
+  assert.deepEqual(ob.get('s', 'q1'), { text: 'あ', state: 'queued' });
+  online = true;
+  await ob.flush('s');
+  assert.deepEqual(ob.get('s', 'q1'), { text: 'あ', state: 'sent' });
+  assert.deepEqual(calls.map((c) => c.choice), ['あ', 'あ']);
+});
+
+test('send がサーバーの文章 { text } を返したら、その文章を送信済みにする', async () => {
+  const ob = createOutbox({ storage: fakeStorage(), send: async () => ({ text: 'サーバー' }) });
+  assert.deepEqual(await ob.put('s', 'q1', '新しい'), { text: 'サーバー', state: 'sent' });
+});
+
+test('settle は文章も受ける', async () => {
+  const { send } = makeSender(async () => { throw new NetError('network'); });
+  const ob = createOutbox({ storage: fakeStorage(), send });
+  await ob.put('s', 'a', '端末');
+  assert.equal(ob.settle('s', 'a', 'サーバー'), true);
+  assert.deepEqual(ob.get('s', 'a'), { text: 'サーバー', state: 'sent' });
+});
+
+test('終了時、送信中に書き直した文章は追加で送らず、最初の送信が成功すれば送った文章で sent', async () => {
+  const gates = [];
+  const { send, calls } = makeSender(() => new Promise((resolve, reject) => gates.push({ resolve, reject })));
+  const ob = createOutbox({ storage: fakeStorage(), send });
+  const p1 = ob.put('s', 'q1', '一');
+  const p2 = ob.put('s', 'q1', '二');
+  ob.freeze('s');
+  assert.deepEqual(ob.get('s', 'q1'), { text: '一', state: 'unconfirmed' });
+  gates[0].resolve();
+  await Promise.all([p1, p2]);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(ob.get('s', 'q1'), { text: '一', state: 'sent' });
+});
+
+test('保存データ: 古い choice の形も文章の形も読め、整数でも正しい文章でもないものは読み捨てる', () => {
+  const storage = fakeStorage();
+  storage.setItem('classpulse:outbox:s', JSON.stringify({
+    c: { choice: 1, state: 'queued' },
+    t: { text: 'ok', state: 'sent' },
+    bad1: { text: '', state: 'sent' },
+    bad2: { text: 5, state: 'sent' },
+    bad3: { choice: '1', state: 'sent' },
+    bad4: { text: 'あ'.repeat(201), state: 'sent' },
+    bad5: { text: '   ', state: 'sent' },
+    bad6: { choice: 1, text: 'x', state: 'sent' },
+    bad7: { state: 'sent' },
+  }));
+  const ob = createOutbox({ storage, send: makeSender().send });
+  assert.deepEqual(ob.get('s', 'c'), { choice: 1, state: 'queued' });
+  assert.deepEqual(ob.get('s', 't'), { text: 'ok', state: 'sent' });
+  for (const k of ['bad1', 'bad2', 'bad3', 'bad4', 'bad5', 'bad6', 'bad7']) assert.equal(ob.get('s', k), null, k);
+});

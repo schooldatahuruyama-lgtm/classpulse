@@ -14,7 +14,8 @@ import {
 import { compressImage, dataUrlBytes } from '../image.js';
 import { mountCanvas } from './editor/canvas.js';
 import { renderSlideList, updateThumb, addButtons } from './editor/slide-list.js';
-import { renderItemInspector, renderPollSettings, renderPollForm } from './editor/inspector.js';
+import { renderItemInspector, renderPollSettings, renderPollForm, renderFreeSettings } from './editor/inspector.js';
+import { renderSlide } from '../slide-render.js';
 import { backgroundSaver, useAuth } from './editor/background.js';
 
 const UNTITLED = '無題の教材';
@@ -127,6 +128,7 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
   let createdSid = null; // 作ったが、まだ発表の画面へ移れていない授業（作り直さず、これを開き直す）
   let opening = false;
   let canvas = null;
+  let freePreview = null; // 自由記述の中央（質問文と入力欄の見本）。自由記述でないときは null
   let thumbTimer = null;
   let imageTask = null;              // 画像の追加中の Promise（同時に 1 つだけ）
   let flushDone = Promise.resolve(); // 画面を離れたときの最後の保存
@@ -224,13 +226,21 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
 
   function renderCenter() {
     canvas = null;
+    freePreview = null;
     const slide = currentSlide();
     if (!slide) {
       center.replaceChildren(el('div', { class: 'ed-empty card' },
-        el('p', { text: 'スライドがありません。「＋ 資料スライド」か「＋ アンケート」で追加してください。' }),
+        el('p', { text: 'スライドがありません。「＋ 資料スライド」「＋ アンケート」「＋ 自由記述」のどれかで追加してください。' }),
         addButtons(ed)));
     } else if (slide.type === 'poll') {
       renderPollForm(center, ed);
+    } else if (slide.type === 'free') {
+      freePreview = el('div', { class: 'ed-free-preview' });
+      renderSlide(freePreview, slide, state.deck.images);
+      center.replaceChildren(el('div', { class: 'ed-free card' },
+        el('h2', { class: 'ed-col-title', text: '自由記述' }),
+        el('p', { class: 'muted', text: '質問文は、右の「自由記述の設定」で入れます。' }),
+        freePreview));
     } else {
       canvas = mountCanvas(center, ed);
     }
@@ -242,6 +252,7 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
     const slide = currentSlide();
     if (!slide) right.replaceChildren(el('h2', { class: 'ed-col-title', text: '設定' }), el('p', { class: 'muted', text: 'スライドを選ぶと、ここで設定できます。' }));
     else if (slide.type === 'poll') renderPollSettings(right, ed);
+    else if (slide.type === 'free') renderFreeSettings(right, ed);
     else renderItemInspector(right, ed);
     if (key) [...right.querySelectorAll('[data-focus-key]')].find((b) => b.dataset.focusKey === key)?.focus();
   }
@@ -392,6 +403,8 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
       const slide = currentSlide();
       if (!slide) return;
       change(updateSlide(state.deck, state.slideId, { ...slide, ...patch }), { thumb: true });
+      // 自由記述は、中央の見本も描き直す（右の入力欄はそのまま）
+      if (freePreview && currentSlide()?.type === 'free') renderSlide(freePreview, currentSlide(), state.deck.images);
     },
   };
 
