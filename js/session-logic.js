@@ -192,9 +192,12 @@ export function wordKey(word) {
   return String(word).replace(LONE_SURROGATES, '�').normalize('NFKC').replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
-// 言葉の鍵を、データベースの鍵に使える形にする（. $ # [ ] / と制御文字を含まない）
+// 言葉の鍵を、データベースの鍵にも URL にもそのまま使える形にする。
+// 「w」＋ UTF-8 のバイトの 16 進（英数字だけ）。% を使う符号化は、REST の URL で元に戻されてしまうので使わない
 function encodeKey(k) {
-  return encodeURIComponent(k).replace(/\./g, '%2E');
+  let out = 'w';
+  for (const b of new TextEncoder().encode(k)) out += b.toString(16).padStart(2, '0');
+  return out;
 }
 
 // host/hidden/<slideId>/ の下に使う鍵。言葉の鍵が同じなら同じ
