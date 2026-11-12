@@ -64,3 +64,17 @@ test('集計（pub/results/<質問>）は、その質問の結果を公開して
   assert.equal(pub.results.$slideId['.write'], undefined);
   assert.equal(pub['.write'], undefined);
 });
+
+test('回答の検証は free の質問では text（1〜200 文字の文字列）、それ以外では choice', () => {
+  const a = rules().sessions.$sid.inbox.answers.$slideId.$uid;
+  const v = a['.validate'];
+  assert.equal(typeof v, 'string');
+  assert.ok(v.includes("child('type').val() === 'free'"));
+  assert.ok(/hasChildren\(\['text', ?'at'\]\)/.test(v));
+  assert.ok(v.includes("child('text').isString()"));
+  assert.ok(v.includes('<= 200'));
+  assert.ok(v.includes('% 1 === 0'));
+  const other = a.$other['.validate'];
+  assert.ok(other.includes("'text'") && other.includes("'choice'") && other.includes("'at'"));
+  assert.ok(other.includes("'free'"));
+});

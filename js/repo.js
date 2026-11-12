@@ -26,11 +26,21 @@ const byNewest = (key) => (a, b) => (b[key] || 0) - (a[key] || 0);
 
 function normalizeQuestion(q) {
   const src = q && typeof q === 'object' ? q : {};
+  // 自由記述は文の配列で持つ。type の無い（試作1 の）項目はアンケートとして読む
+  if (src.type === 'free') {
+    const texts = (v) => toIndexed(v).filter((t) => typeof t === 'string');
+    return {
+      type: 'free',
+      texts: texts(src.texts),
+      hiddenTexts: texts(src.hiddenTexts),
+      total: typeof src.total === 'number' ? src.total : 0,
+    };
+  }
   const options = toIndexed(src.options).map((o) => (typeof o === 'string' ? o : o == null ? '' : String(o)));
   const rawCounts = toIndexed(src.counts);
   const counts = Array.from({ length: Math.max(options.length, rawCounts.length) }, (_, i) =>
     (typeof rawCounts[i] === 'number' ? rawCounts[i] : 0));
-  return { options, counts, total: typeof src.total === 'number' ? src.total : 0 };
+  return { type: 'poll', options, counts, total: typeof src.total === 'number' ? src.total : 0 };
 }
 
 export function createRepo(net, uid) {

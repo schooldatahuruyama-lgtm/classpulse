@@ -202,10 +202,110 @@ test('履歴', () => {
   assert.equal(h.endedAt, 9000);
   assert.equal(h.participants, 3);
   assert.equal(h.questions.length, 2);
-  assert.deepEqual(h.questions[0], { slideId: 's2', question: '好きな色は？', options: ['赤', '青'], counts: [1, 2], total: 3 });
+  assert.deepEqual(h.questions[0], { slideId: 's2', type: 'poll', question: '好きな色は？', options: ['赤', '青'], counts: [1, 2], total: 3 });
   assert.deepEqual(h.questions[1].counts, [0, 0, 0]);
   assert.equal(h.questions[1].total, 0);
   const none = buildHistory(session, null, 9000);
   assert.equal(none.participants, 0);
   assert.equal(none.questions.length, 2);
+});
+
+// ---- 自由記述（free）----
+import { normalizeText, freeList } from '../js/session-logic.js';
+import { CONFIG } from '../js/config.js';
+
+function makeMixedDeck() {
+  let d = createDeck('まぜた教材', 1000);
+  d = addSlide(d, createSlide('content'), 's1');
+  d = addSlide(d, { type: 'free', question: '感想は？' }, 'f1');
+  d = addSlide(d, { ...createSlide('poll'), question: '色は？', options: ['赤', '青'], resultMode: 'live' }, 'p1');
+  return d;
+}
+
+test('CONFIG.free.maxLength は 200', () => {
+  assert.equal(CONFIG.free.maxLength, 200);
+});
+
+test('normalizeText: 前後の空白を取り、空・長すぎ・文字列でないものは null', () => {
+  assert.equal(normalizeText('  あ  '), 'あ');
+  assert.equal(normalizeText('   '), null);
+  assert.equal(normalizeText(''), null);
+  assert.equal(normalizeText('あ'.repeat(200)), 'あ'.repeat(200));
+  assert.equal(normalizeText('あ'.repeat(201)), null);
+  assert.equal(normalizeText(` ${'あ'.repeat(200)} `), 'あ'.repeat(200));
+  assert.equal(normalizeText(5), null);
+  assert.equal(normalizeText(null), null);
+  assert.equal(normalizeText(undefined), null);
+  assert.equal(normalizeText({ a: 1 }), null);
+});
+
+test('buildSession: free は結果が出ていない状態で待機、live のアンケートは今までどおり', () => {
+  const s = buildSession(makeMixedDeck(), 'deck1', 'owner1', 5000);
+  assert.deepEqual(s.pub.polls.f1, { status: 'waiting', resultsVisible: false });
+  assert.deepEqual(s.pub.polls.p1, { status: 'waiting', resultsVisible: true });
+  assert.equal(s.pub.polls.s1, undefined);
+});
+
+test('goToPatch: free のスライドに着くと open、離れると closed', () => {
+  const deck = makeMixedDeck();
+  const { pub } = buildSession(deck, 'deck1', 'owner1', 5000);
+  const order = deck.order;
+  const at = applyPatch(pub, goToPatch(pub, order, 1));
+  assert.equal(at.polls.f1.status, 'open');
+  const away = applyPatch(at, goToPatch(at, order, 2));
+  assert.equal(away.polls.f1.status, 'closed');
+  assert.equal(away.polls.p1.status, 'open');
+  // 締切後に戻っても open にしない
+  const back = applyPatch(away, goToPatch(away, order, 1));
+  assert.equal(back.polls.f1.status, 'closed');
+});
+
+test('freeList: at の古い順（同じなら uid 順）、かくす、total、不正な text は数えない', () => {
+  const answers = {
+    u3: { text: ' 三 ', at: 30 },
+    u1: { text: '一', at: 10 },
+    u2: { text: 'に', at: 10 },
+    u4: { text: '   ', at: 5 },
+    u5: { text: 'あ'.repeat(201), at: 6 },
+    u6: { text: 7, at: 7 },
+    u7: { choice: 1, at: 8 },
+    u8: null,
+    u9: { text: '九', at: 40 },
+  };
+  const r = freeList(answers, { u2: true, u9: true, nobody: true });
+  assert.deepEqual(r.items, [{ uid: 'u1', text: '一' }, { uid: 'u3', text: '三' }]);
+  assert.deepEqual(r.hiddenItems, [{ uid: 'u2', text: 'に' }, { uid: 'u9', text: '九' }]);
+  assert.equal(r.total, 4);
+  assert.deepEqual(freeList(undefined, undefined), { items: [], hiddenItems: [], total: 0 });
+});
+
+test('buildHistory: free は texts / hiddenTexts / total を持ち、uid を含まない。poll は type:poll が付く', () => {
+  const deck = makeMixedDeck();
+  const session = buildSession(deck, 'deck1', 'ownerX', 5000);
+  const inbox = {
+    participants: { uidAAA: 1, uidBBB: 2, uidCCC: 3 },
+    answers: {
+      f1: {
+        uidAAA: { text: '一番', at: 1 },
+        uidBBB: { text: '二番', at: 2 },
+        uidCCC: { text: '三番', at: 3 },
+      },
+      p1: { uidAAA: { choice: 0 }, uidBBB: { choice: 1 } },
+    },
+  };
+  const h = buildHistory(session, inbox, 9000, { f1: { uidBBB: true } });
+  assert.equal(h.questions.length, 2);
+  assert.deepEqual(h.questions[0], {
+    slideId: 'f1', type: 'free', question: '感想は？',
+    texts: ['一番', '三番'], hiddenTexts: ['二番'], total: 3,
+  });
+  assert.deepEqual(h.questions[1], {
+    slideId: 'p1', type: 'poll', question: '色は？', options: ['赤', '青'], counts: [1, 1], total: 2,
+  });
+  const json = JSON.stringify(h);
+  for (const uid of ['uidAAA', 'uidBBB', 'uidCCC']) assert.equal(json.includes(uid), false);
+  // 第 4 引数は省略できる
+  const h2 = buildHistory(session, inbox, 9000);
+  assert.deepEqual(h2.questions[0].hiddenTexts, []);
+  assert.deepEqual(h2.questions[0].texts, ['一番', '二番', '三番']);
 });

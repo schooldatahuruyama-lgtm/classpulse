@@ -200,3 +200,32 @@ test('clearActiveIf: 印がその授業を指しているときだけ外す', as
   assert.equal(await repo.getActive(), null);
   assert.equal(await repo.clearActiveIf('S1'), false);
 });
+
+test('type の無い古い履歴は poll として読める', async () => {
+  const { net, repo } = setup();
+  await net.set('teachers/u1/history/S1', {
+    title: 'T', endedAt: 2,
+    questions: [{ slideId: 'a', question: 'Q', options: ['x', 'y'], counts: [1, 2], total: 3 }],
+  });
+  const q = (await repo.getHistory('S1')).questions[0];
+  assert.equal(q.type, 'poll');
+  assert.deepEqual(q.options, ['x', 'y']);
+});
+
+test('free の履歴の texts・hiddenTexts は配列に正される', async () => {
+  const { net, repo } = setup();
+  await net.set('teachers/u1/history/S1', {
+    title: 'T', endedAt: 2,
+    questions: [
+      { slideId: 'f', type: 'free', question: 'Q', texts: { 0: 'あ', 1: 'い' }, total: 3 },
+      { slideId: 'g', type: 'free', question: 'R', total: 0 },
+    ],
+  });
+  const qs = (await repo.getHistory('S1')).questions;
+  assert.equal(qs[0].type, 'free');
+  assert.deepEqual(qs[0].texts, ['あ', 'い']);
+  assert.deepEqual(qs[0].hiddenTexts, []);
+  assert.equal(qs[0].total, 3);
+  assert.deepEqual(qs[1].texts, []);
+  assert.deepEqual(qs[1].hiddenTexts, []);
+});

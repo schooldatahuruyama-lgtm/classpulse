@@ -206,3 +206,27 @@ test('normalizeDeck: どの要素にも clampItem をかける', () => {
   assert.equal(it.h, 0.05);
   assert.equal(it.imageId, 'p');
 });
+
+// ---- 自由記述（free）----
+test('createSlide("free") は質問文だけを持つ', () => {
+  assert.deepEqual(createSlide('free'), { type: 'free', question: '' });
+});
+
+test('normalizeDeck は free の余計な項目を落とし、質問文を文字列にする', () => {
+  const d = normalizeDeck({
+    title: 't', order: ['a', 'b'],
+    slides: {
+      a: { type: 'free', question: '感想は？', options: ['x'], items: [{}], resultMode: 'live' },
+      b: { type: 'free', question: 5 },
+    },
+  });
+  assert.deepEqual(d.slides.a, { type: 'free', question: '感想は？' });
+  assert.deepEqual(d.slides.b, { type: 'free', question: '' });
+});
+
+test('validateDeck は free の空の質問文を見つける', () => {
+  const bad = deckOf(['a'], { a: { type: 'free', question: '  ' } });
+  assert.deepEqual(validateDeck(bad), ['1 枚目: 質問文を入れてください。']);
+  const ok = deckOf(['a'], { a: { type: 'free', question: '感想は？' } });
+  assert.deepEqual(validateDeck(ok), []);
+});

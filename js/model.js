@@ -31,6 +31,7 @@ export function createDeck(title, now) {
 
 export function createSlide(type) {
   if (type === 'poll') return { type: 'poll', question: '', options: ['', ''], resultMode: 'manual' };
+  if (type === 'free') return { type: 'free', question: '' };
   return { type: 'content', items: [] };
 }
 
@@ -133,6 +134,10 @@ function normalizeSlide(raw) {
       resultMode: s.resultMode === 'live' ? 'live' : 'manual',
     };
   }
+  // 自由記述は質問文だけを残す（ほかの項目は落とす）
+  if (s.type === 'free') {
+    return { type: 'free', question: typeof s.question === 'string' ? s.question : '' };
+  }
   // 保存された位置が枠の外・大きさ 0 でも、表示と編集で困らないように直す
   const items = toArray(s.items).map((it) => (it && typeof it === 'object' ? clampItem(it) : it));
   return { ...s, type: 'content', items };
@@ -159,8 +164,12 @@ export function validateDeck(deck) {
   const problems = [];
   deck.order.forEach((id, i) => {
     const s = deck.slides[id];
-    if (!s || s.type !== 'poll') return;
+    if (!s || (s.type !== 'poll' && s.type !== 'free')) return;
     const n = `${i + 1} 枚目`;
+    if (s.type === 'free') {
+      if (String(s.question || '').trim() === '') problems.push(`${n}: 質問文を入れてください。`);
+      return;
+    }
     const options = s.options || [];
     const filled = options.filter((o) => String(o).trim() !== '').length;
     if (String(s.question || '').trim() === '') problems.push(`${n}: 質問文を入れてください。`);

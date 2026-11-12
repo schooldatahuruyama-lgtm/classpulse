@@ -6,6 +6,7 @@ export const CONFIG = {
   autosaveMaxWaitMs: 5000,
   resultsThrottleMs: 500,
   poll: { minOptions: 2, maxOptions: 6 },
+  free: { maxLength: 200 },
   idLength: 12,
   sessionIdLength: 22,
   tokenRefreshMarginMs: 300000,
