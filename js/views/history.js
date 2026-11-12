@@ -109,7 +109,13 @@ export function mount(root, ctx) {
     const correct = Number.isInteger(q.correct) ? q.correct : null;
     const body = el('div', { class: 'hist-q-body' });
     if (q.total > 0) resultBars(body, { options, counts: q.counts, total: q.total, correct });
-    else body.append(el('p', { class: 'muted', text: '回答はありませんでした。' }));
+    else {
+      body.append(el('p', { class: 'muted', text: '回答はありませんでした。' }));
+      // 回答が 0 人でも、正解は読めるようにする
+      if (correct !== null && typeof options[correct] === 'string') {
+        body.append(el('p', { text: `正解は「${options[correct]}」です` }));
+      }
+    }
     return el('li', { class: 'hist-q card' },
       el('h3', { class: 'hist-q-no', text: `質問 ${i + 1}（クイズ）` }),
       el('p', { class: 'hist-q-text', text: q.question || '' }),
