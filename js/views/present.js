@@ -1,6 +1,9 @@
 // 発表の画面（#/present/<sid>）。先生の iPad の画面がそのまま生徒に映る。
 // このため、ナビゲーション・メールアドレス・生徒の ID・非公開の集計は画面に出さない。
 // 結果を非公開にしている質問は「回答 N 人 ／ 参加 M 人」だけを出し、件数の内訳は DOM に入れない。
+// 自由記述は、結果を表示する前は文章の要素を 1 つも作らない（かくすのではなく、作らない）。
+// 生徒の uid は DOM（属性・id・dataset も）に入れず、カードとの対応は JavaScript の Map だけで持つ。
+// 文章は textContent でだけ入れる。
 import { el, confirmDialog, closeAllDialogs, statusChip, resultBars, toast } from '../ui.js';
 import { renderSlide } from '../slide-render.js';
 import { createSessionHost } from '../session-host.js';
@@ -66,7 +69,8 @@ export function mount(root, ctx) {
   let leaving = false;
   let state = null;
   let live = null; // 発表中の画面の部品（最初に live になったときに作る）
-  let shownKey = null; // 中央に出しているもの（'join' か スライド ID）
+  let shownKey = null; // 中央に出しているもの（'join'、'slide:<id>'、自由記述の一覧は 'board:<id>'）
+  let board = null; // 自由記述の回答の一覧（結果の表示中だけ作る。スライドが変わったら作り直す）
   let qrDialog = null;
   const pending = { pause: false, results: false };
   let moving = 0; // 通信待ちのスライド移動の数（その間は受付・結果の操作を押せない）
@@ -77,6 +81,7 @@ export function mount(root, ctx) {
     net: ctx.net,
     repo: ctx.repo,
     sid,
+    storage: ctx.storage, // かくした回答の記録を端末にも残す（保存前に読み直しても映らないように）
     onChange: (s) => { if (alive) { state = s; render(); } },
     now: () => Date.now(),
     setTimeout: (fn, ms) => window.setTimeout(fn, ms),
@@ -125,6 +130,7 @@ export function mount(root, ctx) {
   function page(...children) {
     live = null;
     shownKey = null;
+    board = null;
     root.replaceChildren(el('div', { class: 'present present-message' }, el('div', { class: 'page-pad' }, ...children)));
   }
 
@@ -211,7 +217,8 @@ export function mount(root, ctx) {
     const cur = state && state.pub && state.pub.current;
     const id = cur && cur.slideId;
     const slide = id ? state.slides[id] : null;
-    if (!slide || slide.type !== 'poll') return null;
+    // アンケートと自由記述（受付の停止・再開と結果の表示は同じ操作）
+    if (!slide || (slide.type !== 'poll' && slide.type !== 'free')) return null;
     const poll = (state.pub.polls || {})[id];
     return poll ? { id, slide, poll } : null;
   }
@@ -266,15 +273,136 @@ export function mount(root, ctx) {
       el('div', { class: 'pr-group pr-group-side' }, l.count, l.qrBtn),
       el('div', { class: 'pr-group pr-group-end' }, l.endBtn));
     l.ending = el('div', { class: 'pr-ending', role: 'status', hidden: true, text: ENDING });
-    l.wrap = el('div', { class: 'present' }, l.banner, l.ending, el('div', { class: 'pr-body' }, l.stage, l.poll), l.bar);
+    l.hiddenWarn = el('div', { class: 'pr-offline pr-hidden-unsaved', role: 'alert', hidden: true, text: 'かくした回答を保存できていません' });
+    l.wrap = el('div', { class: 'present' }, l.banner, l.hiddenWarn, l.ending, el('div', { class: 'pr-body' }, l.stage, l.poll), l.bar);
     root.replaceChildren(l.wrap);
     shownKey = null;
+    board = null;
     return l;
+  }
+
+  // ---- 自由記述の回答の一覧（結果の表示中だけ） ----
+  // uid は、この中の Map のキーと、クロージャの中だけで持つ（DOM には入れない）
+  function buildBoard(slideId, slide) {
+    const b = { slideId, cards: new Map(), zoomUid: null };
+    b.list = el('ul', { class: 'pr-free-list', 'aria-label': '回答の一覧' });
+    b.empty = el('p', { class: 'pr-free-empty', hidden: true, text: 'まだ回答はありません。' });
+    b.zoomText = el('span', { class: 'pr-free-zoom-text' });
+    // 大きい表示: 文をもう一度タップするか「一覧にもどる」で戻る
+    b.zoomBody = el('button', { type: 'button', class: 'pr-free-zoom-body', onclick: () => closeZoom(b) }, b.zoomText);
+    b.zoomBack = el('button', { type: 'button', class: 'btn btn-primary pr-free-back', text: '一覧にもどる', onclick: () => closeZoom(b) });
+    b.zoom = el('div', { class: 'pr-free-zoom', role: 'group', 'aria-label': '大きく表示した回答', hidden: true }, b.zoomBody, b.zoomBack);
+    b.root = el('div', { class: 'pr-free-board' },
+      el('h2', { class: 'pr-free-question', text: typeof slide.question === 'string' ? slide.question : '' }),
+      b.empty, b.list, b.zoom);
+    return b;
+  }
+
+  function freeCard(b, uid, text) {
+    const c = { text };
+    c.textEl = el('span', { class: 'pr-free-text', text });
+    // カードの本体（大きく表示）と「かくす」は別のボタン（入れ子にしない）。押す場所がぶつからない
+    c.open = el('button', { type: 'button', class: 'pr-free-open', onclick: () => openZoom(b, uid) }, c.textEl);
+    c.hideBtn = el('button', { type: 'button', class: 'btn pr-free-hide', text: 'かくす', onclick: () => askHide(b, uid) });
+    c.li = el('li', { class: 'pr-free-card' }, c.open, c.hideBtn);
+    return c;
+  }
+
+  // 一覧を items（[{ uid, text }]、host が並べた順）に合わせる。カードは作り直さず、増減と文の書きかえだけ
+  function updateBoard(b, items) {
+    const before = document.activeElement;
+    let lostAt = -1; // フォーカスのあったカードが消えたら、その位置
+    const seen = new Set();
+    items.forEach((it, i) => {
+      seen.add(it.uid);
+      let c = b.cards.get(it.uid);
+      if (!c) {
+        c = freeCard(b, it.uid, it.text);
+        b.cards.set(it.uid, c);
+      } else if (c.text !== it.text) {
+        c.text = it.text;
+        c.textEl.textContent = it.text;
+      }
+      const at = b.list.children[i];
+      if (at !== c.li) b.list.insertBefore(c.li, at || null);
+    });
+    for (const [uid, c] of b.cards) {
+      if (seen.has(uid)) continue;
+      if (before instanceof Node && c.li.contains(before)) lostAt = Array.prototype.indexOf.call(b.list.children, c.li);
+      c.li.remove();
+      b.cards.delete(uid);
+    }
+    b.empty.hidden = items.length > 0;
+
+    // 大きく表示している回答: 書き直されたら文を更新、かくされた（一覧に無い）なら一覧に戻る
+    if (b.zoomUid !== null) {
+      const c = b.cards.get(b.zoomUid);
+      if (!c) closeZoom(b);
+      else if (b.zoomText.textContent !== c.text) b.zoomText.textContent = c.text;
+    }
+
+    // 並べかえで外れたフォーカスを戻す。消えたカードにあったら、近くのカード（無ければ結果のボタン）へ
+    if (lostAt >= 0) {
+      const next = b.list.children[Math.min(lostAt, b.list.children.length - 1)];
+      const btn = next ? next.querySelector('.pr-free-open') : null;
+      if (btn) btn.focus();
+      else if (live) live.resultsBtn.focus();
+    } else if (before instanceof HTMLElement && before !== document.activeElement && before.isConnected && !b.zoom.contains(before)) {
+      before.focus();
+    }
+  }
+
+  function openZoom(b, uid) {
+    const c = b.cards.get(uid);
+    if (!alive || board !== b || !c) return;
+    b.zoomUid = uid;
+    b.zoomText.textContent = c.text;
+    b.zoom.hidden = false;
+    b.list.inert = true; // 下の一覧にキーボードで行かない
+    b.zoomBack.focus();
+  }
+
+  function closeZoom(b) {
+    if (b.zoomUid === null) return;
+    const c = b.cards.get(b.zoomUid);
+    const hadFocus = b.zoom.contains(document.activeElement);
+    b.zoomUid = null;
+    b.zoom.hidden = true;
+    b.zoomText.textContent = '';
+    b.list.inert = false;
+    if (!hadFocus || !alive || board !== b) return;
+    // 見ていたカードへフォーカスを戻す（かくされていたら、最初のカードか結果のボタンへ）
+    const first = b.list.querySelector('.pr-free-open');
+    if (c) c.open.focus();
+    else if (first) first.focus();
+    else if (live) live.resultsBtn.focus();
+  }
+
+  async function askHide(b, uid) {
+    if (!alive || board !== b || endState !== 'idle' || !b.cards.has(uid)) return;
+    const ok = await confirmDialog({
+      title: 'この回答をかくしますか？',
+      body: '授業中は元にもどせません。',
+      okLabel: 'かくす',
+      danger: true,
+    });
+    if (!ok || !alive || endState !== 'idle') return;
+    // 一覧からはすぐに消える。保存は host が裏で行う（失敗したら再試行し、その間は帯で知らせる）。
+    // 画面を閉じた・授業が終わったなどで拒否されることがあるので、必ず受け止める
+    host.hide(b.slideId, uid).catch(() => { if (alive && endState === 'idle') toast('回答をかくせませんでした。'); });
   }
 
   // アンケートの状況: 状態のチップ、回答数、結果（公開中のときだけ）
   function renderPoll(p) {
     const info = POLL_STATUS[p.poll.status] || null;
+    if (p.slide.type === 'free') {
+      // 自由記述: 状態と件数だけ（文章は中央の一覧に、表示中だけ出す）
+      const n = Number.isInteger(state.answerCount) ? state.answerCount : 0;
+      live.poll.replaceChildren(
+        info ? statusChip(info.kind, info.label) : '',
+        el('p', { class: 'pr-answers', text: `回答 ${n} 件 ／ 参加 ${state.participants} 人` }));
+      return;
+    }
     const t = state.tallies[p.id];
     const answered = t ? t.total : 0;
     const children = [
@@ -300,20 +428,29 @@ export function mount(root, ctx) {
     const off = offline || ending;
     l.banner.hidden = !offline;
     l.ending.hidden = !ending;
+    l.hiddenWarn.hidden = state.hiddenUnsaved !== true;
 
     const cur = (state.pub && state.pub.current) || { slideId: '', index: -1 };
     const index = Number.isInteger(cur.index) ? cur.index : -1;
     const total = state.order.length;
     const slide = index >= 0 && cur.slideId ? state.slides[cur.slideId] || null : null;
 
-    // 中央: 参加の画面か、今のスライド
-    const key = index < 0 ? 'join' : `slide:${cur.slideId}`;
+    // 中央: 参加の画面か、今のスライド。自由記述の結果を表示中なら、回答の一覧
+    // （freeItems が null の間は一覧を作らない。スライドが変わる・結果をかくすと、一覧も大きい表示も捨てる）
+    const showBoard = index >= 0 && !!slide && slide.type === 'free' && Array.isArray(state.freeItems);
+    const key = index < 0 ? 'join' : `${showBoard ? 'board' : 'slide'}:${cur.slideId}`;
     if (key !== shownKey) {
       shownKey = key;
+      board = null;
       if (index < 0) l.stage.replaceChildren(joinContent('pr-join-title'));
-      else renderSlide(l.stage, slide, state.images);
+      else if (showBoard) {
+        board = buildBoard(cur.slideId, slide);
+        l.stage.replaceChildren(board.root);
+      } else renderSlide(l.stage, slide, state.images, { sample: false });
       l.stage.classList.toggle('is-join', index < 0);
+      l.stage.classList.toggle('is-board', showBoard);
     }
+    if (board) updateBoard(board, state.freeItems);
     l.wrap.querySelectorAll('.pr-join-count').forEach((n) => { n.textContent = participantsText(); });
 
     // アンケートの状況
@@ -386,6 +523,12 @@ export function mount(root, ctx) {
   function onKey(ev) {
     if (!alive || !live || ev.defaultPrevented || ev.ctrlKey || ev.metaKey || ev.altKey) return;
     if (document.querySelector('dialog[open]')) return;
+    // Esc: 大きく表示している回答を閉じて一覧に戻る
+    if (ev.key === 'Escape' && board && board.zoomUid !== null) {
+      ev.preventDefault();
+      closeZoom(board);
+      return;
+    }
     const t = ev.target instanceof Element ? ev.target : null;
     if (t && t.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) return;
     const space = ev.key === ' ' || ev.key === 'Spacebar';

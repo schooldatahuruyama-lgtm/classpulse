@@ -1,10 +1,13 @@
 // 生徒の画面（#/join/<sid>）。ログインなしで参加し、先生の今のスライドに自動で追従する。
 // 先生の画面・ログインへの道、スライドを前後に動かす操作、名前の欄、生徒の匿名 ID は出さない。
 // 集計の数は state.results があるとき（先生が結果を表示しているとき）だけ DOM に入れる。
+// 自由記述では、ほかの生徒の文章は出さない（結果の表示中は「前の画面を見てください」とだけ出す）。
 // 回答の操作中にフォーカスやスクロールが飛ばないよう、同じスライドの間は部品を作り直さず中身だけ書きかえる。
 import { el, statusChip, resultBars } from '../ui.js';
 import { renderSlide, OPTION_MARKS } from '../slide-render.js';
 import { createSessionClient } from '../session-client.js';
+import { normalizeText } from '../session-logic.js';
+import { CONFIG } from '../config.js';
 
 const POLL_CHIP = {
   open: { kind: 'ok', label: '受付中' },
@@ -67,6 +70,47 @@ export function pollDecision({ status, selected, answer, results }) {
   };
 }
 
+// ---- 自由記述 ----
+const RESULTS_NOTE = 'みんなの回答は、前の画面を見てください';
+
+// 自由記述の画面の決めごと（画面はこの結果をそのまま当てはめるだけ）。
+// input は入力欄の今の文、answer は送った文章の記録（{ text, state } か null）。
+// readOnly: 入力欄を読み取り専用にするか（一時停止中・締切後）、send: 送信のボタンの文と押せないか、
+// retry: 「もう一度送る」を出すか、remaining: 残りの文字数、showNote: 「前の画面を見てください」を出すか
+export function freeDecision({ status, input, answer, resultsVisible }) {
+  const raw = typeof input === 'string' ? input : '';
+  const text = normalizeText(raw);
+  const prev = answer && typeof answer.text === 'string' ? answer.text : null;
+  const st = answer && prev !== null ? answer.state : null;
+  const readOnly = status === 'paused' || status === 'closed';
+  // 届いた（または届く途中の）文章があるときは「送り直す」。失敗・締切で送れなかったものは「送信」のまま
+  const resend = st === 'sent' || st === 'sending' || st === 'queued';
+  const same = text !== null && text === prev;
+  let send;
+  if (status === 'paused') send = { label: '受付停止中', off: true };
+  else if (status === 'closed') send = { label: '締切済み', off: true };
+  else if (same && st === 'sent') send = { label: '送信済み', off: true };
+  else send = { label: resend ? '送り直す' : '送信', off: status !== 'open' || text === null || same };
+  return {
+    readOnly,
+    send,
+    message: answerMessage(prev !== null ? answer : null, status),
+    // retry() は失敗した文章を送り直すので、入力欄がその文章と同じ（または空）のときだけ出す
+    retry: status === 'open' && st === 'failed' && (text === null || same),
+    remaining: CONFIG.free.maxLength - raw.length,
+    showNote: !!resultsVisible,
+  };
+}
+
+// 入力欄に出す文。読み取り専用のときは送った文章（無ければ書きかけ）、
+// 書けるときは書きかけ（無ければ送った文章）
+export function freeShownText({ readOnly, draft, text }) {
+  const d = typeof draft === 'string' ? draft : '';
+  const t = typeof text === 'string' ? text : '';
+  if (readOnly) return t || d;
+  return d || t;
+}
+
 // 終了の画面に何を出すか。未確認の回答は、今の質問だけでなく授業全体で数える
 // （終わった授業を開き直したときや、前の質問に残っているときも伝える）
 export function endedDecision({ unconfirmedCount = 0 } = {}) {
@@ -82,6 +126,7 @@ export function mount(root, ctx) {
   let state = null;
   let shownKey = null; // 本体に出しているもの（'loading'・'wait'・'slide:<id>' など）
   let pollUi = null;   // アンケートの部品（同じ質問の間は作り直さない）
+  let freeUi = null;   // 自由記述の部品（同じ質問の間は作り直さない。入力欄の文字とカーソルを守る）
 
   // ---- 骨組み（1 回だけ作る） ----
   const titleEl = el('h1', { class: 'st-title', text: 'ClassPulse' });
@@ -97,6 +142,7 @@ export function mount(root, ctx) {
     if (client) client.stop();
     shownKey = null;
     pollUi = null;
+    freeUi = null;
     client = createSessionClient({
       net: ctx.net,
       auth: ctx.auth,
@@ -112,6 +158,7 @@ export function mount(root, ctx) {
     if (key === shownKey) return false;
     shownKey = key;
     pollUi = null;
+    freeUi = null;
     body.replaceChildren(...children);
     return true;
   }
@@ -132,6 +179,16 @@ export function mount(root, ctx) {
   function setOff(btn, off) {
     if (off) btn.setAttribute('aria-disabled', 'true');
     else btn.removeAttribute('aria-disabled');
+  }
+
+  // 受付の状態のチップ（受付前は出さない）。アンケートと自由記述で共通
+  function updateStatusChip(node, status) {
+    const chip = POLL_CHIP[status];
+    const chipKey = chip ? status : '';
+    if (node.dataset.status !== chipKey) {
+      node.dataset.status = chipKey;
+      node.replaceChildren(chip ? statusChip(chip.kind, chip.label) : '');
+    }
   }
 
   function buildPoll(slide) {
@@ -185,13 +242,7 @@ export function mount(root, ctx) {
     const d = pollDecision({ status, selected: state.selected, answer, results: state.results });
     ui.decision = d;
 
-    // 受付の状態のチップ（受付前は出さない）
-    const chip = POLL_CHIP[status];
-    const chipKey = chip ? status : '';
-    if (ui.statusChip.dataset.status !== chipKey) {
-      ui.statusChip.dataset.status = chipKey;
-      ui.statusChip.replaceChildren(chip ? statusChip(chip.kind, chip.label) : '');
-    }
+    updateStatusChip(ui.statusChip, status);
 
     ui.cards.forEach((c, i) => {
       const isSel = state.selected === i;
@@ -229,6 +280,76 @@ export function mount(root, ctx) {
         ui.results.hidden = true;
       }
     }
+  }
+
+  // ---- 自由記述 ----
+  // 入力欄は 1 回だけ作り、状態が変わっても作り直さない・value を書きかえない
+  // （書きかえるのは、読み取り専用に切りかわるときと、読み取り専用の間だけ。変換の途中の文字を壊さない）
+  function buildFree(slide, slideId) {
+    const ui = { slideId, readOnly: null, decision: null };
+    ui.statusChip = el('span', { class: 'st-chip-status', 'aria-live': 'polite' });
+    ui.input = el('textarea', {
+      id: 'st-free-input', class: 'st-free-input', rows: '5',
+      maxlength: String(CONFIG.free.maxLength),
+      'aria-labelledby': 'st-question', 'aria-describedby': 'st-free-count',
+      autocomplete: 'off',
+    });
+    // 入力のたびに書きかけを保存し、ボタンと残りの文字数だけを書きかえる
+    ui.input.addEventListener('input', () => {
+      if (!alive || !client || freeUi !== ui) return;
+      client.setDraft(ui.slideId, ui.input.value);
+      updateFree(ui);
+    });
+    ui.count = el('p', { id: 'st-free-count', class: 'st-free-count' });
+    ui.sendBtn = el('button', {
+      type: 'button', class: 'btn btn-primary st-send',
+      onclick: () => { if (alive && client && !isOff(ui.sendBtn)) client.submitText(ui.input.value); },
+    });
+    ui.message = el('p', { class: 'st-answer-text' });
+    ui.retryBtn = el('button', {
+      type: 'button', class: 'btn st-retry', text: 'もう一度送る', hidden: true,
+      // 押した瞬間にも確かめる（書き直したあとに古い文章を送り直さない）
+      onclick: () => { if (alive && client && ui.decision && ui.decision.retry) client.retry(); },
+    });
+    ui.note = el('p', { class: 'st-free-note', role: 'status', hidden: true, text: RESULTS_NOTE });
+    ui.root = el('section', { class: 'st-poll st-free', 'aria-labelledby': 'st-question' },
+      el('h2', { id: 'st-question', class: 'st-question', text: typeof slide.question === 'string' ? slide.question : '' }),
+      el('div', { class: 'st-chips' }, statusChip('info', 'この質問は匿名です'), ui.statusChip),
+      ui.input,
+      ui.count,
+      ui.sendBtn,
+      el('div', { class: 'st-answer', 'aria-live': 'polite' }, ui.message),
+      ui.retryBtn,
+      ui.note);
+    return ui;
+  }
+
+  function updateFree(ui) {
+    const before = document.activeElement;
+    const status = state.poll ? state.poll.status : '';
+    const answer = state.answer;
+    const readOnly = status === 'paused' || status === 'closed';
+    // 読み取り専用に切りかわるとき（と、その間）は、送った文章を見せる。書けるように戻ったら書きかけを戻す
+    if (readOnly !== ui.readOnly || readOnly) {
+      const shown = freeShownText({ readOnly, draft: client ? client.draft(ui.slideId) : '', text: state.text });
+      if (ui.input.value !== shown) ui.input.value = shown;
+      ui.input.readOnly = readOnly;
+      ui.readOnly = readOnly;
+    }
+    const d = freeDecision({ status, input: ui.input.value, answer, resultsVisible: state.poll && state.poll.resultsVisible });
+    ui.decision = d;
+    updateStatusChip(ui.statusChip, status);
+
+    const count = `残り ${d.remaining} 文字`;
+    if (ui.count.textContent !== count) ui.count.textContent = count;
+    if (ui.sendBtn.textContent !== d.send.label) ui.sendBtn.textContent = d.send.label;
+    setOff(ui.sendBtn, d.send.off);
+
+    if (ui.message.textContent !== d.message) ui.message.textContent = d.message;
+    ui.message.dataset.state = d.message && answer ? answer.state : '';
+    ui.retryBtn.hidden = !d.retry;
+    if (!d.retry && before === ui.retryBtn) ui.sendBtn.focus(); // 押したボタンが消えたら、送信のボタンへ
+    ui.note.hidden = !d.showNote;
   }
 
   // ---- 描画 ----
@@ -281,6 +402,15 @@ export function mount(root, ctx) {
       if (pollUi) updatePoll(pollUi);
       return;
     }
+    if (slide.type === 'free') {
+      if (show(key)) {
+        freeUi = buildFree(slide, state.slideId);
+        body.append(freeUi.root);
+        window.scrollTo(0, 0);
+      }
+      if (freeUi) updateFree(freeUi);
+      return;
+    }
     if (show(key)) {
       const box = el('section', { class: 'st-slide', 'aria-label': 'スライド' });
       renderSlide(box, slide, state.images);
@@ -297,5 +427,6 @@ export function mount(root, ctx) {
     client = null;
     // 次の画面に替わるまで古い DOM が残ることがある。その間に押されても何もしないよう、ボタンを止める
     for (const b of wrap.querySelectorAll('button')) b.setAttribute('aria-disabled', 'true');
+    for (const t of wrap.querySelectorAll('textarea')) t.readOnly = true;
   };
 }

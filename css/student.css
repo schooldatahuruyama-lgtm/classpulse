@@ -96,3 +96,19 @@
   .st-option { gap: 12px; padding: 12px; font-size: 18px; }
   .st-mark { width: 36px; height: 36px; }
 }
+
+/* 自由記述: 入力欄・残りの文字数・「前の画面を見てください」 */
+.st-free-input {
+  display: block; width: 100%; min-height: 160px; padding: 12px var(--s-2);
+  border: 2px solid var(--c-border); border-radius: var(--r-2);
+  background: var(--c-card); color: var(--c-navy);
+  font: inherit; font-size: 20px; line-height: 1.5; resize: vertical;
+}
+.st-free-input:focus-visible { outline: 3px solid var(--c-main); outline-offset: 2px; }
+/* 一時停止中・締切後: 書けないことを背景と指の形でも示す（文字は読める濃さのまま） */
+.st-free-input[readonly] { background: var(--c-bg); cursor: not-allowed; }
+.st-free-count { margin: var(--s-1) 0 0; font-size: 16px; font-weight: 700; text-align: right; }
+.st-free-note {
+  margin: var(--s-3) 0 0; padding: 12px var(--s-2); border: 2px solid var(--c-main); border-radius: var(--r-1);
+  background: #EEF2FF; font-size: 18px; font-weight: 700;
+}

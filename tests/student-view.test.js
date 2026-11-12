@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { sendButtonState, answerMessage, pollDecision, endedDecision } from '../js/views/student.js';
+import { sendButtonState, answerMessage, pollDecision, endedDecision, freeDecision, freeShownText } from '../js/views/student.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (p) => readFileSync(join(root, p), 'utf8');
@@ -160,4 +160,87 @@ test('終了の画面: 未確認の回答があれば件数を伝える（今の
     { key: 'ended:unconfirmed:1', message: '授業が終わったため、送信できたか確認できなかった回答が 1 件あります。' });
   assert.deepEqual(endedDecision({ unconfirmedCount: 3, answer: null }),
     { key: 'ended:unconfirmed:3', message: '授業が終わったため、送信できたか確認できなかった回答が 3 件あります。' });
+});
+
+// ---- 自由記述 ----
+const fd = (o) => freeDecision({ status: 'open', input: '', answer: null, resultsVisible: false, ...o });
+
+test('自由記述: まだ送っていない →「送信」。空・空白だけは押せない', () => {
+  assert.deepEqual(fd({ input: 'こんにちは' }).send, { label: '送信', off: false });
+  assert.deepEqual(fd({ input: '' }).send, { label: '送信', off: true });
+  assert.deepEqual(fd({ input: '   \n  ' }).send, { label: '送信', off: true });
+});
+
+test('自由記述: 201 文字は押せない、200 文字は押せる。残りの文字数は length で数える', () => {
+  assert.equal(fd({ input: 'あ'.repeat(200) }).send.off, false);
+  assert.equal(fd({ input: 'あ'.repeat(200) }).remaining, 0);
+  assert.equal(fd({ input: 'あ'.repeat(201) }).send.off, true);
+  assert.equal(fd({ input: '' }).remaining, 200);
+  assert.equal(fd({ input: '😀' }).remaining, 198);
+});
+
+test('自由記述: 送った文章と同じ → 押せない「送信済み」。前後の空白だけの違いも同じ', () => {
+  const answer = { text: 'りんご', state: 'sent' };
+  assert.deepEqual(fd({ input: 'りんご', answer }).send, { label: '送信済み', off: true });
+  assert.deepEqual(fd({ input: '  りんご\n', answer }).send, { label: '送信済み', off: true });
+});
+
+test('自由記述: 送った文章と違う →「送り直す」。空にしたら押せない', () => {
+  const answer = { text: 'りんご', state: 'sent' };
+  assert.deepEqual(fd({ input: 'みかん', answer }).send, { label: '送り直す', off: false });
+  assert.deepEqual(fd({ input: '', answer }).send, { label: '送り直す', off: true });
+});
+
+test('自由記述: 送信中でも、違う文章なら送り直せる（最後の文章を送る）。同じ文章は押せない', () => {
+  const answer = { text: 'りんご', state: 'sending' };
+  assert.deepEqual(fd({ input: 'みかん', answer }).send, { label: '送り直す', off: false });
+  assert.equal(fd({ input: 'りんご', answer }).send.off, true);
+});
+
+test('自由記述: 一時停止中・締切後は読み取り専用で押せない。受付前も押せない', () => {
+  const p = fd({ status: 'paused', input: 'あ' });
+  assert.equal(p.readOnly, true);
+  assert.deepEqual(p.send, { label: '受付停止中', off: true });
+  const c = fd({ status: 'closed', input: 'あ', answer: { text: 'あ', state: 'sent' } });
+  assert.equal(c.readOnly, true);
+  assert.deepEqual(c.send, { label: '締切済み', off: true });
+  assert.equal(c.message, '送信済み。');
+  const w = fd({ status: 'waiting', input: 'あ' });
+  assert.equal(w.readOnly, false);
+  assert.equal(w.send.off, true);
+  assert.equal(fd({ status: 'open', input: 'あ' }).readOnly, false);
+});
+
+test('自由記述: 送信状態の文はアンケートと同じ。締切で送れなかったときも同じ知らせ', () => {
+  for (const s of ['sending', 'sent', 'queued', 'rejected', 'failed', 'unconfirmed']) {
+    for (const status of STATUSES) {
+      assert.equal(fd({ status, answer: { text: 'あ', state: s } }).message, answerMessage({ choice: 0, state: s }, status));
+    }
+  }
+  assert.equal(fd({ status: 'closed', answer: { text: 'あ', state: 'rejected' } }).message, '締め切られたため、送信できませんでした。');
+  assert.equal(fd({ answer: null }).message, '');
+});
+
+test('自由記述: 「もう一度送る」は受付中・失敗・入力欄が失敗した文章と同じか空のときだけ', () => {
+  const answer = { text: 'りんご', state: 'failed' };
+  assert.equal(fd({ input: 'りんご', answer }).retry, true);
+  assert.equal(fd({ input: '', answer }).retry, true);
+  assert.equal(fd({ input: 'みかん', answer }).retry, false);
+  assert.deepEqual(fd({ input: 'みかん', answer }).send, { label: '送信', off: false });
+  assert.equal(fd({ input: 'りんご', answer }).send.off, true); // 同じ文章は「もう一度送る」で送る
+  assert.equal(fd({ status: 'paused', input: 'りんご', answer }).retry, false);
+  assert.equal(fd({ input: 'りんご', answer: { text: 'りんご', state: 'sent' } }).retry, false);
+});
+
+test('自由記述: 結果の表示中だけ「前の画面を見てください」を出す', () => {
+  assert.equal(fd({ resultsVisible: true }).showNote, true);
+  assert.equal(fd({ resultsVisible: false }).showNote, false);
+});
+
+test('自由記述: 入力欄に出す文（書けるときは書きかけ、読み取り専用は送った文章）', () => {
+  assert.equal(freeShownText({ readOnly: false, draft: '書きかけ', text: '送った' }), '書きかけ');
+  assert.equal(freeShownText({ readOnly: false, draft: '', text: '送った' }), '送った');
+  assert.equal(freeShownText({ readOnly: true, draft: '書きかけ', text: '送った' }), '送った');
+  assert.equal(freeShownText({ readOnly: true, draft: '書きかけ', text: null }), '書きかけ');
+  assert.equal(freeShownText({ readOnly: false, draft: '', text: null }), '');
 });

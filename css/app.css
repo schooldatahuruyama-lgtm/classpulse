@@ -95,3 +95,12 @@
 .hist-message { margin-top: var(--s-2); }
 .hist-foot { margin-top: var(--s-4); }
 .hist-delete { color: var(--c-danger-text); border-color: var(--c-danger-text); }
+/* 授業の結果: 自由記述の文章の一覧と、授業中にかくした回答 */
+.hist-free-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--s-1); }
+.hist-free-item {
+  padding: 12px var(--s-2); border: 1px solid var(--c-line); border-radius: var(--r-1); background: var(--c-bg);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.hist-free-hidden { margin-top: var(--s-3); padding-top: var(--s-2); border-top: 2px dashed var(--c-border); }
+.hist-free-hidden-title { margin: 0 0 var(--s-1); font-size: 18px; }
+.hist-free-hidden .hist-free-item { background: var(--c-card); border-style: dashed; color: #4B5694; }
