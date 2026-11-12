@@ -254,3 +254,72 @@ test('cloud の履歴の words・hiddenWords は配列に正され、各要素�
   assert.deepEqual(qs[1].hiddenWords, []);
   assert.equal(qs[1].total, 0);
 });
+
+test('quiz の履歴は options・counts を配列に、correct を番号か null に、correctCount を数に正す', async () => {
+  const { net, repo } = setup();
+  await net.set('teachers/u1/history/S1', {
+    title: 'T', endedAt: 2,
+    questions: [
+      { slideId: 'q', type: 'quiz', question: 'Q', options: { 0: 'a', 1: 'b', 2: 'c' }, counts: { 1: 2 }, total: 3, correct: 1, correctCount: 2 },
+      // データベースは null を落とす（正解の分からないクイズ）
+      { slideId: 'q2', type: 'quiz', question: 'R', options: ['a', 'b'], total: 0 },
+      { slideId: 'q3', type: 'quiz', question: 'S', options: ['a', 'b'], counts: [1, 1], total: 2, correct: 5, correctCount: 'x' },
+    ],
+  });
+  const qs = (await repo.getHistory('S1')).questions;
+  assert.equal(qs[0].type, 'quiz');
+  assert.equal(qs[0].question, 'Q');
+  assert.deepEqual(qs[0].options, ['a', 'b', 'c']);
+  assert.deepEqual(qs[0].counts, [0, 2, 0]);
+  assert.equal(qs[0].total, 3);
+  assert.equal(qs[0].correct, 1);
+  assert.equal(qs[0].correctCount, 2);
+  assert.deepEqual(qs[1].counts, [0, 0]);
+  assert.equal(qs[1].correct, null);
+  assert.equal(qs[1].correctCount, 0);
+  assert.equal(qs[2].correct, null); // 範囲外
+  assert.equal(qs[2].correctCount, 0);
+});
+
+test('rating の履歴は counts を 5 個の数の配列に、average を数か null に、言葉を文字列に正す', async () => {
+  const { net, repo } = setup();
+  await net.set('teachers/u1/history/S1', {
+    title: 'T', endedAt: 2,
+    questions: [
+      { slideId: 'r', type: 'rating', question: 'Q', lowLabel: 'ひくい', highLabel: 'たかい', counts: { 0: 1, 4: 2 }, total: 3, average: 3.7 },
+      { slideId: 'r2', type: 'rating', question: 'R', total: 0 },
+      { slideId: 'r3', type: 'rating', question: 'S', lowLabel: 3, counts: [1, 'x', 0, 0, 0, 9], total: 1, average: 'x' },
+    ],
+  });
+  const qs = (await repo.getHistory('S1')).questions;
+  assert.equal(qs[0].type, 'rating');
+  assert.equal(qs[0].lowLabel, 'ひくい');
+  assert.equal(qs[0].highLabel, 'たかい');
+  assert.deepEqual(qs[0].counts, [1, 0, 0, 0, 2]);
+  assert.equal(qs[0].total, 3);
+  assert.equal(qs[0].average, 3.7);
+  assert.deepEqual(qs[1].counts, [0, 0, 0, 0, 0]);
+  assert.equal(qs[1].average, null);
+  assert.equal(qs[1].lowLabel, '');
+  assert.equal(qs[1].highLabel, '');
+  assert.deepEqual(qs[2].counts, [1, 0, 0, 0, 0]);
+  assert.equal(qs[2].average, null);
+  assert.equal(qs[2].lowLabel, '');
+});
+
+test('アンケート・自由記述・ワードクラウドとまざった履歴も、それぞれの形で読める', async () => {
+  const { net, repo } = setup();
+  await net.set('teachers/u1/history/S1', {
+    title: 'T', endedAt: 2,
+    questions: [
+      { slideId: 'a', question: 'Q', options: ['x', 'y'], counts: [1, 2], total: 3 },
+      { slideId: 'q', type: 'quiz', question: 'Q', options: ['a', 'b'], counts: [1, 0], total: 1, correct: 0, correctCount: 1 },
+      { slideId: 'r', type: 'rating', question: 'R', counts: [0, 0, 1, 0, 0], total: 1, average: 3 },
+      { slideId: 'f', type: 'free', question: 'F', texts: ['あ'], total: 1 },
+    ],
+  });
+  const qs = (await repo.getHistory('S1')).questions;
+  assert.deepEqual(qs.map((q) => q.type), ['poll', 'quiz', 'rating', 'free']);
+  assert.deepEqual(qs[0].counts, [1, 2]);
+  assert.equal(qs[0].correct, undefined);
+});

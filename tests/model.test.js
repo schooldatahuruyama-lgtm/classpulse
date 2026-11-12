@@ -4,7 +4,9 @@ import {
   newId, newSessionId, createDeck, createSlide, createTextItem,
   addSlide, removeSlide, moveSlide, duplicateSlide, updateSlide,
   normalizeDeck, validateDeck, deckImageBytes,
+  isChoiceSlide, choiceCount, ratingOptions, quizCorrect, removeOption, withoutCorrect,
 } from '../js/model.js';
+import { CONFIG } from '../js/config.js';
 
 // テスト用の教材を手早く作る道具
 function deckOf(order, slides, images = {}) {
@@ -253,4 +255,102 @@ test('validateDeck は cloud の空の質問文を見つける', () => {
   assert.deepEqual(validateDeck(bad), ['1 枚目: 質問文を入れてください。']);
   const ok = deckOf(['a'], { a: { type: 'cloud', question: '好きな動物は？' } });
   assert.deepEqual(validateDeck(ok), []);
+});
+
+// ---- クイズ（quiz）と 5 段階評価（rating）----
+
+test('createSlide: クイズは選択肢 2 つで 1 つ目が正解、評価は言葉が空で manual', () => {
+  assert.deepEqual(createSlide('quiz'), { type: 'quiz', question: '', options: ['', ''], correct: 0 });
+  assert.deepEqual(createSlide('rating'), { type: 'rating', question: '', lowLabel: '', highLabel: '', resultMode: 'manual' });
+  assert.deepEqual(CONFIG.rating, { steps: 5, labelMaxLength: 20 });
+});
+
+test('normalizeDeck: クイズの correct は 0 以上・選択肢の数未満の整数でなければ 0', () => {
+  const q = (correct, options = ['a', 'b', 'c']) => normalizeDeck(deckOf(['q'], { q: { type: 'quiz', question: 'Q', options, correct } })).slides.q;
+  assert.equal(q(2).correct, 2);
+  assert.equal(q(0).correct, 0);
+  assert.equal(q(3).correct, 0); // 範囲外
+  assert.equal(q(-1).correct, 0);
+  assert.equal(q(1.5).correct, 0); // 小数
+  assert.equal(q('1').correct, 0); // 文字列
+  assert.equal(q(undefined).correct, 0);
+  // 選択肢はアンケートと同じに正す（{0:…} の形も配列に）
+  const s = q(1, { 0: 'x', 1: 'y' });
+  assert.deepEqual(s.options, ['x', 'y']);
+  assert.equal(s.correct, 1);
+  assert.equal(s.type, 'quiz');
+  assert.equal(normalizeDeck(deckOf(['q'], { q: { type: 'quiz', question: 7 } })).slides.q.question, '');
+});
+
+test('normalizeDeck: 評価の言葉は文字列にして 20 文字で切り、resultMode は live か manual', () => {
+  const r = (src) => normalizeDeck(deckOf(['r'], { r: { type: 'rating', ...src } })).slides.r;
+  const long = 'あ'.repeat(21);
+  const s = r({ question: 'Q', lowLabel: long, highLabel: 'とても', resultMode: 'live', options: ['x'] });
+  assert.deepEqual(s, { type: 'rating', question: 'Q', lowLabel: 'あ'.repeat(20), highLabel: 'とても', resultMode: 'live' });
+  assert.deepEqual(r({ question: 3, lowLabel: 5, resultMode: 'x' }),
+    { type: 'rating', question: '', lowLabel: '', highLabel: '', resultMode: 'manual' });
+  // 切った所で対になる文字（絵文字など）が半分にならない
+  const emoji = 'a'.repeat(19) + '😀';
+  assert.equal(r({ lowLabel: emoji }).lowLabel, 'a'.repeat(19));
+});
+
+test('validateDeck: クイズはアンケートと同じ問題、評価は質問文が空のときだけ', () => {
+  const deck = deckOf(['q', 'r', 'r2'], {
+    q: { type: 'quiz', question: '', options: ['a', ''], correct: 0 },
+    r: { type: 'rating', question: '', lowLabel: '', highLabel: '', resultMode: 'manual' },
+    r2: { type: 'rating', question: '満足度は？', lowLabel: '', highLabel: '', resultMode: 'live' },
+  });
+  assert.deepEqual(validateDeck(deck), [
+    '1 枚目: 質問文を入れてください。',
+    '1 枚目: 選択肢を 2 つ以上入れてください。',
+    '2 枚目: 質問文を入れてください。',
+  ]);
+  const ok = deckOf(['q'], { q: { type: 'quiz', question: 'Q', options: ['a', 'b'], correct: 1 } });
+  assert.deepEqual(validateDeck(ok), []);
+});
+
+test('removeOption: クイズで正解を消すと 1 つ目が正解、前を消すと 1 減り、後ろを消すと変わらない', () => {
+  const quiz = { type: 'quiz', question: 'Q', options: ['a', 'b', 'c', 'd'], correct: 2 };
+  assert.deepEqual(removeOption(quiz, 2), { ...quiz, options: ['a', 'b', 'd'], correct: 0 });
+  assert.deepEqual(removeOption(quiz, 0), { ...quiz, options: ['b', 'c', 'd'], correct: 1 });
+  assert.deepEqual(removeOption(quiz, 3), { ...quiz, options: ['a', 'b', 'c'], correct: 2 });
+  // 消したあとも、正解は同じ文の選択肢を指す
+  const after = removeOption(quiz, 1);
+  assert.equal(after.options[after.correct], 'c');
+  // 元のスライドは書きかえない
+  assert.deepEqual(quiz.options, ['a', 'b', 'c', 'd']);
+  assert.equal(quiz.correct, 2);
+  // アンケートは選択肢だけ
+  const poll = { type: 'poll', question: 'Q', options: ['a', 'b', 'c'], resultMode: 'manual' };
+  assert.deepEqual(removeOption(poll, 0), { ...poll, options: ['b', 'c'] });
+  // 範囲外は何も消さない
+  assert.deepEqual(removeOption(quiz, 9), quiz);
+});
+
+test('isChoiceSlide・choiceCount・ratingOptions・quizCorrect', () => {
+  assert.equal(isChoiceSlide({ type: 'poll' }), true);
+  assert.equal(isChoiceSlide({ type: 'quiz' }), true);
+  assert.equal(isChoiceSlide({ type: 'rating' }), true);
+  for (const t of ['free', 'cloud', 'content']) assert.equal(isChoiceSlide({ type: t }), false);
+  assert.equal(isChoiceSlide(null), false);
+  assert.equal(choiceCount({ type: 'poll', options: ['a', 'b', 'c'] }), 3);
+  assert.equal(choiceCount({ type: 'quiz', options: ['a', 'b'] }), 2);
+  assert.equal(choiceCount({ type: 'rating' }), 5); // options が無くても 5
+  assert.equal(choiceCount({ type: 'rating', options: ['1', '2'] }), 5);
+  assert.equal(choiceCount({ type: 'free' }), 0);
+  assert.deepEqual(ratingOptions(), ['1', '2', '3', '4', '5']);
+  assert.equal(quizCorrect({ type: 'quiz', options: ['a', 'b'], correct: 1 }), 1);
+  assert.equal(quizCorrect({ type: 'quiz', options: ['a', 'b'], correct: 2 }), 0);
+});
+
+test('withoutCorrect: クイズのスライドから correct を外す（ほかは変えず、元は書きかえない）', () => {
+  const deck = deckOf(['q', 'p'], {
+    q: { type: 'quiz', question: 'Q', options: ['a', 'b'], correct: 1 },
+    p: { type: 'poll', question: 'P', options: ['a', 'b'], resultMode: 'manual' },
+  });
+  const out = withoutCorrect(deck);
+  assert.equal(Object.hasOwn(out.slides.q, 'correct'), false);
+  assert.deepEqual(out.slides.q, { type: 'quiz', question: 'Q', options: ['a', 'b'] });
+  assert.deepEqual(out.slides.p, deck.slides.p);
+  assert.equal(deck.slides.q.correct, 1);
 });

@@ -1463,3 +1463,255 @@ test('ワードクラウド: hide は正しくない鍵・ワードクラウド�
   assert.deepEqual(last().freeItems, []);
   host.stop();
 });
+
+// ---- クイズ（quiz）と 5 段階評価（rating）----
+
+// s1 資料、s2 クイズ（4 択。正解は 3 つ目 = 2）、s3 評価（manual）、s4 評価（live）
+function quizDeck() {
+  let d = createDeck('クイズの教材', 1000);
+  d = addSlide(d, createSlide('content'), 's1');
+  d = addSlide(d, { ...createSlide('quiz'), question: '富士山がある県は？', options: ['長野', '山梨', '静岡', '東京'], correct: 2 }, 's2');
+  d = addSlide(d, { ...createSlide('rating'), question: '満足度は？', lowLabel: 'ふまん', highLabel: 'まんぞく' }, 's3');
+  d = addSlide(d, { ...createSlide('rating'), question: 'むずかしさは？', resultMode: 'live' }, 's4');
+  return d;
+}
+
+// s2（クイズ・受付中）にいる host を開く
+async function openQuiz(env, opts) {
+  const sid = await begin(env, quizDeck());
+  const h = await openHost(env, sid, opts);
+  await h.host.next(); await h.host.next();
+  return { sid, ...h };
+}
+
+// 状態の中に、正解の番号を示す値（correct・correctRate）が無いか
+const leaksCorrect = (s) => {
+  let found = false;
+  JSON.stringify(s, (k, v) => {
+    if ((k === 'correct' || k === 'correctRate') && v !== null && v !== undefined) found = true;
+    return v;
+  });
+  return found;
+};
+
+test('クイズ: 始めた授業の deck と pub に正解が無く、host/quiz にある', async () => {
+  const env = setup();
+  const sid = await begin(env, quizDeck());
+  const s = sessionOf(env, sid);
+  assert.ok(!JSON.stringify(s.deck).includes('correct'));
+  assert.ok(!JSON.stringify(s.pub).includes('correct'));
+  assert.deepEqual(s.host, { quiz: { s2: 2 } });
+  assert.deepEqual(s.deck.slides.s3.options, ['1', '2', '3', '4', '5']);
+});
+
+test('クイズ: 表示の前は、状態に正解も内訳（counts）も無く、回答の人数だけ', async () => {
+  const env = setup();
+  const { sid, host, states, last } = await openQuiz(env);
+  await answer(env, sid, 's2', 'u1', 2);
+  await answer(env, sid, 's2', 'u2', 0);
+  await env.clock.advance(5000);
+  assert.equal(last().kind, 'quiz');
+  assert.equal(last().answerCount, 2);
+  assert.deepEqual(last().tallies.s2, { total: 2 });
+  assert.equal(last().correct, null);
+  assert.equal(last().correctRate, null);
+  for (const s of states) {
+    assert.ok(!leaksCorrect(s), '状態に正解が入っている');
+    assert.equal(s.tallies.s2 && s.tallies.s2.counts, undefined);
+    assert.equal(Object.hasOwn(s.slides.s2 || {}, 'correct'), false);
+  }
+  assert.equal(sessionOf(env, sid).pub.results, undefined);
+  host.stop();
+});
+
+test('クイズ: 正解を表示は 1 回の書きこみで締め切り、集計と正解を pub/results に書く', async () => {
+  const env = setup();
+  const { sid, host, last } = await openQuiz(env);
+  await answer(env, sid, 's2', 'u1', 2);
+  await answer(env, sid, 's2', 'u2', 0);
+  await answer(env, sid, 's2', 'u3', 2);
+  const n = env.updates.length;
+  await host.setResultsVisible(true, 's2');
+  const writes = env.updates.slice(n);
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].patch['polls/s2/status'], 'closed');
+  assert.equal(writes[0].patch['polls/s2/resultsVisible'], true);
+  assert.deepEqual(writes[0].patch['results/s2'], { counts: [1, 0, 2, 0], total: 3, correct: 2 });
+  const pub = sessionOf(env, sid).pub;
+  assert.equal(pub.polls.s2.status, 'closed');
+  assert.deepEqual(pub.results.s2, { counts: [1, 0, 2, 0], total: 3, correct: 2 });
+  assert.equal(last().correct, 2);
+  assert.deepEqual(last().correctRate, { correctCount: 2, total: 3, percent: 67 });
+  assert.deepEqual(last().tallies.s2, { counts: [1, 0, 2, 0], total: 3 });
+  // 表示のあとの回答は、規則（締切）が拒否する
+  await assert.rejects(answer(env, sid, 's2', 'u4', 2));
+  await env.clock.advance(5000);
+  assert.equal(sessionOf(env, sid).pub.results.s2.total, 3);
+  host.stop();
+});
+
+test('クイズ: かくすと結果と正解が消え、締切のまま。もう一度表示できる', async () => {
+  const env = setup();
+  const { sid, host, states, last } = await openQuiz(env);
+  await answer(env, sid, 's2', 'u1', 1);
+  await host.setResultsVisible(true, 's2');
+  await host.setResultsVisible(false, 's2');
+  let pub = sessionOf(env, sid).pub;
+  assert.equal(pub.results, undefined);
+  assert.equal(pub.polls.s2.status, 'closed');
+  assert.equal(pub.polls.s2.resultsVisible, false);
+  assert.equal(last().correct, null);
+  assert.equal(last().correctRate, null);
+  assert.deepEqual(last().tallies.s2, { total: 1 });
+  assert.ok(!leaksCorrect(last()));
+  // 停止・再開は締切のあとは効かない
+  await host.setPaused(false, 's2');
+  await host.setPaused(true, 's2');
+  assert.equal(sessionOf(env, sid).pub.polls.s2.status, 'closed');
+  const n = states.length;
+  await host.setResultsVisible(true, 's2');
+  pub = sessionOf(env, sid).pub;
+  assert.equal(pub.polls.s2.status, 'closed');
+  assert.deepEqual(pub.results.s2, { counts: [0, 1, 0, 0], total: 1, correct: 2 });
+  assert.equal(last().correct, 2);
+  assert.deepEqual(last().correctRate, { correctCount: 0, total: 1, percent: 0 });
+  assert.ok(states.length > n);
+  host.stop();
+});
+
+test('クイズ: 次へで締め切ったあと戻っても、正解を表示できる（締切のまま）', async () => {
+  const env = setup();
+  const { sid, host, last } = await openQuiz(env);
+  await answer(env, sid, 's2', 'u1', 2);
+  await host.next(); // s3 へ（s2 は締切）
+  await host.prev(); // s2 に戻る
+  assert.equal(last().pub.polls.s2.status, 'closed');
+  const n = env.updates.length;
+  await host.setResultsVisible(true, 's2');
+  const w = env.updates.slice(n);
+  assert.equal(w.length, 1);
+  assert.equal(w[0].patch['polls/s2/status'], undefined); // すでに締切
+  assert.deepEqual(sessionOf(env, sid).pub.results.s2, { counts: [0, 0, 1, 0], total: 1, correct: 2 });
+  assert.equal(last().correct, 2);
+  assert.deepEqual(last().correctRate, { correctCount: 1, total: 1, percent: 100 });
+  host.stop();
+});
+
+test('クイズ: 締切の前に受け付けられた回答が遅れて届いたら、公開中の集計を直す', async () => {
+  const env = setup();
+  const { sid, host, last } = await openQuiz(env);
+  await answer(env, sid, 's2', 'u1', 2);
+  await host.setResultsVisible(true, 's2');
+  // 締切の前にサーバーが受け付けていた回答が、あとから届く
+  env.ctl.bypass = true;
+  await answer(env, sid, 's2', 'u2', 0);
+  env.ctl.bypass = false;
+  await env.clock.advance(500);
+  assert.deepEqual(sessionOf(env, sid).pub.results.s2, { counts: [1, 0, 1, 0], total: 2, correct: 2 });
+  assert.deepEqual(last().correctRate, { correctCount: 1, total: 2, percent: 50 });
+  host.stop();
+});
+
+test('クイズ: 開き直した host も host/quiz から正解を読む', async () => {
+  const env = setup();
+  const { sid, host } = await openQuiz(env);
+  await answer(env, sid, 's2', 'u1', 2);
+  host.stop();
+  const b = await openHost(env, sid);
+  assert.equal(b.last().correct, null);
+  await b.host.setResultsVisible(true, 's2');
+  assert.equal(sessionOf(env, sid).pub.results.s2.correct, 2);
+  assert.equal(b.last().correct, 2);
+  b.host.stop();
+});
+
+test('評価: 表示中は average が入る。かくしている間は null。live の評価は着いたときから書く', async () => {
+  const env = setup();
+  const { sid, host, last } = await openQuiz(env);
+  await host.next(); // s3 評価（manual）
+  assert.equal(last().kind, 'rating');
+  await answer(env, sid, 's3', 'u1', 4);
+  await answer(env, sid, 's3', 'u2', 1);
+  await answer(env, sid, 's3', 'u3', 2);
+  assert.deepEqual(last().tallies.s3, { counts: [0, 1, 1, 0, 1], total: 3 });
+  assert.equal(last().answerCount, 3);
+  assert.equal(last().average, null);
+  await host.setResultsVisible(true, 's3');
+  assert.equal(last().average, 3.3);
+  assert.deepEqual(sessionOf(env, sid).pub.results.s3, { counts: [0, 1, 1, 0, 1], total: 3 });
+  assert.equal(sessionOf(env, sid).pub.polls.s3.status, 'open'); // 評価は表示で締め切らない
+  assert.equal(last().correct, null);
+  await host.setResultsVisible(false, 's3');
+  assert.equal(last().average, null);
+  await host.next(); // s4 評価（live）
+  await settle();
+  assert.deepEqual(sessionOf(env, sid).pub.results.s4, { counts: [0, 0, 0, 0, 0], total: 0 });
+  assert.equal(last().average, null); // 0 人
+  await answer(env, sid, 's4', 'u1', 0);
+  await env.clock.advance(500);
+  assert.deepEqual(sessionOf(env, sid).pub.results.s4, { counts: [1, 0, 0, 0, 0], total: 1 });
+  assert.equal(last().average, 1);
+  host.stop();
+});
+
+test('クイズ・評価: end() の履歴に正解と正解の人数、評価の平均。host/quiz を読み直し、後片づけで host が消える', async () => {
+  const env = setup();
+  const { sid, host, last } = await openQuiz(env);
+  await answer(env, sid, 's2', 'uidA', 2);
+  await answer(env, sid, 's2', 'uidB', 1);
+  await host.next(); // s3
+  await answer(env, sid, 's3', 'uidA', 4);
+  await answer(env, sid, 's3', 'uidB', 3);
+  const gets = [];
+  const origGet = env.net.get;
+  env.net.get = async (path) => { gets.push(path); return origGet(path); };
+  await host.end();
+  assert.ok(gets.includes(`sessions/${sid}/host/quiz`));
+  const dump = env.net.dump();
+  const hist = dump.teachers[UID].history[sid];
+  const q = hist.questions.find((x) => x.slideId === 's2');
+  assert.deepEqual(q, {
+    slideId: 's2', type: 'quiz', question: '富士山がある県は？', options: ['長野', '山梨', '静岡', '東京'],
+    counts: [0, 1, 1, 0], total: 2, correct: 2, correctCount: 1,
+  });
+  const r = hist.questions.find((x) => x.slideId === 's3');
+  assert.deepEqual(r, {
+    slideId: 's3', type: 'rating', question: '満足度は？', lowLabel: 'ふまん', highLabel: 'まんぞく',
+    counts: [0, 0, 0, 1, 1], total: 2, average: 4.5,
+  });
+  const r4 = hist.questions.find((x) => x.slideId === 's4');
+  assert.equal(r4.total, 0);
+  assert.ok(!JSON.stringify(hist).includes('uid'));
+  assert.equal(dump.sessions[sid].host, undefined);
+  assert.equal(dump.sessions[sid].deck, undefined);
+  assert.equal(last().phase, 'ended');
+  host.stop();
+});
+
+test('クイズの無い授業の end() は host/quiz を読まない', async () => {
+  const env = setup();
+  const sid = await begin(env);
+  const { host } = await openHost(env, sid);
+  const gets = [];
+  const origGet = env.net.get;
+  env.net.get = async (path) => { gets.push(path); return origGet(path); };
+  await host.end();
+  assert.ok(!gets.some((p) => p.endsWith('/host/quiz')));
+  host.stop();
+});
+
+test('アンケートは今までどおり: tallies に counts、correct・average は null', async () => {
+  const env = setup();
+  const sid = await begin(env);
+  const { host, last } = await openHost(env, sid);
+  await host.next(); await host.next();
+  await answer(env, sid, 's2', 'u1', 1);
+  await host.setResultsVisible(true, 's2');
+  assert.deepEqual(last().tallies.s2, { counts: [0, 1], total: 1 });
+  assert.deepEqual(sessionOf(env, sid).pub.results.s2, { counts: [0, 1], total: 1 });
+  assert.equal(sessionOf(env, sid).pub.polls.s2.status, 'open');
+  assert.equal(last().correct, null);
+  assert.equal(last().correctRate, null);
+  assert.equal(last().average, null);
+  host.stop();
+});

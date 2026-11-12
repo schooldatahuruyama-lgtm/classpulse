@@ -6,10 +6,13 @@
 // - 操作（次へ・停止・公開など）は、順番が来た時点でサーバーの最新の pub を読んでからパッチを作る
 // - 集計を書くかどうかは、その時点の state.pub で決める（かくした質問の集計は、規則でも書けない）
 import { CONFIG } from './config.js';
-import { validateDeck, newSessionId, normalizeDeck } from './model.js';
+import {
+  validateDeck, newSessionId, normalizeDeck, withoutCorrect, isChoiceSlide, choiceCount,
+} from './model.js';
 import {
   buildSession, nextPatch, prevPatch, pausePatch, resultsVisiblePatch,
   tally, applyPatch, closeAllPatch, endPatch, buildHistory, freeList, cloudList,
+  average, correctRate,
 } from './session-logic.js';
 
 // 回答の一覧を「結果を表示」中だけ先生の画面に出すスライドの種類。
@@ -20,7 +23,21 @@ const LISTS = {
 };
 const listSpec = (slide) => (slide && Object.hasOwn(LISTS, slide.type) ? LISTS[slide.type] : null);
 
-// 教材を検査し、通れば授業を書いて「発表中」の印を付ける。授業 ID を返す
+// クイズの正解の表 { <slideId>: 番号 } を作り直す（キーに使えない slideId・0 以上の整数でない値は捨てる）。
+// あとの表が先の表を上書きする。プロトタイプの無いオブジェクトにする
+function cleanQuiz(...sources) {
+  const out = Object.create(null);
+  for (const v of sources) {
+    if (!v || typeof v !== 'object') continue;
+    for (const [slideId, c] of Object.entries(v)) {
+      if (validKey(slideId) && Number.isInteger(c) && c >= 0) out[slideId] = c;
+    }
+  }
+  return out;
+}
+
+// 教材を検査し、通れば授業を書いて「発表中」の印を付ける。授業 ID を返す。
+// クイズの正解は、授業と同じ 1 回の書きこみで host/quiz に入る（buildSession の host）
 export async function startSession({ net, repo, uid, deckId, deck, now, getRandomValues }) {
   const reasons = validateDeck(deck);
   if (reasons.length) {
@@ -89,6 +106,7 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
   const inboxPath = `${base}/inbox`;
   const hostPath = `${base}/host`;
   const hiddenPath = `${hostPath}/hidden`;
+  const quizPath = `${hostPath}/quiz`;
   const storeKey = `classpulse:hidden:${sid}`;
 
   // 端末に残したかくした回答を読む。無い・こわれている・読めないときは空
@@ -117,8 +135,10 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
   }
 
   // onChange に渡す状態。自由記述・ワードクラウドのための項目
-  // （kind・answerCount・freeItems・cloudItems・cloudMore・hiddenUnsaved）は emit のときに answerState() で足す。
-  // 文章・言葉は「結果を表示」中の freeItems・cloudItems にだけ入れる
+  // （kind・answerCount・freeItems・cloudItems・cloudMore・hiddenUnsaved）と、クイズ・評価のための項目
+  // （correct・correctRate・average）は emit のときに answerState() で足す。
+  // 文章・言葉は「結果を表示」中の freeItems・cloudItems にだけ入れる。
+  // クイズの正解と内訳（tallies の counts）は、「正解を表示」中にだけ入れる（state.tallies は手元の集計。渡すのは publicTallies()）
   const state = {
     phase: 'loading', connection: 'connected', title: '',
     order: [], slides: {}, images: {},
@@ -146,6 +166,8 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
   // items は、自由記述なら [{ uid, text }]、ワードクラウドなら [{ key, word, count }]
   let listView = null;          // { slideId, items, at }
   let listTimer = null;
+  // クイズの正解 { <slideId>: 番号 }（host/quiz）。start で 1 回読み、end で読み直す。状態には「正解を表示」中の correct としてだけ出す
+  let quizKeys = cleanQuiz();
 
   // 操作は 1 つずつ。失敗しても次の操作は止めない
   let tail = Promise.resolve();
@@ -157,12 +179,45 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
 
   function emit() {
     if (stopped) return;
-    onChange({ ...state, tallies: { ...state.tallies }, ...answerState() });
+    onChange({ ...state, tallies: publicTallies(), ...answerState() });
   }
 
   function currentSlideId() {
     const cur = state.pub && state.pub.current;
     return cur && typeof cur.slideId === 'string' ? cur.slideId : '';
+  }
+
+  // 結果を表示しているか（pub の polls/<slideId>/resultsVisible）
+  function resultsShown(id) {
+    const poll = state.pub && state.pub.polls && state.pub.polls[id];
+    return !!poll && poll.resultsVisible === true;
+  }
+
+  // クイズの正解の番号。分からない・選択肢の範囲外なら null
+  function quizAnswer(id) {
+    const s = state.slides[id];
+    const c = Object.hasOwn(quizKeys, id) ? quizKeys[id] : null;
+    return s && s.type === 'quiz' && Number.isInteger(c) && c < choiceCount(s) ? c : null;
+  }
+
+  // onChange に渡す集計。クイズは「正解を表示」していない間、内訳を外して回答の人数（total）だけにする
+  // （発表画面は教室に映るので、選択肢ごとの人数から正解を推せないように）
+  function publicTallies() {
+    const out = {};
+    for (const [id, t] of Object.entries(state.tallies)) {
+      const s = state.slides[id];
+      out[id] = s && s.type === 'quiz' && !resultsShown(id) ? { total: t.total } : t;
+    }
+    return out;
+  }
+
+  // pub/results/<slideId> に書く値。クイズは、正解が分かっていれば correct も入れる
+  function resultsFor(id) {
+    const t = state.tallies[id];
+    const out = { counts: t.counts, total: t.total };
+    const c = quizAnswer(id);
+    if (c !== null) out.correct = c;
+    return out;
   }
 
   function clearListTimer() {
@@ -186,7 +241,24 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
       cloudItems: null,
       cloudMore: null,
       hiddenUnsaved: unsaved.size > 0,
+      // クイズ: 「正解を表示」中だけ、正解の番号と正答率 { correctCount, total, percent }。評価: 結果の表示中だけ平均
+      correct: null,
+      correctRate: null,
+      average: null,
     };
+    // クイズ・評価: 回答の人数はいつも、正解・正答率・平均は結果の表示中だけ
+    if (slide && (slide.type === 'quiz' || slide.type === 'rating') && state.phase === 'live') {
+      const t = state.tallies[id];
+      out.answerCount = t ? t.total : 0;
+      if (t && resultsShown(id)) {
+        if (slide.type === 'quiz') {
+          out.correct = quizAnswer(id);
+          out.correctRate = correctRate(t.counts, out.correct);
+        } else {
+          out.average = average(t.counts);
+        }
+      }
+    }
     const spec = listSpec(slide);
     if (!spec || state.phase !== 'live') { dropListView(); return out; }
     const answers = (inbox && inbox.answers) || {};
@@ -267,22 +339,26 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
     const tallies = {};
     for (const id of state.order) {
       const s = state.slides[id];
-      if (s && s.type === 'poll') tallies[id] = tally(answers[id], (s.options || []).length);
+      if (isChoiceSlide(s)) tallies[id] = tally(answers[id], choiceCount(s));
     }
     state.tallies = tallies;
     state.participants = Object.keys((inbox && inbox.participants) || {}).length;
   }
 
-  // pub に書いてある集計と食い違っているか
-  function writtenResults(id) {
+  // pub に書いてある集計（書く値と同じ項目だけ）と食い違っているか
+  function writtenResults(id, want) {
     const r = state.pub && state.pub.results && state.pub.results[id];
-    return r ? JSON.stringify({ counts: r.counts, total: r.total }) : '';
+    if (!r) return '';
+    const have = {};
+    for (const k of Object.keys(want)) have[k] = r[k];
+    return JSON.stringify(have);
   }
   function needsResults(id) {
     const poll = state.pub && state.pub.polls && state.pub.polls[id];
     const t = state.tallies[id];
     if (!poll || !t || !poll.resultsVisible || poll.status === 'waiting') return false;
-    return JSON.stringify({ counts: t.counts, total: t.total }) !== writtenResults(id);
+    const want = resultsFor(id);
+    return JSON.stringify(want) !== writtenResults(id, want);
   }
 
   function clearTimers() {
@@ -318,8 +394,7 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
         if (!timers.has(id)) timers.set(id, setT(() => { timers.delete(id); syncResults(); }, wait));
         return;
       }
-      const t = state.tallies[id];
-      const patch = { [`results/${id}`]: { counts: t.counts, total: t.total } };
+      const patch = { [`results/${id}`]: resultsFor(id) };
       lastWriteAt.set(id, now());
       await net.update(pubPath, patch);
       state.pub = applyPatch(state.pub, patch);
@@ -432,12 +507,18 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
       // かくした回答も読み直し、手元でかくしたもの（まだ書けていないものも）と合わせる
       const finalHidden = await net.get(hiddenPath);
       guard();
+      // クイズの正解も読み直す（クイズのある授業だけ）。読めた値を、開いたときに読んだ値より優先する
+      let finalQuiz = null;
+      if (state.order.some((id) => state.slides[id] && state.slides[id].type === 'quiz')) {
+        finalQuiz = await net.get(quizPath);
+        guard();
+      }
       const history = buildHistory(
         {
           deckId: meta.deckId, startedAt: meta.startedAt, pub: state.pub,
           deck: { order: state.order, slides: state.slides, images: state.images },
         },
-        finalInbox, now(), cleanHidden(finalHidden, hidden),
+        finalInbox, now(), cleanHidden(finalHidden, hidden), cleanQuiz(quizKeys, finalQuiz),
       );
       // 3. 履歴を保存できなければここで止める（live のまま、inbox も残す）
       await repo.saveHistory(sid, history);
@@ -487,9 +568,12 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
       const serverHidden = cleanHidden(session.host && session.host.hidden);
       const stored = readStored();
       hidden = cleanHidden(serverHidden, stored, hidden);
+      // クイズの正解（host/quiz）も、授業全体の読みこみから 1 回だけ読む
+      quizKeys = cleanQuiz(session.host && session.host.quiz);
       meta = { deckId: String(session.deckId || ''), startedAt: Number(session.startedAt) || 0 };
       if (session.deck) {
-        const deck = normalizeDeck(session.deck);
+        // 写しのクイズに正解は無い。正したときに足される既定の correct も外す（状態に正解らしい値を入れない）
+        const deck = withoutCorrect(normalizeDeck(session.deck));
         state.order = deck.order;
         state.slides = deck.slides;
         state.images = deck.images;
@@ -533,17 +617,18 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
       return operate((pub) => {
         const id = currentSlideId();
         if (slideId !== undefined && slideId !== id) return null;
-        const patch = resultsVisiblePatch(pub, id, visible);
-        // 自由記述・ワードクラウドは resultsVisible だけを書く（pub/results/<slideId> には、消すことも含めて触れない）
         const slide = state.slides[id];
+        // クイズの「正解を表示」は、同じ書きこみで質問を締め切る（表示のあとに回答を受け付けない）。
+        // 「正解をかくす」は締切のまま（受付は再開しない）
+        const patch = resultsVisiblePatch(pub, id, visible, { closeOnShow: !!slide && slide.type === 'quiz' });
+        // 自由記述・ワードクラウドは resultsVisible だけを書く（pub/results/<slideId> には、消すことも含めて触れない）
         if (patch && listSpec(slide)) {
           delete patch[`results/${id}`];
           return patch;
         }
-        // 公開するときは、今の集計も同時に書く
+        // 公開するときは、今の集計（クイズは正解も）を同時に書く
         if (patch && visible && state.tallies[id]) {
-          const t = state.tallies[id];
-          patch[`results/${id}`] = { counts: t.counts, total: t.total };
+          patch[`results/${id}`] = resultsFor(id);
         }
         return patch;
       });

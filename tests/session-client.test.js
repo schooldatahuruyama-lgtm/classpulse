@@ -1276,3 +1276,150 @@ test('ワードクラウドの書きかけ: 保存された中身がこわれて
   assert.deepEqual(t.client.draft('s2'), ['', '', '']);
   assert.equal(t.client.draft('s3'), ''); // アンケートの所に配列があっても文字列で返す
 });
+
+// ---- クイズ（quiz）と 5 段階評価（rating）----
+
+// s1 資料、s2 クイズ（3 択。正解は 3 つ目）、s3 評価（manual）
+function quizDeck() {
+  let d = createDeck('クイズの教材', 1000);
+  d = addSlide(d, createSlide('content'), 's1');
+  d = addSlide(d, { ...createSlide('quiz'), question: '富士山がある県は？', options: ['長野', '山梨', '静岡'], correct: 2 }, 's2');
+  d = addSlide(d, { ...createSlide('rating'), question: '満足度は？', lowLabel: 'ふまん', highLabel: 'まんぞく' }, 's3');
+  return d;
+}
+
+// 先生の「正解を表示」（締切と表示を 1 回で、そのあと集計と正解）
+async function reveal(t, slideId, results) {
+  await t.net.update(PUB, { [`polls/${slideId}/status`]: 'closed', [`polls/${slideId}/resultsVisible`]: true });
+  await t.net.update(PUB, { [`results/${slideId}`]: results });
+}
+
+test('クイズ: 選んで送れる。表示の前は correct も isCorrect も null で、スライドに正解が無い', async () => {
+  const t = setup({ deck: quizDeck() });
+  await t.ready();
+  await t.client.start();
+  await toS2(t);
+  assert.equal(t.last().kind, 'quiz');
+  assert.equal(Object.hasOwn(t.last().slide, 'correct'), false);
+  assert.deepEqual(t.last().slide.options, ['長野', '山梨', '静岡']);
+  t.client.select(3); // 範囲外は選べない
+  assert.equal(t.last().selected, null);
+  t.client.select(1);
+  await t.client.submit();
+  assert.deepEqual(t.answers().s2.stu1, { choice: 1, at: 12345 });
+  assert.equal(t.last().answer.state, 'sent');
+  assert.equal(t.last().correct, null);
+  assert.equal(t.last().isCorrect, null);
+  for (const s of t.states) {
+    assert.equal(s.correct ?? null, null);
+    assert.ok(!JSON.stringify(s.slide ?? null).includes('correct'));
+  }
+});
+
+test('クイズ: 正解の表示のあと correct と isCorrect が入り、もう送れない・選べない', async () => {
+  const t = setup({ deck: quizDeck() });
+  await t.ready();
+  await t.client.start();
+  await toS2(t);
+  t.client.select(1);
+  await t.client.submit();
+  await reveal(t, 's2', { counts: [0, 1, 0], total: 1, correct: 2 });
+  assert.equal(t.last().poll.status, 'closed');
+  assert.deepEqual(t.last().results, { counts: [0, 1, 0], total: 1 });
+  assert.equal(t.last().correct, 2);
+  assert.equal(t.last().isCorrect, false);
+  const n = t.answerSets.length;
+  t.client.select(2);
+  assert.equal(t.last().selected, 1);
+  await t.client.submit();
+  assert.equal(t.answerSets.length, n);
+  assert.equal(t.answers().s2.stu1.choice, 1);
+  // かくすと消える
+  await t.net.update(PUB, { 'polls/s2/resultsVisible': false, 'results/s2': null });
+  assert.equal(t.last().correct, null);
+  assert.equal(t.last().isCorrect, null);
+});
+
+test('クイズ: 正解なら isCorrect は true、答えていなければ null', async () => {
+  const a = setup({ deck: quizDeck() });
+  await a.ready();
+  await a.client.start();
+  await toS2(a);
+  a.client.select(2);
+  await a.client.submit();
+  await reveal(a, 's2', { counts: [0, 0, 1], total: 1, correct: 2 });
+  assert.equal(a.last().correct, 2);
+  assert.equal(a.last().isCorrect, true);
+
+  const b = setup({ deck: quizDeck() });
+  await b.ready();
+  await b.client.start();
+  await toS2(b);
+  b.client.select(0); // 選んだが送っていない
+  await reveal(b, 's2', { counts: [0, 0, 0], total: 0, correct: 2 });
+  assert.equal(b.last().correct, 2);
+  assert.equal(b.last().isCorrect, null);
+});
+
+test('クイズ: 正しくない correct（範囲外・文字列）は null として扱う', async () => {
+  const t = setup({ deck: quizDeck() });
+  await t.ready();
+  await t.client.start();
+  await toS2(t);
+  await reveal(t, 's2', { counts: [0, 0, 0], total: 0, correct: 3 });
+  assert.equal(t.last().correct, null);
+  await t.net.update(PUB, { 'results/s2': { counts: [0, 0, 0], total: 0, correct: '1' } });
+  assert.equal(t.last().correct, null);
+});
+
+test('クイズ: 送信中に正解が表示されて拒否されたら、もう送り直さない', async () => {
+  const t = setup({ deck: quizDeck() });
+  await t.ready();
+  await t.client.start();
+  await toS2(t);
+  t.client.select(0);
+  t.holdUpdates(); // 締切は画面にまだ届かない
+  await reveal(t, 's2', { counts: [0, 0, 0], total: 0, correct: 2 });
+  await t.client.submit();
+  assert.equal(t.last().answer.state, 'rejected');
+  assert.equal(t.answers(), null);
+  t.releaseUpdates();
+  await new Promise((r) => setImmediate(r));
+  assert.equal(t.answers(), null);
+  assert.equal(t.last().isCorrect, null);
+});
+
+test('評価: 1〜5（choice 0〜4）を選んで送れる。5 以上は選べない', async () => {
+  const t = setup({ deck: quizDeck() });
+  await t.ready();
+  await t.client.start();
+  await toS2(t);
+  await t.teacher(nextPatch); // s3 評価
+  assert.equal(t.last().kind, 'rating');
+  assert.equal(t.last().slide.lowLabel, 'ふまん');
+  t.client.select(5);
+  assert.equal(t.last().selected, null);
+  t.client.select(4);
+  await t.client.submit();
+  assert.deepEqual(t.answers().s3.stu1, { choice: 4, at: 12345 });
+  assert.equal(t.last().answer.state, 'sent');
+  t.client.select(0);
+  await t.client.submit();
+  assert.equal(t.answers().s3.stu1.choice, 0);
+  assert.equal(t.last().correct, null);
+  assert.equal(t.last().isCorrect, null);
+  await t.net.update(PUB, { 'polls/s3/resultsVisible': true, 'results/s3': { counts: [1, 0, 0, 0, 0], total: 1 } });
+  assert.deepEqual(t.last().results, { counts: [1, 0, 0, 0, 0], total: 1 });
+  assert.equal(t.last().correct, null);
+});
+
+test('アンケートは kind が null のまま、correct・isCorrect も null', async () => {
+  const t = setup();
+  await t.ready();
+  await t.client.start();
+  await toS2(t);
+  assert.equal(t.last().kind, null);
+  await t.net.update(PUB, { 'polls/s2/resultsVisible': true, 'results/s2': { counts: [1, 0], total: 1, correct: 0 } });
+  assert.equal(t.last().correct, null);
+  assert.equal(t.last().isCorrect, null);
+});

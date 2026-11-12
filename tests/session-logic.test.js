@@ -4,6 +4,7 @@ import { createDeck, createSlide, addSlide } from '../js/model.js';
 import {
   buildSession, goToPatch, nextPatch, prevPatch, pausePatch, resultsVisiblePatch,
   tally, percent, applyPatch, closeAllPatch, endPatch, buildHistory,
+  average, correctRate,
 } from '../js/session-logic.js';
 
 // 3 枚の教材: s1 資料、s2 アンケート(2択・manual)、s3 アンケート(3択・live)
@@ -467,4 +468,135 @@ test('buildHistory: cloud は words・hiddenWords・total を持ち、uid も鍵
   assert.equal(json.includes('"key"'), false);
   const h2 = buildHistory(session, inbox, 9000);
   assert.deepEqual(h2.questions[0].hiddenWords, []);
+});
+
+// ---- クイズ（quiz）と 5 段階評価（rating）----
+
+// s1 資料、q クイズ（正解は 2 つ目）、r 評価（manual）、rl 評価（live）、p アンケート（manual）
+function quizRatingDeck() {
+  let d = createDeck('クイズの教材', 1000);
+  d = addSlide(d, createSlide('content'), 's1');
+  d = addSlide(d, { ...createSlide('quiz'), question: '1+1 は？', options: ['1', '2', '3'], correct: 1 }, 'q');
+  d = addSlide(d, { ...createSlide('rating'), question: '満足度は？', lowLabel: 'ふまん', highLabel: 'まんぞく' }, 'r');
+  d = addSlide(d, { ...createSlide('rating'), question: 'むずかしさは？', resultMode: 'live' }, 'rl');
+  d = addSlide(d, { ...createSlide('poll'), question: '好きな色は？', options: ['赤', '青'], resultMode: 'manual' }, 'p');
+  return d;
+}
+
+test('buildSession: クイズの写しに correct が無く、正解は host.quiz にだけある', () => {
+  const deck = quizRatingDeck();
+  const s = buildSession(deck, 'deck1', 'owner1', 5000);
+  assert.ok(!JSON.stringify(s.deck).includes('"correct"'));
+  assert.ok(!JSON.stringify(s.pub).includes('"correct"'));
+  assert.deepEqual(s.deck.slides.q, { type: 'quiz', question: '1+1 は？', options: ['1', '2', '3'] });
+  assert.deepEqual(s.host, { quiz: { q: 1 } });
+  assert.deepEqual(s.pub.polls.q, { status: 'waiting', resultsVisible: false });
+  // 元の教材は書きかえない
+  assert.equal(deck.slides.q.correct, 1);
+});
+
+test('buildSession: 評価の写しに options 1〜5、resultsVisible は resultMode による', () => {
+  const s = buildSession(quizRatingDeck(), 'deck1', 'owner1', 5000);
+  assert.deepEqual(s.deck.slides.r.options, ['1', '2', '3', '4', '5']);
+  assert.equal(s.deck.slides.r.lowLabel, 'ふまん');
+  assert.equal(s.deck.slides.r.highLabel, 'まんぞく');
+  assert.deepEqual(s.pub.polls.r, { status: 'waiting', resultsVisible: false });
+  assert.deepEqual(s.pub.polls.rl, { status: 'waiting', resultsVisible: true });
+  // アンケートは今までどおり
+  assert.deepEqual(s.pub.polls.p, { status: 'waiting', resultsVisible: false });
+  assert.deepEqual(s.deck.slides.p, quizRatingDeck().slides.p);
+});
+
+test('buildSession: クイズが無い教材では host を足さない', () => {
+  const s = buildSession(makeDeck(), 'deck1', 'owner1', 5000);
+  assert.equal(Object.hasOwn(s, 'host'), false);
+});
+
+test('buildSession: 正しくない correct は 0 として host.quiz に入れる', () => {
+  let d = createDeck('x', 1);
+  d = addSlide(d, { type: 'quiz', question: 'Q', options: ['a', 'b'], correct: 5 }, 'q');
+  const s = buildSession(d, 'deck1', 'owner1', 5000);
+  assert.deepEqual(s.host, { quiz: { q: 0 } });
+  assert.ok(!JSON.stringify(s.deck).includes('correct'));
+});
+
+test('resultsVisiblePatch: closeOnShow は表示のときだけ、締切でなければ status: closed を足す', () => {
+  const pub = (status) => ({ polls: { q: { status, resultsVisible: false } } });
+  assert.deepEqual(resultsVisiblePatch(pub('open'), 'q', true, { closeOnShow: true }), {
+    'polls/q/resultsVisible': true, 'polls/q/status': 'closed',
+  });
+  assert.deepEqual(resultsVisiblePatch(pub('paused'), 'q', true, { closeOnShow: true }), {
+    'polls/q/resultsVisible': true, 'polls/q/status': 'closed',
+  });
+  // すでに締切なら status は入れない
+  assert.deepEqual(resultsVisiblePatch(pub('closed'), 'q', true, { closeOnShow: true }), { 'polls/q/resultsVisible': true });
+  // かくすときは status に触れない
+  assert.deepEqual(resultsVisiblePatch(pub('open'), 'q', false, { closeOnShow: true }), {
+    'polls/q/resultsVisible': false, 'results/q': null,
+  });
+  // 待機中は今までどおり何もしない
+  assert.equal(resultsVisiblePatch(pub('waiting'), 'q', true, { closeOnShow: true }), null);
+  // 第 4 引数なし・closeOnShow が偽は今までどおり
+  assert.deepEqual(resultsVisiblePatch(pub('open'), 'q', true), { 'polls/q/resultsVisible': true });
+  assert.deepEqual(resultsVisiblePatch(pub('open'), 'q', true, {}), { 'polls/q/resultsVisible': true });
+});
+
+test('average: 1〜5 点の平均を小数 1 けたに丸める。0 人は null', () => {
+  assert.equal(average([0, 0, 0, 0, 0]), null);
+  assert.equal(average([]), null);
+  assert.equal(average([1, 0, 0, 0, 1]), 3);
+  assert.equal(average([0, 1, 2, 0, 0]), 2.7);
+  assert.equal(average([0, 0, 0, 0, 3]), 5);
+  // 数でない・負の値は 0 として扱う
+  assert.equal(average([1, 'x', -2, null, 1]), 3);
+});
+
+test('correctRate: 正解の人数・回答の人数・割合（0 人は null）', () => {
+  assert.deepEqual(correctRate([3, 5, 0], 1), { correctCount: 5, total: 8, percent: 63 });
+  assert.deepEqual(correctRate([0, 0, 0], 1), { correctCount: 0, total: 0, percent: null });
+  assert.deepEqual(correctRate([2, 2], 0), { correctCount: 2, total: 4, percent: 50 });
+  // 正解が分からない・範囲外なら正解の人数は 0
+  assert.deepEqual(correctRate([2, 2], null), { correctCount: 0, total: 4, percent: 0 });
+  assert.deepEqual(correctRate([2, 2], 5), { correctCount: 0, total: 4, percent: 0 });
+});
+
+test('buildHistory: クイズは正解と正解の人数、評価は 1〜5 の人数と平均。uid は入らない', () => {
+  const deck = quizRatingDeck();
+  const session = buildSession(deck, 'deck1', 'owner1', 5000);
+  const inbox = {
+    participants: { uidA: 1, uidB: 2, uidC: 3 },
+    answers: {
+      q: { uidA: { choice: 1, at: 1 }, uidB: { choice: 0, at: 2 }, uidC: { choice: 1, at: 3 }, uidD: { choice: 7, at: 4 } },
+      r: { uidA: { choice: 4, at: 1 }, uidB: { choice: 1, at: 2 }, uidC: { choice: 2, at: 3 }, uidD: { choice: 5, at: 4 } },
+    },
+  };
+  const h = buildHistory(session, inbox, 9000, undefined, session.host.quiz);
+  const q = h.questions.find((x) => x.slideId === 'q');
+  assert.deepEqual(q, {
+    slideId: 'q', type: 'quiz', question: '1+1 は？', options: ['1', '2', '3'],
+    counts: [1, 2, 0], total: 3, correct: 1, correctCount: 2,
+  });
+  const r = h.questions.find((x) => x.slideId === 'r');
+  assert.deepEqual(r, {
+    slideId: 'r', type: 'rating', question: '満足度は？', lowLabel: 'ふまん', highLabel: 'まんぞく',
+    counts: [0, 1, 1, 0, 1], total: 3, average: 3.3,
+  });
+  const rl = h.questions.find((x) => x.slideId === 'rl');
+  assert.deepEqual(rl.counts, [0, 0, 0, 0, 0]);
+  assert.equal(rl.total, 0);
+  assert.equal(rl.average, null);
+  assert.equal(h.questions.find((x) => x.slideId === 'p').type, 'poll');
+  assert.ok(!JSON.stringify(h).includes('uid'));
+});
+
+test('buildHistory: クイズの正解が渡されなければ correct は null、correctCount は 0', () => {
+  const session = buildSession(quizRatingDeck(), 'deck1', 'owner1', 5000);
+  const inbox = { answers: { q: { u1: { choice: 1, at: 1 } } } };
+  const q = buildHistory(session, inbox, 9000).questions.find((x) => x.slideId === 'q');
+  assert.equal(q.correct, null);
+  assert.equal(q.correctCount, 0);
+  assert.equal(q.total, 1);
+  // 範囲外の正解も null
+  const q2 = buildHistory(session, inbox, 9000, {}, { q: 9 }).questions.find((x) => x.slideId === 'q');
+  assert.equal(q2.correct, null);
 });

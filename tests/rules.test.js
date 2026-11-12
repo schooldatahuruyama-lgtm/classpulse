@@ -144,3 +144,21 @@ test('$other は free・cloud で choice を、アンケート・cloud で text 
   assert.ok(text.includes(`${TYPE} === 'free'`));
   assert.ok(!other.includes("'words'"));
 });
+
+// ---- クイズ（quiz）と 5 段階評価（rating）----
+
+test('quiz・rating は規則に名前が無く、アンケートの枝（free でも cloud でもない）で選択肢の実在を確かめる', () => {
+  const raw = read('docs/firebase/rules.json');
+  assert.ok(!raw.includes('quiz'));
+  assert.ok(!raw.includes('rating'));
+  const v = rules().sessions.$sid.inbox.answers.$slideId.$uid['.validate'];
+  const poll = v.split(') || (')[1];
+  assert.ok(poll.includes("child('options').child(newData.child('choice').val() + '').exists()"));
+});
+
+test('host（クイズの正解・かくした回答）には、読み書きを広げる規則が無い（授業の持ち主だけ）', () => {
+  const s = rules().sessions.$sid;
+  assert.equal(s.host, undefined);
+  assert.equal(s.deck['.write'], undefined);
+  assert.equal(s.pub['.write'], undefined);
+});

@@ -10,6 +10,8 @@ export const CONFIG = {
   free: { maxLength: 200 },
   // ワードクラウド: 1 人の言葉の数、1 つの言葉の長さ、発表画面に出す言葉の数
   cloud: { maxWords: 3, maxLength: 20, maxShown: 60 },
+  // 5 段階評価: 段階の数、両はしの言葉の長さ
+  rating: { steps: 5, labelMaxLength: 20 },
   idLength: 12,
   sessionIdLength: 22,
   tokenRefreshMarginMs: 300000,
