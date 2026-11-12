@@ -23,6 +23,11 @@
         ".write": "auth != null && root.child('teacherList').child(auth.uid).val() === true && (data.exists() ? data.child('owner').val() === auth.uid : newData.child('owner').val() === auth.uid)",
         "pub": {
           ".read": "auth != null",
+          "polls": {
+            "$slideId": {
+              "status": { ".validate": "data.val() !== 'closed' || newData.val() === 'closed'" }
+            }
+          },
           "results": {
             "$slideId": {
               ".validate": "newData.parent().parent().child('polls').child($slideId).child('resultsVisible').val() === true"

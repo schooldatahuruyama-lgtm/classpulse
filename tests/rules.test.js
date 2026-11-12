@@ -162,3 +162,9 @@ test('host（クイズの正解・かくした回答）には、読み書きを�
   assert.equal(s.deck['.write'], undefined);
   assert.equal(s.pub['.write'], undefined);
 });
+
+test('規則: 締め切った質問（closed）は、ほかの状態に戻せない', () => {
+  const rules = JSON.parse(readFileSync(new URL('../docs/firebase/rules.json', import.meta.url), 'utf8'));
+  const v = rules.rules.sessions.$sid.pub.polls.$slideId.status['.validate'];
+  assert.equal(v, "data.val() !== 'closed' || newData.val() === 'closed'");
+});
