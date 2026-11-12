@@ -8,6 +8,8 @@ export const CONFIG = {
   resultsThrottleMs: 500,
   poll: { minOptions: 2, maxOptions: 6 },
   free: { maxLength: 200 },
+  // ワードクラウド: 1 人の言葉の数、1 つの言葉の長さ、発表画面に出す言葉の数
+  cloud: { maxWords: 3, maxLength: 20, maxShown: 60 },
   idLength: 12,
   sessionIdLength: 22,
   tokenRefreshMarginMs: 300000,

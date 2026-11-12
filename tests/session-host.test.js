@@ -1223,3 +1223,243 @@ test('自由記述: 別のタブが授業を終えたら、storage のキーを�
   c.host.stop();
   other.host.stop();
 });
+
+// ---- ワードクラウド ----
+import { hiddenKey } from '../js/session-logic.js';
+
+// s1 資料、s2 ワードクラウド、s3 自由記述、s4 アンケート（manual）
+function cloudDeck() {
+  let d = createDeck('雲の教材', 1000);
+  d = addSlide(d, createSlide('content'), 's1');
+  d = addSlide(d, { ...createSlide('cloud'), question: '好きな動物は？' }, 's2');
+  d = addSlide(d, { ...createSlide('free'), question: '感想は？' }, 's3');
+  d = addSlide(d, { ...createSlide('poll'), question: '好きな色は？', options: ['赤', '青'], resultMode: 'manual' }, 's4');
+  return d;
+}
+
+const say = (env, sid, slideId, uid, words, at = 1) =>
+  env.net.set(`sessions/${sid}/inbox/answers/${slideId}/${uid}`, { words, at });
+
+// s2（ワードクラウド・受付中）にいる host を開く
+async function openCloud(env, opts) {
+  const sid = await begin(env, cloudDeck());
+  const h = await openHost(env, sid, opts);
+  await h.host.next(); await h.host.next();
+  return { sid, ...h };
+}
+
+const cloudWords = (s) => (s.cloudItems || []).map((x) => `${x.word}:${x.count}`);
+
+test('ワードクラウド: 結果を表示する前は、状態に言葉が 1 つも無い（人数だけ）', async () => {
+  const env = setup();
+  const { sid, host, states, last } = await openCloud(env);
+  await say(env, sid, 's2', 'u1', ['ひみつA', 'ひみつB'], 10);
+  await say(env, sid, 's2', 'u2', ['ひみつA'], 20);
+  await say(env, sid, 's2', 'u2', ['ひみつC'], 30); // 書き直し
+  await env.clock.advance(5000);
+  assert.equal(last().kind, 'cloud');
+  assert.equal(last().answerCount, 2);
+  assert.equal(last().cloudItems, null);
+  assert.equal(last().cloudMore, null);
+  assert.equal(last().freeItems, null);
+  for (const s of states) assert.ok(!JSON.stringify(s).includes('ひみつ'), '状態に言葉が入っている');
+  host.stop();
+});
+
+test('ワードクラウド: 表示で cloudItems（人数の多い順）、結果をかくすと消える', async () => {
+  const env = setup();
+  const { sid, host, states, last } = await openCloud(env);
+  await say(env, sid, 's2', 'u1', ['ねこ', 'いぬ'], 10);
+  await say(env, sid, 's2', 'u2', ['ﾈｺ'], 20);
+  await say(env, sid, 's2', 'u3', ['ネコ', 'ねこ'], 30);
+  await host.setResultsVisible(true, 's2');
+  // ねこ 2 人・ネコ 2 人（ﾈｺ と同じ）・いぬ 1 人。同じ人数なら鍵の順
+  assert.deepEqual(last().cloudItems, [
+    ...[{ key: hiddenKey('ねこ'), word: 'ねこ', count: 2 }, { key: hiddenKey('ネコ'), word: 'ﾈｺ', count: 2 }]
+      .sort((a, b) => (a.key < b.key ? -1 : 1)),
+    { key: hiddenKey('いぬ'), word: 'いぬ', count: 1 },
+  ]);
+  assert.equal(last().cloudMore, 0);
+  assert.equal(last().answerCount, 3);
+  assert.equal(sessionOf(env, sid).pub.polls.s2.resultsVisible, true);
+  await host.setResultsVisible(false, 's2');
+  assert.equal(last().cloudItems, null);
+  assert.equal(last().cloudMore, null);
+  const n = states.length;
+  await say(env, sid, 's2', 'u4', ['ひみつ'], 40);
+  await env.clock.advance(5000);
+  for (const s of states.slice(n)) assert.ok(!JSON.stringify(s).includes('ひみつ'));
+  assert.equal(last().answerCount, 4);
+  host.stop();
+});
+
+test('ワードクラウド: 表示中の新しい回答は 500ms 以内の間隔でまとめて反映される', async () => {
+  const env = setup();
+  const { sid, host, last } = await openCloud(env);
+  await say(env, sid, 's2', 'u1', ['一'], 10);
+  await host.setResultsVisible(true, 's2');
+  assert.deepEqual(cloudWords(last()), ['一:1']);
+  await env.clock.advance(100);
+  await say(env, sid, 's2', 'u2', ['一'], 20);
+  assert.deepEqual(cloudWords(last()), ['一:1']); // まだ反映しない
+  assert.equal(last().answerCount, 2); // 人数はすぐ変わる
+  await env.clock.advance(CONFIG.resultsThrottleMs - 100);
+  assert.deepEqual(cloudWords(last()), ['一:2']);
+  await env.clock.advance(5000);
+  assert.equal(env.clock.pending(), 0);
+  host.stop();
+});
+
+test('ワードクラウド: hide で言葉が消え、人数は変わらない。あとから同じ言葉（全角・半角・大文字）が届いても出ない', async () => {
+  const env = setup();
+  const { sid, host, last } = await openCloud(env);
+  await say(env, sid, 's2', 'u1', ['よい', 'Bad'], 10);
+  await say(env, sid, 's2', 'u2', ['よい'], 20);
+  await host.setResultsVisible(true, 's2');
+  const key = last().cloudItems.find((x) => x.word === 'Bad').key;
+  assert.equal(key, hiddenKey('Bad'));
+  const p = host.hide('s2', key);
+  assert.deepEqual(cloudWords(last()), ['よい:2']); // すぐに消える
+  assert.equal(last().answerCount, 2);
+  await p;
+  assert.equal(last().hiddenUnsaved, false);
+  assert.equal(sessionOf(env, sid).host.hidden.s2[key], true);
+  await say(env, sid, 's2', 'u3', ['ＢＡＤ'], 30);
+  await say(env, sid, 's2', 'u4', ['bad', 'いい'], 40);
+  await env.clock.advance(5000);
+  assert.deepEqual(cloudWords(last()), ['よい:2', 'いい:1']);
+  assert.equal(last().answerCount, 4);
+  host.stop();
+});
+
+test('ワードクラウド: 作り直した host（再読み込み）でも、かくした言葉が出ない', async () => {
+  const env = setup();
+  const a = await openCloud(env);
+  const { sid } = a;
+  await say(env, sid, 's2', 'u1', ['よい', 'Warui'], 10);
+  await a.host.setResultsVisible(true, 's2');
+  await a.host.hide('s2', hiddenKey('Warui'));
+  await a.host.stop();
+  const b = await openHost(env, sid);
+  assert.equal(b.last().kind, 'cloud');
+  assert.deepEqual(cloudWords(b.last()), ['よい:1']);
+  await say(env, sid, 's2', 'u2', ['ｗａｒｕｉ'], 20);
+  await env.clock.advance(5000);
+  assert.deepEqual(cloudWords(b.last()), ['よい:1']);
+  assert.equal(b.last().answerCount, 2);
+  b.host.stop();
+});
+
+test('ワードクラウド: 書けていない hide も、同じ storage で作り直した host で出ず、再送されて書ける', async () => {
+  const env = setup();
+  const storage = memStorage();
+  const a = await openCloud(env, { storage });
+  const { sid } = a;
+  await say(env, sid, 's2', 'u1', ['よい', 'a.b/c'], 10);
+  await a.host.setResultsVisible(true, 's2');
+  let fail = true;
+  env.ctl.extraDeny = (op, path) => fail && op === 'set' && path.includes('/host/hidden/');
+  const key = hiddenKey('a.b/c');
+  a.host.hide('s2', key).catch(() => {});
+  await settle();
+  assert.equal(a.last().hiddenUnsaved, true);
+  assert.deepEqual(JSON.parse(storage.getItem(storeKey(sid))), { s2: { [key]: true } });
+  await a.host.stop();
+  const b = await openHost(env, sid, { storage });
+  assert.deepEqual(cloudWords(b.last()), ['よい:1']);
+  fail = false;
+  await env.clock.advance(CONFIG.reconnectDelayMs);
+  assert.equal(b.last().hiddenUnsaved, false);
+  assert.equal(sessionOf(env, sid).host.hidden.s2[key], true);
+  b.host.stop();
+});
+
+test('ワードクラウド: 61 語あると cloudItems は 60 個で cloudMore は 1。かくすと残りが出る', async () => {
+  const env = setup();
+  const { sid, host, last } = await openCloud(env);
+  // w00 は 3 人、w01 は 2 人、ほかは 1 人
+  for (let i = 0; i < 61; i += 3) {
+    await say(env, sid, 's2', `u${i}`, [i, i + 1, i + 2].filter((n) => n < 61).map((n) => `w${String(n).padStart(2, '0')}`), i);
+  }
+  await say(env, sid, 's2', 'x1', ['w00', 'w01'], 100);
+  await say(env, sid, 's2', 'x2', ['w00'], 101);
+  await host.setResultsVisible(true, 's2');
+  assert.equal(last().cloudItems.length, CONFIG.cloud.maxShown);
+  assert.equal(last().cloudMore, 1);
+  assert.deepEqual(last().cloudItems.slice(0, 2).map((x) => `${x.word}:${x.count}`), ['w00:3', 'w01:2']);
+  await host.hide('s2', hiddenKey('w00'));
+  assert.equal(last().cloudItems.length, 60);
+  assert.equal(last().cloudMore, 0);
+  assert.equal(last().cloudItems[0].word, 'w01');
+  host.stop();
+});
+
+test('ワードクラウドでは pub/results に何も書かず、pub に言葉が無い', async () => {
+  const env = setup();
+  const { sid, host } = await openCloud(env);
+  await say(env, sid, 's2', 'u1', ['ことば'], 10);
+  await host.setResultsVisible(true, 's2');
+  await env.clock.advance(1000);
+  await say(env, sid, 's2', 'u2', ['ことば2'], 20);
+  await env.clock.advance(1000);
+  await host.setResultsVisible(false, 's2');
+  await host.setResultsVisible(true, 's2');
+  await host.next(); // s3 へ（s2 は締切）
+  await env.clock.advance(1000);
+  const touches = env.updates.some((u) => Object.keys(u.patch).some((k) => k === 'results/s2' || k.startsWith('results/s2/')));
+  assert.equal(touches, false);
+  assert.equal(sessionOf(env, sid).pub.results, undefined);
+  for (const u of env.updates) assert.ok(!JSON.stringify(u.patch).includes('ことば'));
+  assert.ok(!JSON.stringify(sessionOf(env, sid).pub).includes('ことば'));
+  host.stop();
+});
+
+test('ワードクラウド: end() の履歴で hiddenWords に分かれ、uid も鍵も無く、後片づけのあと host が無い', async () => {
+  const env = setup();
+  const { sid, host, last } = await openCloud(env);
+  await say(env, sid, 's2', 'uidA', ['ねこ', 'わるい'], 10);
+  await say(env, sid, 's2', 'uidB', ['ねこ'], 20);
+  await say(env, sid, 's2', 'uidC', ['いぬ', 'ﾜﾙｲ'], 30);
+  await host.setResultsVisible(true, 's2');
+  await host.hide('s2', hiddenKey('わるい'));
+  env.ctl.extraDeny = (op, path) => op === 'set' && path.includes('/host/hidden/');
+  host.hide('s2', hiddenKey('ﾜﾙｲ')).catch(() => {}); // まだ書けていないもの
+  await settle();
+  assert.equal(last().hiddenUnsaved, true);
+  env.ctl.extraDeny = () => false;
+  await host.end();
+  const dump = env.net.dump();
+  const hist = dump.teachers[UID].history[sid];
+  const q = hist.questions.find((x) => x.slideId === 's2');
+  assert.equal(q.type, 'cloud');
+  assert.equal(q.question, '好きな動物は？');
+  assert.deepEqual(q.words, [{ word: 'ねこ', count: 2 }, { word: 'いぬ', count: 1 }]);
+  assert.deepEqual(
+    [...q.hiddenWords].sort((a, b) => (a.word < b.word ? -1 : 1)),
+    [{ word: 'わるい', count: 1 }, { word: 'ﾜﾙｲ', count: 1 }].sort((a, b) => (a.word < b.word ? -1 : 1)),
+  );
+  assert.equal(q.total, 3);
+  const json = JSON.stringify(hist);
+  assert.ok(!json.includes('uid'));
+  assert.ok(!json.includes(hiddenKey('わるい')));
+  assert.equal(dump.sessions[sid].host, undefined);
+  assert.equal(dump.sessions[sid].inbox, undefined);
+  assert.equal(last().phase, 'ended');
+  host.stop();
+});
+
+test('ワードクラウド: hide は正しくない鍵・ワードクラウドでないスライドを拒む。自由記述の hide は今までどおり', async () => {
+  const env = setup();
+  const { sid, host, last } = await openCloud(env);
+  await assert.rejects(host.hide('s2', 'a.b'));
+  await assert.rejects(host.hide('s2', ''));
+  await assert.rejects(host.hide('s4', hiddenKey('x')));
+  await host.next(); // s3 自由記述
+  await write(env, sid, 's3', 'u1', 'ぶん', 10);
+  await host.setResultsVisible(true, 's3');
+  assert.equal(last().kind, 'free');
+  assert.equal(last().cloudItems, null);
+  await host.hide('s3', 'u1');
+  assert.deepEqual(last().freeItems, []);
+  host.stop();
+});

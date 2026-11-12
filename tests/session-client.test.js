@@ -1041,3 +1041,238 @@ test('書きかけの文章: 終わった授業に入ると消える', async () 
   assert.equal(t.last().phase, 'ended');
   assert.equal(storage.getItem(`classpulse:draft:${SID}:stu1`), null);
 });
+
+// ---- ワードクラウド ----
+
+// 3 枚の教材: s1 資料、s2 ワードクラウド、s3 アンケート(2択・manual)
+function makeCloudDeck() {
+  let d = createDeck('雲の教材', 1000);
+  d = addSlide(d, createSlide('content'), 's1');
+  d = addSlide(d, { ...createSlide('cloud'), question: '好きな動物は？' }, 's2');
+  d = addSlide(d, { ...createSlide('poll'), question: '好きな色は？', options: ['赤', '青'], resultMode: 'manual' }, 's3');
+  return d;
+}
+
+async function cloudAtS2(opts = {}) {
+  const t = setup({ ...opts, deck: makeCloudDeck() });
+  await t.ready();
+  await t.client.start();
+  await toS2(t);
+  return t;
+}
+
+test('ワードクラウド: 言葉を送ると整えて送り、sent と words になる', async () => {
+  const t = await cloudAtS2();
+  assert.equal(t.last().kind, 'cloud');
+  assert.equal(t.last().words, null);
+  assert.equal(t.last().text, null);
+  await t.client.submitWords(['  ねこ ', '', 'ﾈｺ', 'いぬ']);
+  assert.deepEqual(t.answers().s2.stu1, { words: ['ねこ', 'ﾈｺ', 'いぬ'], at: 12345 });
+  assert.equal(t.last().kind, 'cloud');
+  assert.deepEqual(t.last().words, ['ねこ', 'ﾈｺ', 'いぬ']);
+  assert.deepEqual(t.last().answer, { words: ['ねこ', 'ﾈｺ', 'いぬ'], state: 'sent' });
+  assert.equal(t.last().selected, null);
+  assert.equal(t.last().text, null);
+  assert.equal(JSON.stringify(t.last()).includes('stu1'), false);
+});
+
+test('ワードクラウド: 送信済みと同じ言葉（中身が同じ）なら送らない。違えば送り直して上書き', async () => {
+  const t = await cloudAtS2();
+  await t.client.submitWords(['ねこ', 'いぬ']);
+  await t.client.submitWords([' ねこ', 'いぬ ', '']);
+  await t.client.submitWords(['ねこ', 'いぬ', 'ねこ']);
+  assert.equal(t.answerSets.length, 1);
+  await t.client.submitWords(['いぬ', 'ねこ']); // 並びがちがう
+  assert.equal(t.answerSets.length, 2);
+  await t.client.submitWords(['とり']);
+  assert.equal(t.answerSets.length, 3);
+  assert.deepEqual(Object.keys(t.answers().s2), ['stu1']);
+  assert.deepEqual(t.answers().s2.stu1.words, ['とり']);
+  assert.deepEqual(t.last().words, ['とり']);
+});
+
+test('ワードクラウド: 4 個以上・21 文字は送る前に落ち、全部だめなら送らない', async () => {
+  const t = await cloudAtS2();
+  await t.client.submitWords(['   ', 'あ'.repeat(21), 5]);
+  await t.client.submitWords([]);
+  await t.client.submitWords('ねこ');
+  await t.client.submitWords(null);
+  assert.equal(t.answerSets.length, 0);
+  assert.equal(t.last().answer, null);
+  await t.client.submitWords(['a', 'b', 'c', 'd', 'あ'.repeat(21)]);
+  assert.deepEqual(t.answers().s2.stu1.words, ['a', 'b', 'c']);
+  await t.client.submitWords(['あ'.repeat(21), 'あ'.repeat(20)]);
+  assert.deepEqual(t.answers().s2.stu1.words, ['あ'.repeat(20)]);
+});
+
+test('ワードクラウド: 送信中に別の言葉へ書き直すと、最後の言葉がサーバーと状態に残る', async () => {
+  const t = await cloudAtS2();
+  const gates = [];
+  const origSet = t.net.set;
+  t.net.set = async (path, value) => {
+    if (path.includes('/inbox/answers/')) await new Promise((r) => gates.push(r));
+    return origSet(path, value);
+  };
+  const p1 = t.client.submitWords(['はじめ']);
+  await settle();
+  const p2 = t.client.submitWords(['つぎ']);
+  const p3 = t.client.submitWords(['さいご', 'です']);
+  assert.deepEqual(t.last().words, ['さいご', 'です']);
+  assert.equal(t.last().answer.state, 'sending');
+  for (let i = 0; i < 6; i++) {
+    await settle();
+    const g = gates.shift();
+    if (g) g();
+  }
+  await Promise.all([p1, p2, p3]);
+  await settle();
+  assert.deepEqual(t.answers().s2.stu1.words, ['さいご', 'です']);
+  assert.deepEqual(t.last().answer, { words: ['さいご', 'です'], state: 'sent' });
+  assert.deepEqual(t.answerSets.map((s) => s.value.words), [['はじめ'], ['さいご', 'です']]);
+});
+
+test('ワードクラウド: 切れている間は queued、つながると最後の言葉だけ送られる', async () => {
+  const t = await cloudAtS2();
+  t.net.setOnline(false);
+  await t.client.submitWords(['まえ']);
+  await t.client.submitWords(['あと']);
+  assert.deepEqual(t.last().answer, { words: ['あと'], state: 'queued' });
+  const n = t.answerSets.length;
+  t.net.setOnline(true);
+  await settle();
+  assert.deepEqual(t.answerSets.slice(n).map((s) => s.value.words), [['あと']]);
+  assert.deepEqual(t.last().answer, { words: ['あと'], state: 'sent' });
+});
+
+test('ワードクラウド: 締切後に届いた送信は rejected、締切・一時停止が分かっていれば送らない', async () => {
+  const t = await cloudAtS2();
+  await t.teacher((pub) => pausePatch(pub, 's2', true));
+  await t.client.submitWords(['ていし']);
+  assert.equal(t.answerSets.length, 0);
+  await t.teacher((pub) => pausePatch(pub, 's2', false));
+  t.holdUpdates();
+  await t.teacher(closeAllPatch);
+  await t.client.submitWords(['おそい']);
+  assert.deepEqual(t.last().answer, { words: ['おそい'], state: 'rejected' });
+  assert.equal(t.answers(), null);
+  t.releaseUpdates();
+  await settle();
+  const n = t.answerSets.length;
+  await t.client.submitWords(['しめきり']);
+  assert.equal(t.answerSets.length, n);
+});
+
+test('アンケート・自由記述で submitWords、ワードクラウドで submitText・submit をしても何もしない', async () => {
+  const t = await cloudAtS2();
+  await t.client.submitText('ぶんしょう');
+  t.client.select(0);
+  await t.client.submit();
+  assert.equal(t.answerSets.length, 0);
+  await t.teacher(nextPatch); // s3 アンケート
+  assert.equal(t.last().kind, null);
+  assert.equal(t.last().words, null);
+  await t.client.submitWords(['ことば']);
+  assert.equal(t.answerSets.length, 0);
+  const f = await freeAtS2();
+  await f.client.submitWords(['ことば']);
+  assert.equal(f.answerSets.length, 0);
+  assert.equal(f.last().words, null);
+});
+
+test('ワードクラウド: 応答が失われ、締切を受けると照合して sent になる（中身で比べる）', async () => {
+  const t = await cloudAtS2();
+  loseFirstResponse(t.net);
+  await t.client.submitWords(['とどいた', 'ことば']);
+  assert.deepEqual(t.last().answer, { words: ['とどいた', 'ことば'], state: 'queued' });
+  await t.teacher(closeAllPatch);
+  await settle();
+  assert.deepEqual(t.last().answer, { words: ['とどいた', 'ことば'], state: 'sent' });
+  assert.deepEqual(t.last().words, ['とどいた', 'ことば']);
+});
+
+test('ワードクラウド: サーバーに自分の別の言葉があれば、照合のあとその言葉で sent', async () => {
+  const t = await cloudAtS2();
+  loseFirstResponse(t.net);
+  await t.client.submitWords(['サーバー']); // 届いたが、端末は queued
+  t.holdUpdates();
+  await t.teacher(closeAllPatch);
+  await t.client.submitWords(['端末']); // 画面は受付中のまま。拒否 → 照合
+  await settle();
+  assert.deepEqual(t.last().answer, { words: ['サーバー'], state: 'sent' });
+  assert.deepEqual(t.answers().s2.stu1.words, ['サーバー']);
+});
+
+test('ワードクラウド: 保留の照合で、データベースの形（0・1 の鍵）の自分の言葉も sent になる', async () => {
+  const storage = fakeStorage();
+  storage.setItem(`classpulse:outbox:${SID}:stu1`, JSON.stringify({ s2: { words: ['端末'], state: 'queued' } }));
+  const t = setup({ storage, deck: makeCloudDeck() });
+  await t.ready();
+  await toS2(t);
+  await t.net.set(`sessions/${SID}/inbox/answers/s2/stu1`, { words: { 0: ' サーバー', 2: 'ことば' }, at: 1 });
+  await t.teacher(closeAllPatch);
+  await t.client.start();
+  await settle();
+  assert.deepEqual(t.last().answer, { words: ['サーバー', 'ことば'], state: 'sent' });
+  assert.deepEqual(t.last().words, ['サーバー', 'ことば']);
+});
+
+test('ワードクラウド: 保存できず failed のとき、retry で最後の言葉を送り直す', async () => {
+  const base = fakeStorage();
+  const storage = { getItem: base.getItem, removeItem: base.removeItem, setItem: () => { throw new Error('容量不足'); } };
+  const t = await cloudAtS2({ storage });
+  t.net.setOnline(false);
+  await t.client.submitWords(['いちど目']);
+  await t.client.submitWords(['さいご']);
+  assert.deepEqual(t.last().answer, { words: ['さいご'], state: 'failed' });
+  t.net.setOnline(true);
+  await settle();
+  await t.client.retry();
+  assert.deepEqual(t.last().answer, { words: ['さいご'], state: 'sent' });
+  assert.deepEqual(t.answers().s2.stu1.words, ['さいご']);
+});
+
+test('ワードクラウド: 古い形の保管（choice・text）がまざっていても読める', async () => {
+  const storage = fakeStorage();
+  storage.setItem(`classpulse:outbox:${SID}:stu1`, JSON.stringify({
+    s2: { words: ['ほかん'], state: 'queued' }, s3: { choice: 1, state: 'sent' }, x: { text: 'まえ', state: 'sent' },
+  }));
+  const t = setup({ storage, deck: makeCloudDeck() });
+  await t.ready();
+  await toS2(t);
+  await t.client.start();
+  await settle();
+  assert.deepEqual(t.last().answer, { words: ['ほかん'], state: 'sent' });
+  assert.deepEqual(t.answers().s2.stu1.words, ['ほかん']);
+});
+
+test('ワードクラウドの書きかけ: 3 つの欄の配列で保存され、作り直した client で読め、終了で消える', async () => {
+  const storage = fakeStorage();
+  const t = await cloudAtS2({ storage });
+  assert.deepEqual(t.client.draft('s2'), ['', '', '']);
+  t.client.setDraft('s2', ['ねこ ', '', 'い']);
+  assert.deepEqual(t.client.draft('s2'), ['ねこ ', '', 'い']);
+  t.client.setDraft('s3', 'ぶんしょう'); // 文字列の書きかけと共存する
+  t.client.stop();
+  const states2 = [];
+  const client2 = createSessionClient({ net: t.net, auth: stubAuth(), storage, sid: SID, onChange: (s) => states2.push(s) });
+  await client2.start();
+  assert.deepEqual(client2.draft('s2'), ['ねこ ', '', 'い']);
+  assert.equal(client2.draft('s3'), 'ぶんしょう');
+  client2.setDraft('s2', ['', '', '']); // 全部空なら消す
+  assert.deepEqual(client2.draft('s2'), ['', '', '']);
+  assert.deepEqual(JSON.parse(storage.getItem(`classpulse:draft:${SID}:stu1`)), { s3: 'ぶんしょう' });
+  client2.setDraft('s2', ['a', 5, 'b', 'c']); // 文字列でないものは空、4 つ目は捨てる
+  assert.deepEqual(client2.draft('s2'), ['a', '', 'b']);
+  await t.teacher(endPatch);
+  assert.equal(storage.getItem(`classpulse:draft:${SID}:stu1`), null);
+  assert.deepEqual(client2.draft('s2'), ['', '', '']);
+  client2.stop();
+});
+
+test('ワードクラウドの書きかけ: 保存された中身がこわれていても 3 つの文字列で返す', async () => {
+  const storage = fakeStorage();
+  storage.setItem(`classpulse:draft:${SID}:stu1`, JSON.stringify({ s2: 'もじれつ', s3: ['x'] }));
+  const t = await cloudAtS2({ storage });
+  assert.deepEqual(t.client.draft('s2'), ['', '', '']);
+  assert.equal(t.client.draft('s3'), ''); // アンケートの所に配列があっても文字列で返す
+});

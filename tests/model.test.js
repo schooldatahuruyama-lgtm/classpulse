@@ -230,3 +230,27 @@ test('validateDeck は free の空の質問文を見つける', () => {
   const ok = deckOf(['a'], { a: { type: 'free', question: '感想は？' } });
   assert.deepEqual(validateDeck(ok), []);
 });
+
+// ---- ワードクラウド（cloud）----
+test('createSlide("cloud") は質問文だけを持つ', () => {
+  assert.deepEqual(createSlide('cloud'), { type: 'cloud', question: '' });
+});
+
+test('normalizeDeck は cloud の余計な項目を落とし、質問文を文字列にする', () => {
+  const d = normalizeDeck({
+    title: 't', order: ['a', 'b'],
+    slides: {
+      a: { type: 'cloud', question: '好きな動物は？', options: ['x'], items: [{}] },
+      b: { type: 'cloud', question: 5 },
+    },
+  });
+  assert.deepEqual(d.slides.a, { type: 'cloud', question: '好きな動物は？' });
+  assert.deepEqual(d.slides.b, { type: 'cloud', question: '' });
+});
+
+test('validateDeck は cloud の空の質問文を見つける', () => {
+  const bad = deckOf(['a'], { a: { type: 'cloud', question: '  ' } });
+  assert.deepEqual(validateDeck(bad), ['1 枚目: 質問文を入れてください。']);
+  const ok = deckOf(['a'], { a: { type: 'cloud', question: '好きな動物は？' } });
+  assert.deepEqual(validateDeck(ok), []);
+});

@@ -229,3 +229,28 @@ test('free の履歴の texts・hiddenTexts は配列に正される', async () 
   assert.deepEqual(qs[1].texts, []);
   assert.deepEqual(qs[1].hiddenTexts, []);
 });
+
+test('cloud の履歴の words・hiddenWords は配列に正され、各要素は { word, count }', async () => {
+  const { net, repo } = setup();
+  await net.set('teachers/u1/history/S1', {
+    title: 'T', endedAt: 2,
+    questions: [
+      {
+        slideId: 'c', type: 'cloud', question: 'Q',
+        words: { 0: { word: 'ねこ', count: 2 }, 2: { word: 'いぬ', count: '1' }, 3: 'へん', 4: { count: 1 } },
+        hiddenWords: [{ word: 'わるい', count: 1 }],
+        total: 3,
+      },
+      { slideId: 'd', type: 'cloud', question: 'R', total: 0 },
+    ],
+  });
+  const qs = (await repo.getHistory('S1')).questions;
+  assert.equal(qs[0].type, 'cloud');
+  assert.equal(qs[0].question, 'Q');
+  assert.deepEqual(qs[0].words, [{ word: 'ねこ', count: 2 }, { word: 'いぬ', count: 0 }]);
+  assert.deepEqual(qs[0].hiddenWords, [{ word: 'わるい', count: 1 }]);
+  assert.equal(qs[0].total, 3);
+  assert.deepEqual(qs[1].words, []);
+  assert.deepEqual(qs[1].hiddenWords, []);
+  assert.equal(qs[1].total, 0);
+});

@@ -91,3 +91,56 @@ test('自由記述の text は空白だけでは通らない（空白以外の�
   // ファイルの中では、バックスラッシュを 2 つ重ねて書く
   assert.ok(raw.includes(String.raw`matches(/\\S/)`));
 });
+
+// ---- ワードクラウド（cloud）----
+const TYPE = "root.child('sessions').child($sid).child('deck').child('slides').child($slideId).child('type').val()";
+
+test('回答の検証は 3 つの場合: free・アンケート（どちらも cloud ではない）・cloud（words と at）', () => {
+  const raw = read('docs/firebase/rules.json');
+  assert.doesNotThrow(() => JSON.parse(raw));
+  const v = rules().sessions.$sid.inbox.answers.$slideId.$uid['.validate'];
+  assert.equal(typeof v, 'string');
+  assert.ok(!v.includes('?'), '三項演算子は使わない');
+  const branches = v.split(') || (');
+  assert.equal(branches.length, 3);
+  const [free, poll, cloud] = branches;
+  assert.ok(free.includes(`${TYPE} === 'free'`));
+  assert.ok(free.includes(`!(${TYPE} === 'cloud')`));
+  assert.ok(free.includes("newData.hasChildren(['text', 'at'])"));
+  assert.ok(poll.includes(`!(${TYPE} === 'free')`));
+  assert.ok(poll.includes(`!(${TYPE} === 'cloud')`));
+  assert.ok(poll.includes("newData.hasChildren(['choice', 'at'])"));
+  assert.ok(cloud.includes(`${TYPE} === 'cloud'`));
+  assert.ok(!cloud.includes(`!(${TYPE} === 'cloud')`));
+  assert.ok(cloud.includes("newData.hasChildren(['words', 'at'])"));
+  assert.ok(cloud.includes("newData.child('at').val() === now"));
+  assert.ok(!cloud.includes("'text'") && !cloud.includes("'choice'"));
+});
+
+test('words は名前つきの子: cloud だけで 0 を必ず持ち、$i は 0・1・2 の 1〜20 文字の空白でない文字列', () => {
+  const raw = read('docs/firebase/rules.json');
+  const w = rules().sessions.$sid.inbox.answers.$slideId.$uid.words;
+  assert.ok(w, 'words の規則がある');
+  assert.equal(w['.validate'], `${TYPE} === 'cloud' && newData.hasChild('0')`);
+  assert.equal(w['.write'], undefined);
+  const i = w.$i['.validate'];
+  assert.ok(i.includes("($i === '0' || $i === '1' || $i === '2')"));
+  assert.ok(!i.includes("'3'"));
+  assert.ok(!i.includes('?'));
+  for (const c of ['newData.isString()', 'newData.val().length >= 1', 'newData.val().length <= 20', String.raw`newData.val().matches(/\S/)`]) {
+    assert.ok(i.includes(c), c);
+  }
+  assert.ok(raw.includes(String.raw`newData.val().matches(/\\S/)`));
+});
+
+test('$other は free・cloud で choice を、アンケート・cloud で text を拒む（words は $other に入らない）', () => {
+  const other = rules().sessions.$sid.inbox.answers.$slideId.$uid.$other['.validate'];
+  assert.ok(!other.includes('?'));
+  const parts = other.split(' || ');
+  const choice = parts.find((p) => p.includes("$other === 'choice'"));
+  const text = parts.find((p) => p.includes("$other === 'text'"));
+  assert.ok(choice.includes(`!(${TYPE} === 'free')`));
+  assert.ok(choice.includes(`!(${TYPE} === 'cloud')`));
+  assert.ok(text.includes(`${TYPE} === 'free'`));
+  assert.ok(!other.includes("'words'"));
+});

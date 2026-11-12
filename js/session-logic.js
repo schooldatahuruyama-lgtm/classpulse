@@ -23,8 +23,8 @@ export function buildSession(deck, deckId, ownerUid, startedAt) {
     const s = deck.slides[id];
     if (s && s.type === 'poll') {
       polls[id] = { status: 'waiting', resultsVisible: s.resultMode === 'live' };
-    } else if (s && s.type === 'free') {
-      // 自由記述は「結果を表示」を押すまで文章を映さない
+    } else if (s && (s.type === 'free' || s.type === 'cloud')) {
+      // 自由記述・ワードクラウドは「結果を表示」を押すまで回答を映さない
       polls[id] = { status: 'waiting', resultsVisible: false };
     }
   }
@@ -181,7 +181,103 @@ export function freeList(answers, hidden) {
   return { items, hiddenItems, total: rows.length };
 }
 
-// hidden は { <slideId>: { <uid>: true } }（省略可）。履歴には uid を入れない
+// ---- ワードクラウド ----
+
+// 対になっていないサロゲート（データベースに書けず、encodeURIComponent が例外を投げる）
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+const LONE_SURROGATES = new RegExp(LONE_SURROGATE.source, 'g');
+
+// 言葉の鍵（同じ言葉かどうかを決める値）。NFKC で全角・半角をそろえ、つづく空白を 1 つにし、小文字にする
+export function wordKey(word) {
+  return String(word).replace(LONE_SURROGATES, '�').normalize('NFKC').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+// 言葉の鍵を、データベースの鍵に使える形にする（. $ # [ ] / と制御文字を含まない）
+function encodeKey(k) {
+  return encodeURIComponent(k).replace(/\./g, '%2E');
+}
+
+// host/hidden/<slideId>/ の下に使う鍵。言葉の鍵が同じなら同じ
+export function hiddenKey(word) {
+  return encodeKey(wordKey(word));
+}
+
+// 配列、またはデータベースの形（{ 0: …, 1: … }）から、添字の順に並べた要素。どちらでもなければ null
+function indexedList(raw) {
+  if (Array.isArray(raw)) return raw;
+  if (raw && typeof raw === 'object') {
+    return Object.keys(raw)
+      .filter((k) => /^(0|[1-9]\d*)$/.test(k))
+      .sort((a, b) => Number(a) - Number(b))
+      .map((k) => raw[k]);
+  }
+  return null;
+}
+
+// 送る言葉の配列（1〜maxWords 個）。各要素は前後の空白を取り、文字列でない・空・maxLength をこえるものは捨てる。
+// 言葉の鍵が同じものは先のものを残す。maxWords 個をこえる分は捨てる。1 つも残らなければ null
+export function normalizeWords(raw) {
+  const list = indexedList(raw);
+  if (!list) return null;
+  const out = [];
+  const seen = new Set();
+  for (const w of list) {
+    if (out.length >= CONFIG.cloud.maxWords) break;
+    if (typeof w !== 'string') continue;
+    const t = w.trim();
+    if (t === '' || t.length > CONFIG.cloud.maxLength || LONE_SURROGATE.test(t)) continue;
+    const k = wordKey(t);
+    if (k === '' || seen.has(k)) continue;
+    seen.add(k);
+    out.push(t);
+  }
+  return out.length ? out : null;
+}
+
+// 言葉の配列どうしが、中身も並びも同じか
+export function sameWords(a, b) {
+  return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((w, i) => w === b[i]);
+}
+
+// ワードクラウドの一覧。answers は inbox.answers[slideId]、hidden は { <hiddenKey>: true }。
+// 言葉ごとに { key（hiddenKey）, word（いちばん多く書かれた形。同じ数なら先に届いた形）, count（書いた人数） }。
+// 並びは count の多い順、同じなら key の順。total は正しい言葉を 1 つ以上送った人数（かくした言葉も含む）
+export function cloudList(answers, hidden) {
+  const hid = hidden && typeof hidden === 'object' ? hidden : {};
+  const rows = [];
+  for (const [uid, a] of Object.entries(answers || {})) {
+    const words = normalizeWords(a && a.words);
+    if (words === null) continue;
+    const at = typeof a.at === 'number' ? a.at : 0;
+    rows.push({ uid, words, at });
+  }
+  // 届いた順（at の古い順、同じなら uid の順）
+  rows.sort((x, y) => (x.at - y.at) || (x.uid < y.uid ? -1 : x.uid > y.uid ? 1 : 0));
+  const groups = new Map(); // 言葉の鍵 → { count, forms: Map(形 → 人数)（届いた順） }
+  for (const { words } of rows) {
+    for (const w of words) { // normalizeWords が 1 人の中の同じ鍵を 1 つにしてある
+      const k = wordKey(w);
+      let g = groups.get(k);
+      if (!g) { g = { count: 0, forms: new Map() }; groups.set(k, g); }
+      g.count += 1;
+      g.forms.set(w, (g.forms.get(w) || 0) + 1);
+    }
+  }
+  const all = [];
+  for (const [k, g] of groups) {
+    let word = '';
+    let best = 0;
+    for (const [w, n] of g.forms) if (n > best) { word = w; best = n; }
+    all.push({ key: encodeKey(k), word, count: g.count });
+  }
+  all.sort((x, y) => (y.count - x.count) || (x.key < y.key ? -1 : x.key > y.key ? 1 : 0));
+  const items = [];
+  const hiddenItems = [];
+  for (const it of all) (hid[it.key] === true ? hiddenItems : items).push(it);
+  return { items, hiddenItems, total: rows.length };
+}
+
+// hidden は { <slideId>: { <uid か hiddenKey>: true } }（省略可）。履歴には uid も鍵も入れない
 export function buildHistory(session, inbox, endedAt, hidden) {
   const deck = session.deck;
   const answers = (inbox && inbox.answers) || {};
@@ -197,6 +293,19 @@ export function buildHistory(session, inbox, endedAt, hidden) {
         question: slide.question || '',
         texts: items.map((x) => x.text),
         hiddenTexts: hiddenItems.map((x) => x.text),
+        total,
+      });
+      continue;
+    }
+    if (slide.type === 'cloud') {
+      const { items, hiddenItems, total } = cloudList(answers[slideId], (hidden || {})[slideId]);
+      const plain = (x) => ({ word: x.word, count: x.count });
+      questions.push({
+        slideId,
+        type: 'cloud',
+        question: slide.question || '',
+        words: items.map(plain),
+        hiddenWords: hiddenItems.map(plain),
         total,
       });
       continue;
