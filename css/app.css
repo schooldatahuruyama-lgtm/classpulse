@@ -70,6 +70,16 @@
 }
 .dash-recent-link:hover { background: var(--c-bg); }
 .dash-recent-title { font-weight: 700; overflow-wrap: anywhere; }
+/* PDF から作る: ボタンを並べる。ファイルを選ぶ入力は見せない（ボタンから開く） */
+.dash-create-actions { display: flex; flex-wrap: wrap; gap: var(--s-1); }
+.dash-pdf-input { display: none; }
+.dash-progress:empty { display: none; }
+.dash-progress { margin-bottom: var(--s-2); }
+.dash-progress-card {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--s-2); flex-wrap: wrap;
+  padding: var(--s-2) var(--s-3); border: 2px solid var(--c-navy); border-radius: var(--r-2);
+  background: var(--c-card); color: var(--c-navy); font-weight: 700;
+}
 
 @media (max-width: 899px) {
   .dash-body { grid-template-columns: 1fr; }

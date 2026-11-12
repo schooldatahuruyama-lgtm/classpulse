@@ -2,6 +2,7 @@
 // 左のナビゲーションとログアウトは先生の骨組み（main.js）が出す。
 import { el, confirmDialog, toast } from '../ui.js';
 import { createDeck, newId } from '../model.js';
+import { buildDeckFromPages, importMessage } from '../pdf-import-logic.js';
 import { formatDateTime } from '../format.js';
 import { routeHash } from '../router.js';
 import { backgroundSaver, useAuth } from './editor/background.js';
@@ -18,7 +19,9 @@ export function mount(root, ctx) {
   let busy = false; // 作成・発表開始・削除の最中は、ほかの操作を受けつけない
   let createdSid = null; // 作ったが、まだ発表の画面へ移れていない授業（作り直さず、これを開き直す）
   let opening = false;
+  let importing = null; // PDF の取込みの最中なら、その中止用の AbortController
   const message = el('div', { class: 'dash-message' });
+  const progressBox = el('div', { class: 'dash-progress', role: 'status', 'aria-live': 'polite' });
   const activeBox = el('div', { class: 'dash-active' });
   const decksBox = el('div', { class: 'dash-decks' });
   const recentBox = el('section', { class: 'dash-recent card', 'aria-labelledby': 'dash-recent-title' });
@@ -33,6 +36,8 @@ export function mount(root, ctx) {
     root.querySelectorAll('button[data-dash-action]').forEach((b) => { b.disabled = v; });
   }
 
+  const MSG_CREATE_FAILED = '作れませんでした。接続を確かめて、もう一度押してください。';
+
   async function create() {
     if (busy) return;
     setBusy(true);
@@ -42,9 +47,87 @@ export function mount(root, ctx) {
       await ctx.repo.saveDeck(id, createDeck(UNTITLED, Date.now()), Date.now());
       if (alive) ctx.navigate('editor', { deckId: id });
     } catch {
-      if (alive) showMessage(el('p', { text: '作れませんでした。接続を確かめて、もう一度押してください。' }));
+      if (alive) showMessage(el('p', { text: MSG_CREATE_FAILED }));
     } finally {
       if (alive) setBusy(false);
+    }
+  }
+
+  // PDF を選ぶ（見えないファイルの入力を使う）
+  const pdfInput = el('input', {
+    type: 'file', accept: 'application/pdf,.pdf', class: 'dash-pdf-input', tabindex: '-1', 'aria-hidden': 'true',
+    onchange: () => {
+      const file = pdfInput.files && pdfInput.files[0];
+      pdfInput.value = ''; // 同じファイルをもう一度選んでも change が起きるように
+      if (file) importFromPdf(file);
+    },
+  });
+
+  function choosePdf() {
+    if (busy) return;
+    pdfInput.click();
+  }
+
+  // 進みぐあいの表示。ac を渡すと「やめる」を出す（ほかのボタンと違い、取込みの最中も押せる）。
+  // ページが進んでも文だけを書きかえる（ボタンを作り直すと、押している最中に消えて押せないことがある）
+  let progressText = null;
+  let progressAc = null;
+  function showProgress(text, ac) {
+    if (progressText && progressAc === ac && progressText.isConnected) {
+      progressText.textContent = text;
+      return;
+    }
+    progressText = el('span', { class: 'dash-progress-text', text });
+    progressAc = ac;
+    progressBox.replaceChildren(el('div', { class: 'dash-progress-card' },
+      progressText,
+      ac ? el('button', { type: 'button', class: 'btn', text: 'やめる', onclick: () => ac.abort() }) : null));
+  }
+
+  // PDF から教材を作る。全ページを画像にしてから 1 回で保存する。やめたとき・失敗したときは教材を作らない
+  async function importFromPdf(file) {
+    if (busy || !alive) return;
+    setBusy(true);
+    message.replaceChildren();
+    const ac = new AbortController();
+    importing = ac;
+    showProgress('PDF を読みこんでいます…', ac);
+    try {
+      let result;
+      try {
+        const { importPdf } = await import('../pdf-import.js');
+        if (!alive || ac.signal.aborted) return;
+        result = await importPdf(file, {
+          signal: ac.signal,
+          onProgress: (done, total) => {
+            if (alive && !ac.signal.aborted) showProgress(`PDF を読みこんでいます… ${done} / ${total} ページ`, ac);
+          },
+        });
+      } catch (e) {
+        if (!alive) return;
+        const text = importMessage(e && e.code ? e : { code: 'broken' });
+        if (text) showMessage(el('p', { text }));
+        else showMessage(el('p', { text: 'PDF の取込みをやめました。教材は作っていません。' }));
+        return;
+      }
+      if (!alive || ac.signal.aborted) return;
+      // ここからは保存。やめられない（保存は 1 回で、途中まで残ることはない）
+      importing = null;
+      showProgress('教材を保存しています…', null);
+      const id = newId();
+      const now = Date.now();
+      try {
+        await ctx.repo.saveDeck(id, buildDeckFromPages(result.title, result.pages, now), now);
+        if (alive) ctx.navigate('editor', { deckId: id });
+      } catch {
+        if (alive) showMessage(el('p', { text: MSG_CREATE_FAILED }));
+      }
+    } finally {
+      if (importing === ac) importing = null;
+      if (alive) {
+        progressBox.replaceChildren();
+        setBusy(false);
+      }
     }
   }
 
@@ -127,7 +210,8 @@ export function mount(root, ctx) {
   }
 
   function deckCard(d) {
-    const act = (label, onclick, cls = 'btn') => el('button', { type: 'button', class: cls, text: label, 'data-dash-action': '', onclick });
+    // 作成・取込みなどの最中に一覧を描き直しても、押せない状態のままにする
+    const act = (label, onclick, cls = 'btn') => el('button', { type: 'button', class: cls, text: label, 'data-dash-action': '', disabled: busy, onclick });
     const title = d.title || UNTITLED;
     return el('li', { class: 'dash-deck card' },
       el('h3', { class: 'dash-deck-title', text: title }),
@@ -211,10 +295,16 @@ export function mount(root, ctx) {
       el('div', {},
         el('h1', { class: 'dash-h1', text: '教材' }),
         email ? el('p', { class: 'small muted', text: `ログイン中: ${email}` }) : null),
-      el('button', { type: 'button', class: 'btn btn-primary dash-create', text: '＋ 新規作成', 'data-dash-action': '', onclick: create })),
-    activeBox, message,
+      el('div', { class: 'dash-create-actions' },
+        el('button', { type: 'button', class: 'btn btn-primary dash-create', text: '＋ 新規作成', 'data-dash-action': '', onclick: create }),
+        el('button', { type: 'button', class: 'btn dash-create', text: 'PDF から作る', 'data-dash-action': '', onclick: choosePdf }),
+        pdfInput)),
+    activeBox, progressBox, message,
     el('div', { class: 'dash-body' }, decksBox, recentBox)));
   decksBox.replaceChildren(el('p', { class: 'loading', text: '読みこんでいます…' }));
   load();
-  return () => { alive = false; };
+  return () => {
+    alive = false;
+    if (importing) importing.abort(); // 画面を離れたら取込みをやめる（教材は作らない）
+  };
 }

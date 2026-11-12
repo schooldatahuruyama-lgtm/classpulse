@@ -79,5 +79,6 @@ export function importMessage(error) {
   if (code === 'password') return 'パスワードの付いた PDF は取り込めません。';
   if (code === 'too-large') return `ファイルが大きすぎます（${Math.floor(CONFIG.pdf.maxFileBytes / 1048576)}MB まで）。`;
   if (code === 'not-pdf') return 'PDF ファイルを選んでください。';
+  if (code === 'load-failed') return 'PDF を読む準備ができませんでした。通信の状態を確かめて、もう一度ためしてください。';
   return 'この PDF を読みこめませんでした。ファイルがこわれていないか確かめてください。';
 }
