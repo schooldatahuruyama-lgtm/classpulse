@@ -47,6 +47,24 @@
   background: var(--c-navy); color: #FFFFFF; font-weight: 700;
 }
 .slide-poll-text { overflow-wrap: anywhere; }
+.slide-is-quiz .slide-poll-text { flex: 1 1 auto; min-width: 0; }
+/* クイズの正解（正解を表示したあと・編集の画面だけ）: 太い枠と「○ 正解」の文字（色だけに頼らない） */
+.slide-poll-option.is-correct { border-color: var(--c-ok-border); border-width: calc(0.5 * var(--unit)); background: #EAF7EF; }
+.slide-poll-correct {
+  flex: none; padding: calc(0.3 * var(--unit)) calc(1.2 * var(--unit)); border-radius: calc(3 * var(--unit));
+  background: var(--c-ok-border); color: #FFFFFF; font-size: calc(2.4 * var(--unit)); font-weight: 700; white-space: nowrap;
+}
+
+/* 5 段階評価のスライド: 1〜5 の枠を横に並べ、その下に両はしの言葉 */
+.slide-rating-scale { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(5, 1fr); gap: calc(1.5 * var(--unit)); }
+.slide-rating-step {
+  display: flex; align-items: center; justify-content: center; min-height: calc(10 * var(--unit));
+  border: calc(0.25 * var(--unit)) solid var(--c-line); border-radius: calc(1.2 * var(--unit));
+  font-size: calc(5 * var(--unit)); font-weight: 700;
+}
+.slide-rating-ends { display: flex; justify-content: space-between; gap: calc(2 * var(--unit)); font-size: calc(2.8 * var(--unit)); font-weight: 700; }
+.slide-rating-ends > span { min-width: 0; overflow-wrap: anywhere; }
+.slide-rating-high { text-align: right; }
 
 /* 自由記述のスライド: 質問文と、入力欄の見本（押せない） */
 .slide-free { position: absolute; inset: 0; padding: calc(4 * var(--unit)) calc(5 * var(--unit)); display: flex; flex-direction: column; gap: calc(2.5 * var(--unit)); }

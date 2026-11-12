@@ -107,23 +107,50 @@ export function statusChip(kind, label) {
     el('span', { text: label }));
 }
 
-// 結果の棒。options は選択肢の文（文字列か { text }）、counts は件数（配列）、total は回答した人数
-export function resultBars(container, { options, counts, total }) {
+// 結果の棒。options は選択肢の文（文字列か { text }）、counts は件数（配列）、total は回答した人数。
+// marks: 行の印（省略時は A〜F。5 段階評価は '1'〜'5'）。
+// correct: クイズの正解の番号（その行に「○ 正解」の文字の印を付ける。色だけに頼らない）。null なら印を付けない
+export function resultBars(container, { options, counts, total, marks = null, correct = null }) {
   const list = el('ul', { class: 'result-bars' });
   options.forEach((opt, i) => {
     const n = Number((counts && counts[i]) || 0);
     const pct = total > 0 ? Math.round((n / total) * 100) : 0;
     const text = typeof opt === 'string' ? opt : opt.text;
-    const mark = SYMBOLS[i] ?? String(i + 1);
+    const mark = (Array.isArray(marks) ? marks[i] : null) ?? SYMBOLS[i] ?? String(i + 1);
+    const isCorrect = Number.isInteger(correct) && correct === i;
     const fill = el('div', { class: 'result-fill' });
     fill.style.width = `${pct}%`;
-    list.append(el('li', { class: 'result-row' },
+    list.append(el('li', { class: isCorrect ? 'result-row is-correct' : 'result-row' },
       el('span', { class: 'result-mark', text: mark }),
-      el('span', { class: 'result-label', text }),
+      isCorrect
+        ? el('span', { class: 'result-label' }, text, el('span', { class: 'result-correct', text: '○ 正解' }))
+        : el('span', { class: 'result-label', text }),
       el('span', { class: 'result-value', text: `${n}人（${pct}%）` }),
-      el('div', { class: 'result-track', role: 'img', 'aria-label': `${mark}: ${n}人、${pct}%` }, fill)));
+      el('div', { class: 'result-track', role: 'img', 'aria-label': `${mark}: ${n}人、${pct}%${isCorrect ? '、正解' : ''}` }, fill)));
   });
   container.replaceChildren(list, el('p', { class: 'result-note', text: `回答した ${total} 人のうちの割合` }));
+}
+
+// 5 段階評価の平均の文。「平均 3.8（13 人）」。0 人・平均が無いときは「平均 —」
+export function ratingAverageText(avg, total) {
+  const n = Number.isInteger(total) && total > 0 ? total : 0;
+  if (!n || typeof avg !== 'number' || !Number.isFinite(avg)) return '平均 —';
+  return `平均 ${avg.toFixed(1)}（${n} 人）`;
+}
+
+// クイズの正答率の文。rate は { correctCount, total, percent }。「正答率 62%（8 / 13 人）」。0 人・無いときは「正答率 —」
+export function correctRateText(rate) {
+  if (!rate || typeof rate.percent !== 'number' || !Number.isFinite(rate.percent) || !(rate.total > 0)) return '正答率 —';
+  return `正答率 ${rate.percent}%（${rate.correctCount} / ${rate.total} 人）`;
+}
+
+// 5 段階評価の結果の棒に出す文（1 と 5 の行だけ、両はしの言葉。間は空）
+export function ratingBarLabels(lowLabel, highLabel, steps) {
+  return Array.from({ length: steps }, (_, i) => {
+    if (i === 0) return typeof lowLabel === 'string' ? lowLabel : '';
+    if (i === steps - 1) return typeof highLabel === 'string' ? highLabel : '';
+    return '';
+  });
 }
 
 // 短い通知（数秒で消える）

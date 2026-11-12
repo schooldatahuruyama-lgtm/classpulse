@@ -2,9 +2,15 @@
 // 回答は匿名なので、ここには集計した人数だけを出す（個人ごとの一覧や ID は出さない）。
 // 自由記述は件数と文章の一覧（だれが書いたかは出さない。履歴に uid は無い）。type の無い古い項目はアンケート。
 // ワードクラウドは回答した人数と、言葉と人数の一覧（人数の多い順。履歴にある順のまま）。
-import { el, confirmDialog, closeAllDialogs, resultBars, toast } from '../ui.js';
+// クイズは選択肢ごとの人数と割合・正解の印・正答率、5 段階評価は 1〜5 の人数と割合・平均・両はしの言葉。
+import {
+  el, confirmDialog, closeAllDialogs, resultBars, toast,
+  ratingAverageText, correctRateText, ratingBarLabels,
+} from '../ui.js';
 import { formatDateTime } from '../format.js';
 import { routeHash } from '../router.js';
+import { correctRate } from '../session-logic.js';
+import { ratingOptions } from '../model.js';
 
 const UNTITLED = '無題の教材';
 const MSG_LOAD_FAILED = '読みこめませんでした。';
@@ -97,9 +103,44 @@ export function mount(root, ctx) {
       el('p', { class: 'small muted', text: `回答 ${q.total} 人` }));
   }
 
+  // クイズ: 選択肢ごとの人数と割合、正解の印、正答率（正解が記録されていなければ、その旨）
+  function quizCard(q, i) {
+    const options = Array.isArray(q.options) ? q.options : [];
+    const correct = Number.isInteger(q.correct) ? q.correct : null;
+    const body = el('div', { class: 'hist-q-body' });
+    if (q.total > 0) resultBars(body, { options, counts: q.counts, total: q.total, correct });
+    else body.append(el('p', { class: 'muted', text: '回答はありませんでした。' }));
+    return el('li', { class: 'hist-q card' },
+      el('h3', { class: 'hist-q-no', text: `質問 ${i + 1}（クイズ）` }),
+      el('p', { class: 'hist-q-text', text: q.question || '' }),
+      body,
+      el('p', { class: 'hist-summary', text: correct !== null ? correctRateText(correctRate(q.counts, correct)) : '正解の記録がありません' }),
+      el('p', { class: 'small muted', text: `回答 ${q.total} 人` }));
+  }
+
+  // 5 段階評価: 両はしの言葉、1〜5 の人数と割合、平均
+  function ratingCard(q, i) {
+    const marks = ratingOptions();
+    const low = typeof q.lowLabel === 'string' ? q.lowLabel : '';
+    const high = typeof q.highLabel === 'string' ? q.highLabel : '';
+    const ends = [low ? `1：${low}` : '', high ? `5：${high}` : ''].filter(Boolean).join(' ／ ');
+    const body = el('div', { class: 'hist-q-body' });
+    if (q.total > 0) resultBars(body, { options: ratingBarLabels(low, high, marks.length), marks, counts: q.counts, total: q.total });
+    else body.append(el('p', { class: 'muted', text: '回答はありませんでした。' }));
+    return el('li', { class: 'hist-q card' },
+      el('h3', { class: 'hist-q-no', text: `質問 ${i + 1}（5 段階評価）` }),
+      el('p', { class: 'hist-q-text', text: q.question || '' }),
+      ends ? el('p', { class: 'small muted hist-rating-ends', text: ends }) : null,
+      body,
+      el('p', { class: 'hist-summary', text: ratingAverageText(q.average, q.total) }),
+      el('p', { class: 'small muted', text: `回答 ${q.total} 人` }));
+  }
+
   function questionCard(q, i) {
     if (q && q.type === 'free') return freeCard(q, i);
     if (q && q.type === 'cloud') return cloudCard(q, i);
+    if (q && q.type === 'quiz') return quizCard(q, i);
+    if (q && q.type === 'rating') return ratingCard(q, i);
     const body = el('div', { class: 'hist-q-body' });
     if (q.total > 0) resultBars(body, { options: q.options, counts: q.counts, total: q.total });
     else body.append(el('p', { class: 'muted', text: '回答はありませんでした。' }));

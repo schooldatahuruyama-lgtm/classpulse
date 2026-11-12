@@ -116,6 +116,10 @@ textarea.ed-textarea:focus-visible { outline: none; }
   display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px;
   border-radius: 50%; background: var(--c-navy); color: #FFFFFF; font-weight: 700;
 }
+/* クイズの「正解」を選ぶ所: 選択肢の入力欄の下の段。選んだ行は「○ 正解」の文字と太い枠（色だけに頼らない） */
+.ed-opt-correct { grid-column: 2 / 4; justify-self: start; margin-bottom: 0; }
+.ed-opt-correct.is-on { border-color: var(--c-ok-border); border-width: 3px; background: #EAF7EF; font-weight: 700; }
+.ed-opt:has(> .ed-opt-correct) { margin-bottom: var(--s-2); }
 
 /* iPad の横向き（1024px 前後）: 左右の列を少し細くして、キャンバスを広くする */
 @media (max-width: 1199px) {

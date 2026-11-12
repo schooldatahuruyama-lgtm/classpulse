@@ -14,7 +14,10 @@ import {
 import { compressImage, dataUrlBytes } from '../image.js';
 import { mountCanvas } from './editor/canvas.js';
 import { renderSlideList, updateThumb, addButtons } from './editor/slide-list.js';
-import { renderItemInspector, renderPollSettings, renderPollForm, renderFreeSettings, renderCloudSettings } from './editor/inspector.js';
+import {
+  renderItemInspector, renderPollSettings, renderPollForm, renderFreeSettings, renderCloudSettings,
+  renderQuizSettings, renderRatingSettings, renderRatingForm,
+} from './editor/inspector.js';
 import { renderSlide } from '../slide-render.js';
 import { backgroundSaver, useAuth } from './editor/background.js';
 
@@ -128,7 +131,7 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
   let createdSid = null; // 作ったが、まだ発表の画面へ移れていない授業（作り直さず、これを開き直す）
   let opening = false;
   let canvas = null;
-  let freePreview = null; // 自由記述・ワードクラウドの中央（質問文と入力欄の見本）。どちらでもないときは null
+  let freePreview = null; // 自由記述・ワードクラウド・5 段階評価の中央の見本。どれでもないときは null
   let thumbTimer = null;
   let imageTask = null;              // 画像の追加中の Promise（同時に 1 つだけ）
   let flushDone = Promise.resolve(); // 画面を離れたときの最後の保存
@@ -230,10 +233,16 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
     const slide = currentSlide();
     if (!slide) {
       center.replaceChildren(el('div', { class: 'ed-empty card' },
-        el('p', { text: 'スライドがありません。「＋ 資料スライド」「＋ アンケート」「＋ 自由記述」「＋ ワードクラウド」のどれかで追加してください。' }),
+        el('p', { text: 'スライドがありません。「＋ 資料スライド」「＋ アンケート」「＋ クイズ」「＋ 5 段階評価」「＋ 自由記述」「＋ ワードクラウド」のどれかで追加してください。' }),
         addButtons(ed)));
-    } else if (slide.type === 'poll') {
+    } else if (slide.type === 'poll' || slide.type === 'quiz') {
+      // クイズはアンケートと同じ入力欄に、選択肢ごとの「正解」を足したもの
       renderPollForm(center, ed);
+    } else if (slide.type === 'rating') {
+      // 5 段階評価: 質問文・両はしの言葉と、スライドの見本
+      freePreview = el('div', { class: 'ed-free-preview' });
+      renderSlide(freePreview, slide, state.deck.images);
+      renderRatingForm(center, ed, freePreview);
     } else if (slide.type === 'free' || slide.type === 'cloud') {
       // 自由記述とワードクラウドは同じ形（質問文は右の列、中央は見本）
       const name = slide.type === 'free' ? '自由記述' : 'ワードクラウド';
@@ -254,6 +263,8 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
     const slide = currentSlide();
     if (!slide) right.replaceChildren(el('h2', { class: 'ed-col-title', text: '設定' }), el('p', { class: 'muted', text: 'スライドを選ぶと、ここで設定できます。' }));
     else if (slide.type === 'poll') renderPollSettings(right, ed);
+    else if (slide.type === 'quiz') renderQuizSettings(right, ed);
+    else if (slide.type === 'rating') renderRatingSettings(right, ed);
     else if (slide.type === 'free') renderFreeSettings(right, ed);
     else if (slide.type === 'cloud') renderCloudSettings(right, ed);
     else renderItemInspector(right, ed);
@@ -406,9 +417,9 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
       const slide = currentSlide();
       if (!slide) return;
       change(updateSlide(state.deck, state.slideId, { ...slide, ...patch }), { thumb: true });
-      // 自由記述・ワードクラウドは、中央の見本も描き直す（右の入力欄はそのまま）
+      // 自由記述・ワードクラウド・5 段階評価は、中央の見本も描き直す（入力欄はそのまま）
       const cur = currentSlide();
-      if (freePreview && cur && (cur.type === 'free' || cur.type === 'cloud')) renderSlide(freePreview, cur, state.deck.images);
+      if (freePreview && cur && (cur.type === 'free' || cur.type === 'cloud' || cur.type === 'rating')) renderSlide(freePreview, cur, state.deck.images);
     },
   };
 

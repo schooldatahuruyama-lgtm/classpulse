@@ -1,7 +1,7 @@
 // スライドを 16:9 の枠に描く。編集・発表・生徒の画面で共通に使う。
 // 文字は textContent で出す。画像の src は教材の images のデータ URL だけ。
 import { el } from './ui.js';
-import { clampItem } from './model.js';
+import { clampItem, ratingOptions } from './model.js';
 
 // 文字の大きさ（枠の幅に対する %）
 export const TEXT_SIZE_PCT = { s: 2.5, m: 4, l: 6, xl: 9 };
@@ -76,15 +76,34 @@ function renderItem(item, images) {
   return null;
 }
 
-function renderPoll(stage, slide, mode) {
+// アンケート・クイズのスライド: 質問文と A〜F の選択肢（結果は出さない）。
+// correct: クイズの正解の番号。渡されたときだけ、その選択肢に「○ 正解」の印を付ける（渡されなければ印の要素は作らない）
+function renderPoll(stage, slide, mode, badge, correct) {
   const options = Array.isArray(slide.options) ? slide.options : [];
-  if (mode === 'thumb') stage.append(el('span', { class: 'slide-badge', text: 'アンケート' }));
+  if (mode === 'thumb') stage.append(el('span', { class: 'slide-badge', text: badge }));
   stage.append(el('div', { class: 'slide-poll' },
     el('p', { class: 'slide-poll-question', text: typeof slide.question === 'string' ? slide.question : '' }),
     el('ol', { class: options.length >= 4 ? 'slide-poll-options is-grid' : 'slide-poll-options' },
-      options.slice(0, OPTION_MARKS.length).map((opt, i) => el('li', { class: 'slide-poll-option' },
+      options.slice(0, OPTION_MARKS.length).map((opt, i) => el('li', { class: correct === i ? 'slide-poll-option is-correct' : 'slide-poll-option' },
         el('span', { class: 'slide-poll-mark', text: OPTION_MARKS[i] }),
-        el('span', { class: 'slide-poll-text', text: typeof opt === 'string' ? opt : String(opt ?? '') }))))));
+        el('span', { class: 'slide-poll-text', text: typeof opt === 'string' ? opt : String(opt ?? '') }),
+        correct === i ? el('span', { class: 'slide-poll-correct', text: '○ 正解' }) : null)))));
+}
+
+// 5 段階評価のスライド: 質問文と、横に並ぶ 1〜5 の枠、その下の両はしの言葉（空なら出さない）
+function renderRating(stage, slide, mode) {
+  const low = typeof slide.lowLabel === 'string' ? slide.lowLabel : '';
+  const high = typeof slide.highLabel === 'string' ? slide.highLabel : '';
+  if (mode === 'thumb') stage.append(el('span', { class: 'slide-badge', text: '5 段階評価' }));
+  stage.append(el('div', { class: 'slide-poll slide-rating' },
+    el('p', { class: 'slide-poll-question', text: typeof slide.question === 'string' ? slide.question : '' }),
+    el('ol', { class: 'slide-rating-scale' },
+      ratingOptions().map((n) => el('li', { class: 'slide-rating-step', text: n }))),
+    low || high
+      ? el('div', { class: 'slide-rating-ends' },
+        el('span', { class: 'slide-rating-low', text: low ? `1：${low}` : '' }),
+        el('span', { class: 'slide-rating-high', text: high ? `5：${high}` : '' }))
+      : null));
 }
 
 // 自由記述・ワードクラウドのスライド: 質問文と、押せない入力欄の見本。
@@ -107,13 +126,21 @@ const CLOUD_BOXES = () => el('div', { class: 'slide-cloud-boxes' },
 
 // container の中身を、slide を描いた 16:9 の枠に置きかえる。mode: 'view'（大きく見せる）か 'thumb'（縮小表示）
 // sample: 自由記述・ワードクラウドの入力欄の見本を出すか（既定は出す。縮小表示では常に出す）
-export function renderSlide(container, slide, images, { mode = 'view', sample = true } = {}) {
+// correct: クイズの正解の番号。渡したときだけ正解の印を描く（既定は描かない。
+// 発表・生徒の画面は「正解を表示」のあとだけ渡す。編集の画面は先生の準備の画面なので渡してよい）
+export function renderSlide(container, slide, images, { mode = 'view', sample = true, correct = null } = {}) {
   const stage = el('div', { class: 'slide-stage' });
   const frame = el('div', { class: mode === 'thumb' ? 'slide-frame slide-thumb' : 'slide-frame' }, stage);
   if (mode === 'thumb') frame.setAttribute('aria-hidden', 'true');
   if (slide && slide.type === 'poll') {
     frame.classList.add('slide-is-poll');
-    renderPoll(stage, slide, mode);
+    renderPoll(stage, slide, mode, 'アンケート', null);
+  } else if (slide && slide.type === 'quiz') {
+    frame.classList.add('slide-is-poll', 'slide-is-quiz');
+    renderPoll(stage, slide, mode, 'クイズ', Number.isInteger(correct) ? correct : null);
+  } else if (slide && slide.type === 'rating') {
+    frame.classList.add('slide-is-rating');
+    renderRating(stage, slide, mode);
   } else if (slide && slide.type === 'free') {
     frame.classList.add('slide-is-free');
     renderAsk(stage, slide, mode, mode === 'thumb' || sample, '自由記述', FREE_BOXES);

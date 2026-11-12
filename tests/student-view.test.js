@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { sendButtonState, answerMessage, pollDecision, endedDecision, freeDecision, freeShownText, cloudDecision, cloudShownWords } from '../js/views/student.js';
+import { sendButtonState, answerMessage, pollDecision, endedDecision, freeDecision, freeShownText, cloudDecision, cloudShownWords, quizVerdict } from '../js/views/student.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (p) => readFileSync(join(root, p), 'utf8');
@@ -333,4 +333,36 @@ test('ワードクラウド: 入力欄に出す文（いつも 3 つ。書ける
   assert.deepEqual(cloudShownWords({ readOnly: true, draft: ['書き', '', ''], words: null }), ['書き', '', '']);
   assert.deepEqual(cloudShownWords({ readOnly: false, draft: null, words: null }), ['', '', '']);
   assert.deepEqual(cloudShownWords({ readOnly: false, draft: ['a', 'b', 'c', 'd'], words: null }), ['a', 'b', 'c']);
+});
+
+// ---- クイズ: 正解が表示されたあとの文と印 ----
+const QUIZ_OPTIONS = ['東京', '大阪', '名古屋'];
+
+test('クイズ: 正解が届く前（correct が null）は何も出さない', () => {
+  assert.equal(quizVerdict({ correct: null, isCorrect: null, options: QUIZ_OPTIONS }), null);
+  assert.equal(quizVerdict({ correct: undefined, isCorrect: true, options: QUIZ_OPTIONS }), null);
+});
+
+test('クイズ: 送信済みの答えが正解 →「正解です」と ○', () => {
+  assert.deepEqual(quizVerdict({ correct: 1, isCorrect: true, options: QUIZ_OPTIONS }), { kind: 'ok', mark: '○', text: '正解です' });
+});
+
+test('クイズ: 送信済みの答えがまちがい →「ざんねん。正解は『〇〇』です」と ×', () => {
+  assert.deepEqual(quizVerdict({ correct: 1, isCorrect: false, options: QUIZ_OPTIONS }), { kind: 'ng', mark: '×', text: 'ざんねん。正解は『大阪』です' });
+});
+
+test('クイズ: 答えていない・送れたか確かめられていない →「正解は『〇〇』です」（○× を付けない）', () => {
+  assert.deepEqual(quizVerdict({ correct: 0, isCorrect: null, options: QUIZ_OPTIONS }), { kind: 'info', mark: null, text: '正解は『東京』です' });
+});
+
+test('クイズ: 正解の選択肢の文が空なら記号（A〜F）で伝える', () => {
+  assert.equal(quizVerdict({ correct: 2, isCorrect: false, options: ['a', 'b', '  '] }).text, 'ざんねん。正解は『C』です');
+  assert.equal(quizVerdict({ correct: 1, isCorrect: null, options: [] }).text, '正解は『B』です');
+});
+
+test('クイズ: 正解の表示のあと（締切）は、選び直し・送信ができない', () => {
+  const d = pollDecision({ status: 'closed', selected: 1, answer: { choice: 1, state: 'sent' }, results: { counts: [0, 1, 0], total: 1 } });
+  assert.equal(d.cardsOff, true);
+  assert.deepEqual(d.send, { label: '締切済み', off: true });
+  assert.equal(d.showResults, true);
 });

@@ -1,7 +1,8 @@
-// 発表の画面: ワードクラウドの文字の大きさ・並び・色の決めごと
+// 発表の画面: ワードクラウドの文字の大きさ・並び・色、受付・結果のボタン、正答率・平均の文の決めごと
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { cloudFontSize, cloudOrder, cloudTone, CLOUD_FONT, CLOUD_TONES } from '../js/views/present.js';
+import { cloudFontSize, cloudOrder, cloudTone, CLOUD_FONT, CLOUD_TONES, pollControls, quizSummaryText } from '../js/views/present.js';
+import { ratingAverageText, correctRateText, ratingBarLabels } from '../js/ui.js';
 
 test('文字の大きさ: 全員が同じ人数なら、どの言葉も同じ大きさ', () => {
   assert.equal(cloudFontSize(3, 3, 3), CLOUD_FONT.same);
@@ -71,4 +72,60 @@ test('色: 言葉の鍵から決まり、0〜CLOUD_TONES-1。いくつかの色�
     tones.add(t);
   }
   assert.ok(tones.size > 1);
+});
+
+// ---- 受付・結果のボタン（クイズ・5 段階評価） ----
+
+test('ボタン: クイズは「正解を表示」／「正解をかくす」、ほかの種類は「結果を表示」／「結果をかくす」', () => {
+  assert.equal(pollControls({ kind: 'quiz', status: 'open', resultsVisible: false }).resultsLabel, '正解を表示');
+  assert.equal(pollControls({ kind: 'quiz', status: 'closed', resultsVisible: true }).resultsLabel, '正解をかくす');
+  for (const kind of ['poll', 'rating', 'free', 'cloud']) {
+    assert.equal(pollControls({ kind, status: 'open', resultsVisible: false }).resultsLabel, '結果を表示');
+    assert.equal(pollControls({ kind, status: 'open', resultsVisible: true }).resultsLabel, '結果をかくす');
+  }
+});
+
+test('ボタン: クイズは締め切ったあと・正解の表示中は、受付の停止・再開を出さない', () => {
+  assert.equal(pollControls({ kind: 'quiz', status: 'open', resultsVisible: false }).pauseHidden, false);
+  assert.equal(pollControls({ kind: 'quiz', status: 'paused', resultsVisible: false }).pauseHidden, false);
+  assert.equal(pollControls({ kind: 'quiz', status: 'closed', resultsVisible: false }).pauseHidden, true);
+  assert.equal(pollControls({ kind: 'quiz', status: 'closed', resultsVisible: true }).pauseHidden, true);
+});
+
+test('ボタン: アンケートなどは今までどおり（締切後も停止のボタンは出したまま押せない）', () => {
+  for (const kind of ['poll', 'rating', 'free', 'cloud']) {
+    assert.deepEqual(pollControls({ kind, status: 'closed', resultsVisible: true }), {
+      pauseLabel: '受付を止める', pauseHidden: false, pauseBlocked: true, resultsLabel: '結果をかくす', resultsBlocked: false,
+    });
+  }
+  assert.equal(pollControls({ kind: 'poll', status: 'paused', resultsVisible: false }).pauseLabel, '受付を再開');
+  assert.equal(pollControls({ kind: 'poll', status: 'open', resultsVisible: false }).pauseBlocked, false);
+  assert.equal(pollControls({ kind: 'poll', status: 'waiting', resultsVisible: false }).resultsBlocked, true);
+  assert.equal(pollControls({ kind: 'quiz', status: 'waiting', resultsVisible: false }).resultsBlocked, true);
+});
+
+test('正答率の文: 「正答率 62%（8 / 13 人）」、0 人・無いときは「正答率 —」', () => {
+  assert.equal(correctRateText({ correctCount: 8, total: 13, percent: 62 }), '正答率 62%（8 / 13 人）');
+  assert.equal(correctRateText({ correctCount: 0, total: 0, percent: null }), '正答率 —');
+  assert.equal(correctRateText(null), '正答率 —');
+  assert.equal(correctRateText({ correctCount: 0, total: 3, percent: 0 }), '正答率 0%（0 / 3 人）');
+});
+
+test('クイズの結果の文: 正解を読みこめなかったときは、その旨', () => {
+  assert.equal(quizSummaryText(null, null), '正解のデータを読みこめませんでした');
+  assert.equal(quizSummaryText(1, { correctCount: 2, total: 4, percent: 50 }), '正答率 50%（2 / 4 人）');
+  assert.equal(quizSummaryText(0, { correctCount: 0, total: 0, percent: null }), '正答率 —');
+});
+
+test('平均の文: 小数 1 けた（整数も 1 けた）、0 人・平均が無いときは「平均 —」', () => {
+  assert.equal(ratingAverageText(3.8, 13), '平均 3.8（13 人）');
+  assert.equal(ratingAverageText(4, 2), '平均 4.0（2 人）');
+  assert.equal(ratingAverageText(null, 0), '平均 —');
+  assert.equal(ratingAverageText(null, 3), '平均 —');
+  assert.equal(ratingAverageText(3, 0), '平均 —');
+});
+
+test('評価の棒の文: 1 と 5 の行だけ両はしの言葉', () => {
+  assert.deepEqual(ratingBarLabels('低い', '高い', 5), ['低い', '', '', '', '高い']);
+  assert.deepEqual(ratingBarLabels('', undefined, 5), ['', '', '', '', '']);
 });

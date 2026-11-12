@@ -2,11 +2,14 @@
 // 先生の画面・ログインへの道、スライドを前後に動かす操作、名前の欄、生徒の匿名 ID は出さない。
 // 集計の数は state.results があるとき（先生が結果を表示しているとき）だけ DOM に入れる。
 // 自由記述・ワードクラウドでは、ほかの生徒の文章・言葉は出さない（結果の表示中は「前の画面を見てください」とだけ出す）。
+// クイズはアンケートと同じ流れ。正解は先生が「正解を表示」したあとに届く state.correct だけを使い、それまで正解の印は作らない。
+// 5 段階評価もアンケートと同じ流れ（選ぶ・送る・変える）。ボタンは 1〜5 を横に並べる。
 // 回答の操作中にフォーカスやスクロールが飛ばないよう、同じスライドの間は部品を作り直さず中身だけ書きかえる。
-import { el, statusChip, resultBars } from '../ui.js';
+import { el, statusChip, resultBars, ratingAverageText, ratingBarLabels } from '../ui.js';
 import { renderSlide, OPTION_MARKS } from '../slide-render.js';
 import { createSessionClient } from '../session-client.js';
-import { normalizeText, normalizeWords, sameWords } from '../session-logic.js';
+import { normalizeText, normalizeWords, sameWords, average } from '../session-logic.js';
+import { ratingOptions } from '../model.js';
 import { CONFIG } from '../config.js';
 
 const POLL_CHIP = {
@@ -68,6 +71,23 @@ export function pollDecision({ status, selected, answer, results }) {
     retry: retryVisible({ status, selected, answer }),
     showResults: !!results,
   };
+}
+
+// ---- クイズ ----
+// 正解が表示されたあとの、自分の答えについての文と印（設計書 3.2）。
+// correct: 正解の番号（表示前・正解が分からないときは null → 何も出さない）。
+// isCorrect: 送信済みの自分の答えが正解か（送信済みの答えが無い・確かめられていないときは null）。
+// 戻り値 { kind: 'ok' | 'ng' | 'info', mark: '○' | '×' | null, text } か null。
+// 未回答・送れたか確かめられていない答えは、○× を付けずに正解だけを伝える
+export function quizVerdict({ correct, isCorrect, options }) {
+  if (!Number.isInteger(correct) || correct < 0) return null;
+  const list = Array.isArray(options) ? options : [];
+  const raw = list[correct];
+  const text = typeof raw === 'string' ? raw.trim() : '';
+  const name = text || OPTION_MARKS[correct] || String(correct + 1);
+  if (isCorrect === true) return { kind: 'ok', mark: '○', text: '正解です' };
+  if (isCorrect === false) return { kind: 'ng', mark: '×', text: `ざんねん。正解は『${name}』です` };
+  return { kind: 'info', mark: null, text: `正解は『${name}』です` };
 }
 
 // ---- 自由記述 ----
@@ -231,26 +251,48 @@ export function mount(root, ctx) {
     }
   }
 
+  // アンケート・クイズ・5 段階評価の部品（選ぶ・送る・変えるの流れは同じ。updatePoll で中身を書きかえる）
   function buildPoll(slide) {
-    const options = Array.isArray(slide.options) ? slide.options.slice(0, OPTION_MARKS.length) : [];
-    const ui = { options, cards: [], resultsKey: null };
+    const kind = slide.type;
+    const isRating = kind === 'rating';
+    const options = isRating ? ratingOptions() : Array.isArray(slide.options) ? slide.options.slice(0, OPTION_MARKS.length) : [];
+    const optionText = (opt) => (typeof opt === 'string' ? opt : String(opt ?? ''));
+    const low = isRating && typeof slide.lowLabel === 'string' ? slide.lowLabel : '';
+    const high = isRating && typeof slide.highLabel === 'string' ? slide.highLabel : '';
+    const ui = { kind, options, cards: [], resultsKey: null, verdictKey: null };
+    // 読み上げの名前のもと（「A はい」、評価は「1（あてはまらない）」）
+    ui.names = isRating
+      ? options.map((n, i) => `${n}${i === 0 && low ? `（${low}）` : ''}${i === options.length - 1 && high ? `（${high}）` : ''}`)
+      : options.map((opt, i) => `${OPTION_MARKS[i]} ${optionText(opt)}`);
+    // 結果の棒の文と印（評価は 1〜5 の印と、両はしの行だけ言葉）
+    ui.bars = isRating
+      ? { options: ratingBarLabels(low, high, options.length), marks: options }
+      : { options, marks: null };
     ui.statusChip = el('span', { class: 'st-chip-status', 'aria-live': 'polite' });
     ui.cards = options.map((opt, i) => {
       const selTag = el('span', { class: 'st-tag st-tag-selected', text: '選択中', hidden: true });
       const sentTag = el('span', { class: 'st-tag st-tag-sent', hidden: true },
         el('span', { class: 'st-check', 'aria-hidden': 'true', text: '✓' }),
         el('span', { text: '送信済み' }));
-      const btn = el('button', {
-        type: 'button', class: 'st-option', 'aria-pressed': 'false',
-        'aria-label': `${OPTION_MARKS[i]} ${typeof opt === 'string' ? opt : String(opt ?? '')}`,
-        onclick: () => { if (alive && !isOff(btn)) client.select(i); },
-      },
-      el('span', { class: 'st-mark', text: OPTION_MARKS[i] }),
-      // 文と印（狭い画面では、印を文の下へ回す）
-      el('span', { class: 'st-option-body' },
-        el('span', { class: 'st-option-text', text: typeof opt === 'string' ? opt : String(opt ?? '') }),
-        el('span', { class: 'st-tags' }, selTag, sentTag)));
-      return { btn, selTag, sentTag };
+      const tags = el('span', { class: 'st-tags' }, selTag, sentTag);
+      const btn = isRating
+        ? el('button', {
+          type: 'button', class: 'st-rate', 'aria-pressed': 'false', 'aria-label': ui.names[i],
+          onclick: () => { if (alive && !isOff(btn)) client.select(i); },
+        },
+        el('span', { class: 'st-rate-num', text: opt }),
+        tags)
+        : el('button', {
+          type: 'button', class: 'st-option', 'aria-pressed': 'false', 'aria-label': ui.names[i],
+          onclick: () => { if (alive && !isOff(btn)) client.select(i); },
+        },
+        el('span', { class: 'st-mark', text: OPTION_MARKS[i] }),
+        // 文と印（狭い画面では、印を文の下へ回す）
+        el('span', { class: 'st-option-body' },
+          el('span', { class: 'st-option-text', text: optionText(opt) }),
+          tags));
+      // correctTag: クイズの「○ 正解」の印。正解が届いてから作る（それまでは DOM に無い）
+      return { btn, tags, selTag, sentTag, correctTag: null };
     });
     ui.sendBtn = el('button', {
       type: 'button', class: 'btn btn-primary st-send',
@@ -262,14 +304,27 @@ export function mount(root, ctx) {
       // 押した瞬間にも確かめる（選び直したあとに古い回答を送り直さない）
       onclick: () => { if (alive && ui.decision && ui.decision.retry) client.retry(); },
     });
+    // クイズの正解の文（正解が表示されたときだけ中身を入れる）
+    ui.verdict = kind === 'quiz' ? el('div', { class: 'st-verdict', 'aria-live': 'polite' }) : null;
     ui.results = el('section', { class: 'st-results', 'aria-labelledby': 'st-results-title', hidden: true });
-    ui.root = el('section', { class: 'st-poll', 'aria-labelledby': 'st-question' },
+    const choices = isRating
+      ? el('div', { class: 'st-rating' },
+        el('div', { class: 'st-rating-scale', role: 'group', 'aria-labelledby': 'st-question' }, ui.cards.map((c) => c.btn)),
+        // 両はしの言葉（空なら出さない）
+        low || high
+          ? el('div', { class: 'st-rating-ends', 'aria-hidden': 'true' },
+            el('span', { class: 'st-rating-low', text: low ? `1：${low}` : '' }),
+            el('span', { class: 'st-rating-high', text: high ? `5：${high}` : '' }))
+          : null)
+      : el('div', { class: 'st-options', role: 'group', 'aria-labelledby': 'st-question' }, ui.cards.map((c) => c.btn));
+    ui.root = el('section', { class: isRating ? 'st-poll st-rating-poll' : 'st-poll', 'aria-labelledby': 'st-question' },
       el('h2', { id: 'st-question', class: 'st-question', text: typeof slide.question === 'string' ? slide.question : '' }),
       el('div', { class: 'st-chips' }, statusChip('info', 'この質問は匿名です'), ui.statusChip),
-      el('div', { class: 'st-options', role: 'group', 'aria-labelledby': 'st-question' }, ui.cards.map((c) => c.btn)),
+      choices,
       ui.sendBtn,
       el('div', { class: 'st-answer', 'aria-live': 'polite' }, ui.message),
       ui.retryBtn,
+      ui.verdict,
       ui.results);
     return ui;
   }
@@ -281,19 +336,30 @@ export function mount(root, ctx) {
     // 何を出すか・押せるかは pollDecision が決める（テストはそちらで行う）。ここは当てはめるだけ
     const d = pollDecision({ status, selected: state.selected, answer, results: state.results });
     ui.decision = d;
+    // クイズの正解（先生が「正解を表示」している間だけ届く。ほかは null）
+    const correct = ui.kind === 'quiz' && Number.isInteger(state.correct) ? state.correct : null;
 
     updateStatusChip(ui.statusChip, status);
 
     ui.cards.forEach((c, i) => {
       const isSel = state.selected === i;
       const isSent = d.sentChoice === i;
+      const isRight = correct === i;
       c.btn.setAttribute('aria-pressed', isSel ? 'true' : 'false');
-      // 読み上げの名前: 「A はい」＋ 状態（選択中／送信済み）。中身の文字の組み立てに頼らず、いつも同じ形にする
-      c.btn.setAttribute('aria-label', `${OPTION_MARKS[i]} ${typeof ui.options[i] === 'string' ? ui.options[i] : String(ui.options[i] ?? '')}${isSel ? '、選択中' : ''}${isSent ? '、送信済み' : ''}`);
+      // 読み上げの名前: 「A はい」＋ 状態（選択中／送信済み／正解）。中身の文字の組み立てに頼らず、いつも同じ形にする
+      c.btn.setAttribute('aria-label', `${ui.names[i]}${isSel ? '、選択中' : ''}${isSent ? '、送信済み' : ''}${isRight ? '、正解' : ''}`);
       c.btn.classList.toggle('is-selected', isSel);
       c.btn.classList.toggle('is-sent', isSent);
+      c.btn.classList.toggle('is-correct', isRight);
       c.selTag.hidden = !isSel;
       c.sentTag.hidden = !isSent;
+      if (isRight && !c.correctTag) {
+        c.correctTag = el('span', { class: 'st-tag st-tag-correct', text: '○ 正解' });
+        c.tags.prepend(c.correctTag);
+      } else if (!isRight && c.correctTag) {
+        c.correctTag.remove();
+        c.correctTag = null;
+      }
       setOff(c.btn, d.cardsOff);
     });
 
@@ -305,15 +371,31 @@ export function mount(root, ctx) {
     ui.retryBtn.hidden = !d.retry;
     if (!d.retry && before === ui.retryBtn) ui.sendBtn.focus(); // 押したボタンが消えたら、送信のボタンへ
 
+    // クイズ: 自分の答えについての文と印（正解が届いたときだけ）
+    if (ui.verdict) {
+      const v = quizVerdict({ correct, isCorrect: state.isCorrect, options: ui.options });
+      const vKey = v ? `${v.kind}:${v.text}` : null;
+      if (vKey !== ui.verdictKey) {
+        ui.verdictKey = vKey;
+        ui.verdict.replaceChildren(v
+          ? el('p', { class: `st-verdict-text is-${v.kind}` },
+            v.mark ? el('span', { class: 'st-verdict-mark', 'aria-hidden': 'true', text: v.mark }) : null,
+            el('span', { text: v.text }))
+          : '');
+      }
+    }
+
     // 結果（先生が表示しているときだけ）
     const r = d.showResults ? state.results : null;
-    const key = r ? JSON.stringify(r) : null;
+    const key = r ? JSON.stringify([r, correct]) : null;
     if (key !== ui.resultsKey) {
       ui.resultsKey = key;
       if (r) {
         const box = el('div', { class: 'st-results-bars' });
-        resultBars(box, { options: ui.options, counts: r.counts, total: r.total });
+        resultBars(box, { options: ui.bars.options, marks: ui.bars.marks, counts: r.counts, total: r.total, correct });
         ui.results.replaceChildren(el('h3', { id: 'st-results-title', text: '結果' }), box);
+        // 評価は平均も（発表の画面と同じ計算）
+        if (ui.kind === 'rating') ui.results.append(el('p', { class: 'st-average', text: ratingAverageText(average(r.counts), r.total) }));
         ui.results.hidden = false;
       } else {
         ui.results.replaceChildren();
@@ -516,7 +598,7 @@ export function mount(root, ctx) {
       return;
     }
     const key = `slide:${state.slideId}`;
-    if (slide.type === 'poll') {
+    if (slide.type === 'poll' || slide.type === 'quiz' || slide.type === 'rating') {
       if (show(key)) {
         pollUi = buildPoll(slide);
         body.append(pollUi.root);
