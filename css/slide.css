@@ -57,6 +57,13 @@
   border: calc(0.25 * var(--unit)) dashed var(--c-line); border-radius: calc(1.2 * var(--unit));
   font-size: calc(3 * var(--unit)); color: #4B5694; background: #F7F8FD;
 }
+/* ワードクラウドの見本: 1 行の入力欄が 3 つ（自由記述の見本と同じ見た目） */
+.slide-cloud-boxes { align-self: stretch; display: flex; flex-direction: column; gap: calc(1.2 * var(--unit)); }
+.slide-cloud-box {
+  padding: calc(0.8 * var(--unit)) calc(1.8 * var(--unit));
+  border: calc(0.25 * var(--unit)) dashed var(--c-line); border-radius: calc(1.2 * var(--unit));
+  font-size: calc(3 * var(--unit)); color: #4B5694; background: #F7F8FD;
+}
 .slide-free-send {
   padding: calc(1 * var(--unit)) calc(3 * var(--unit)); border-radius: calc(1.2 * var(--unit));
   background: var(--c-navy); color: #FFFFFF; font-size: calc(2.8 * var(--unit)); font-weight: 700; opacity: 0.45;

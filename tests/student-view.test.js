@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { sendButtonState, answerMessage, pollDecision, endedDecision, freeDecision, freeShownText } from '../js/views/student.js';
+import { sendButtonState, answerMessage, pollDecision, endedDecision, freeDecision, freeShownText, cloudDecision, cloudShownWords } from '../js/views/student.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (p) => readFileSync(join(root, p), 'utf8');
@@ -243,4 +243,94 @@ test('自由記述: 入力欄に出す文（書けるときは書きかけ、読
   assert.equal(freeShownText({ readOnly: true, draft: '書きかけ', text: '送った' }), '送った');
   assert.equal(freeShownText({ readOnly: true, draft: '書きかけ', text: null }), '書きかけ');
   assert.equal(freeShownText({ readOnly: false, draft: '', text: null }), '');
+});
+
+// ---- ワードクラウド ----
+const cd = (o) => cloudDecision({ status: 'open', inputs: ['', '', ''], answer: null, resultsVisible: false, ...o });
+
+test('ワードクラウド: 言葉が 1 つ以上あれば「送信」。3 つとも空・空白だけは押せない', () => {
+  assert.deepEqual(cd({ inputs: ['ねこ', '', ''] }).send, { label: '送信', off: false });
+  assert.deepEqual(cd({ inputs: ['', '', 'いぬ'] }).send, { label: '送信', off: false });
+  assert.deepEqual(cd({ inputs: ['', '', ''] }).send, { label: '送信', off: true });
+  assert.deepEqual(cd({ inputs: ['  ', '　', ' '] }).send, { label: '送信', off: true });
+  assert.equal(cd({ inputs: [] }).send.off, true);
+  assert.equal(cd({ inputs: null }).send.off, true);
+});
+
+test('ワードクラウド: 21 文字の欄は数えない（ほかに正しい言葉があれば送れる）', () => {
+  assert.equal(cd({ inputs: ['あ'.repeat(21), '', ''] }).send.off, true);
+  assert.equal(cd({ inputs: ['あ'.repeat(20), '', ''] }).send.off, false);
+  assert.equal(cd({ inputs: ['あ'.repeat(21), 'ねこ', ''] }).send.off, false);
+});
+
+test('ワードクラウド: 送った言葉と同じ → 押せない「送信済み」。空の欄・前後の空白・同じ言葉の重複だけの違いも同じ', () => {
+  const answer = { words: ['ねこ', 'いぬ'], state: 'sent' };
+  assert.deepEqual(cd({ inputs: ['ねこ', 'いぬ', ''], answer }).send, { label: '送信済み', off: true });
+  assert.deepEqual(cd({ inputs: [' ねこ ', '', 'いぬ'], answer }).send, { label: '送信済み', off: true });
+  assert.deepEqual(cd({ inputs: ['ねこ', 'ねこ', 'いぬ'], answer }).send, { label: '送信済み', off: true });
+});
+
+test('ワードクラウド: 送った言葉と違う →「送り直す」。並びが違っても送り直せる。全部消したら押せない', () => {
+  const answer = { words: ['ねこ', 'いぬ'], state: 'sent' };
+  assert.deepEqual(cd({ inputs: ['ねこ', 'とり', ''], answer }).send, { label: '送り直す', off: false });
+  assert.deepEqual(cd({ inputs: ['いぬ', 'ねこ', ''], answer }).send, { label: '送り直す', off: false });
+  assert.deepEqual(cd({ inputs: ['ねこ', '', ''], answer }).send, { label: '送り直す', off: false });
+  assert.deepEqual(cd({ inputs: ['', '', ''], answer }).send, { label: '送り直す', off: true });
+});
+
+test('ワードクラウド: 送信中でも違う言葉なら送り直せる。同じ言葉は押せない', () => {
+  const answer = { words: ['ねこ'], state: 'sending' };
+  assert.deepEqual(cd({ inputs: ['いぬ', '', ''], answer }).send, { label: '送り直す', off: false });
+  assert.equal(cd({ inputs: ['ねこ', '', ''], answer }).send.off, true);
+});
+
+test('ワードクラウド: 一時停止中・締切後は読み取り専用で押せない。受付前も押せない', () => {
+  const p = cd({ status: 'paused', inputs: ['あ', '', ''] });
+  assert.equal(p.readOnly, true);
+  assert.deepEqual(p.send, { label: '受付停止中', off: true });
+  const c = cd({ status: 'closed', inputs: ['あ', '', ''], answer: { words: ['あ'], state: 'sent' } });
+  assert.equal(c.readOnly, true);
+  assert.deepEqual(c.send, { label: '締切済み', off: true });
+  assert.equal(c.message, '送信済み。');
+  const w = cd({ status: 'waiting', inputs: ['あ', '', ''] });
+  assert.equal(w.readOnly, false);
+  assert.equal(w.send.off, true);
+});
+
+test('ワードクラウド: 送信状態の文・ボタンは自由記述と同じ（同じ値・違う値のすべての組）', () => {
+  for (const s of ['sending', 'sent', 'queued', 'rejected', 'failed', 'unconfirmed']) {
+    for (const status of STATUSES) {
+      for (const same of [true, false]) {
+        const c = cd({ status, inputs: [same ? 'あ' : 'い', '', ''], answer: { words: ['あ'], state: s } });
+        const f = fd({ status, input: same ? 'あ' : 'い', answer: { text: 'あ', state: s } });
+        assert.deepEqual(c.send, f.send, `${s} ${status} ${same}`);
+        assert.equal(c.message, f.message);
+        assert.equal(c.retry, f.retry);
+        assert.equal(c.readOnly, f.readOnly);
+      }
+    }
+  }
+  assert.equal(cd({ answer: null }).message, '');
+});
+
+test('ワードクラウド: 「もう一度送る」は受付中・失敗・入力が失敗した言葉と同じか空のときだけ', () => {
+  const answer = { words: ['ねこ'], state: 'failed' };
+  assert.equal(cd({ inputs: ['ねこ', '', ''], answer }).retry, true);
+  assert.equal(cd({ inputs: ['', '', ''], answer }).retry, true);
+  assert.equal(cd({ inputs: ['いぬ', '', ''], answer }).retry, false);
+  assert.equal(cd({ status: 'paused', inputs: ['ねこ', '', ''], answer }).retry, false);
+});
+
+test('ワードクラウド: 結果の表示中だけ「前の画面を見てください」を出す', () => {
+  assert.equal(cd({ resultsVisible: true }).showNote, true);
+  assert.equal(cd({ resultsVisible: false }).showNote, false);
+});
+
+test('ワードクラウド: 入力欄に出す文（いつも 3 つ。書けるときは書きかけ、読み取り専用は送った言葉）', () => {
+  assert.deepEqual(cloudShownWords({ readOnly: false, draft: ['書き', '', ''], words: ['送った'] }), ['書き', '', '']);
+  assert.deepEqual(cloudShownWords({ readOnly: false, draft: ['', '', ''], words: ['送った', 'もの'] }), ['送った', 'もの', '']);
+  assert.deepEqual(cloudShownWords({ readOnly: true, draft: ['書き', '', ''], words: ['送った'] }), ['送った', '', '']);
+  assert.deepEqual(cloudShownWords({ readOnly: true, draft: ['書き', '', ''], words: null }), ['書き', '', '']);
+  assert.deepEqual(cloudShownWords({ readOnly: false, draft: null, words: null }), ['', '', '']);
+  assert.deepEqual(cloudShownWords({ readOnly: false, draft: ['a', 'b', 'c', 'd'], words: null }), ['a', 'b', 'c']);
 });

@@ -114,3 +114,12 @@
 .hist-free-hidden { margin-top: var(--s-3); padding-top: var(--s-2); border-top: 2px dashed var(--c-border); }
 .hist-free-hidden-title { margin: 0 0 var(--s-1); font-size: 18px; }
 .hist-free-hidden .hist-free-item { background: var(--c-card); border-style: dashed; color: #4B5694; }
+/* 授業の結果: ワードクラウドの言葉と人数の一覧（かくした言葉の枠は自由記述と同じ） */
+.hist-cloud-list { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: var(--s-1); }
+.hist-cloud-item {
+  display: inline-flex; align-items: baseline; gap: var(--s-1); max-width: 100%;
+  padding: 6px var(--s-2); border: 1px solid var(--c-line); border-radius: var(--r-1); background: var(--c-bg);
+}
+.hist-cloud-word { font-size: 18px; font-weight: 700; overflow-wrap: anywhere; min-width: 0; }
+.hist-cloud-count { flex: none; font-weight: 700; white-space: nowrap; }
+.hist-free-hidden .hist-cloud-item { background: var(--c-card); border-style: dashed; color: #4B5694; }

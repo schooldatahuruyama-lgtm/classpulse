@@ -87,21 +87,26 @@ function renderPoll(stage, slide, mode) {
         el('span', { class: 'slide-poll-text', text: typeof opt === 'string' ? opt : String(opt ?? '') }))))));
 }
 
-// 自由記述のスライド: 質問文と、押せない入力欄の見本。
+// 自由記述・ワードクラウドのスライド: 質問文と、押せない入力欄の見本。
 // 見本は .slide-free-sample（まとめて aria-hidden）。生徒・発表の画面は sample: false で見本を出さず、自分の部品を足す
-function renderFree(stage, slide, mode, sample) {
-  if (mode === 'thumb') stage.append(el('span', { class: 'slide-badge', text: '自由記述' }));
+// boxes は見本の入力欄（自由記述は大きい 1 つ、ワードクラウドは 1 行の 3 つ）
+function renderAsk(stage, slide, mode, sample, badge, boxes) {
+  if (mode === 'thumb') stage.append(el('span', { class: 'slide-badge', text: badge }));
   stage.append(el('div', { class: 'slide-free' },
     el('p', { class: 'slide-free-question', text: typeof slide.question === 'string' ? slide.question : '' }),
     sample
       ? el('div', { class: 'slide-free-sample', 'aria-hidden': 'true' },
-        el('div', { class: 'slide-free-box', text: 'ここに答えを書きます' }),
+        boxes(),
         el('span', { class: 'slide-free-send', text: '送信' }))
       : null));
 }
 
+const FREE_BOXES = () => el('div', { class: 'slide-free-box', text: 'ここに答えを書きます' });
+const CLOUD_BOXES = () => el('div', { class: 'slide-cloud-boxes' },
+  ['言葉 1', '言葉 2', '言葉 3'].map((t) => el('div', { class: 'slide-cloud-box', text: t })));
+
 // container の中身を、slide を描いた 16:9 の枠に置きかえる。mode: 'view'（大きく見せる）か 'thumb'（縮小表示）
-// sample: 自由記述の入力欄の見本を出すか（既定は出す。縮小表示では常に出す）
+// sample: 自由記述・ワードクラウドの入力欄の見本を出すか（既定は出す。縮小表示では常に出す）
 export function renderSlide(container, slide, images, { mode = 'view', sample = true } = {}) {
   const stage = el('div', { class: 'slide-stage' });
   const frame = el('div', { class: mode === 'thumb' ? 'slide-frame slide-thumb' : 'slide-frame' }, stage);
@@ -111,7 +116,10 @@ export function renderSlide(container, slide, images, { mode = 'view', sample = 
     renderPoll(stage, slide, mode);
   } else if (slide && slide.type === 'free') {
     frame.classList.add('slide-is-free');
-    renderFree(stage, slide, mode, mode === 'thumb' || sample);
+    renderAsk(stage, slide, mode, mode === 'thumb' || sample, '自由記述', FREE_BOXES);
+  } else if (slide && slide.type === 'cloud') {
+    frame.classList.add('slide-is-cloud');
+    renderAsk(stage, slide, mode, mode === 'thumb' || sample, 'ワードクラウド', CLOUD_BOXES);
   } else if (slide && Array.isArray(slide.items)) {
     for (const item of slide.items) {
       const node = renderItem(item, images);
