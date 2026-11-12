@@ -1,6 +1,7 @@
 // アプリ全体で使う定数
 export const CONFIG = {
   image: { maxEdge: 1280, maxBytes: 204800, deckMaxBytes: 5242880 },
+  pdf: { maxPages: 30, maxFileBytes: 52428800 },
   autosaveDelayMs: 1000,
   autosaveRetryMs: 5000,
   autosaveMaxWaitMs: 5000,
