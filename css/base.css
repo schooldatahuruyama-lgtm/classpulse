@@ -116,6 +116,13 @@ input[type='text'], input[type='email'], input[type='password'], textarea, selec
 .result-track { grid-column: 2 / 4; height: 16px; border-radius: 8px; background: var(--c-line); overflow: hidden; }
 .result-fill { height: 100%; background: var(--c-main); border-radius: 8px; }
 .result-note { font-size: 12px; margin-top: var(--s-1); }
+/* クイズの正解の行: 「○ 正解」の文字と、太い枠の印（色だけに頼らない） */
+.result-row.is-correct .result-mark { background: var(--c-ok-border); box-shadow: 0 0 0 3px var(--c-card), 0 0 0 5px var(--c-ok-border); }
+.result-row.is-correct .result-fill { background: var(--c-ok-border); }
+.result-correct {
+  display: inline-block; margin-left: 6px; padding: 0 8px; border-radius: 999px;
+  background: var(--c-ok-border); color: #FFFFFF; font-size: 0.85em; font-weight: 700; white-space: nowrap;
+}
 
 /* 確認ダイアログ */
 dialog.confirm { max-width: 440px; width: calc(100% - 32px); padding: var(--s-3); border: 2px solid var(--c-navy); border-radius: var(--r-2); color: var(--c-navy); background: var(--c-card); font-family: inherit; }

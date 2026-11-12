@@ -1,9 +1,12 @@
 // スライド編集: 左の列（スライドの縮小表示、追加、上へ・下へ・複製・削除）
 import { el } from '../../ui.js';
 import { renderSlide } from '../../slide-render.js';
+import { quizCorrect } from '../../model.js';
 
 const kindLabel = (slide) => {
   if (slide && slide.type === 'poll') return 'アンケート';
+  if (slide && slide.type === 'quiz') return 'クイズ';
+  if (slide && slide.type === 'rating') return '5 段階評価';
   if (slide && slide.type === 'free') return '自由記述';
   if (slide && slide.type === 'cloud') return 'ワードクラウド';
   return '資料';
@@ -14,8 +17,15 @@ export function addButtons(ed) {
   return el('div', { class: 'ed-add' },
     el('button', { type: 'button', class: 'btn', text: '＋ 資料スライド', onclick: () => ed.addSlide('content') }),
     el('button', { type: 'button', class: 'btn', text: '＋ アンケート', onclick: () => ed.addSlide('poll') }),
+    el('button', { type: 'button', class: 'btn', text: '＋ クイズ', onclick: () => ed.addSlide('quiz') }),
+    el('button', { type: 'button', class: 'btn', text: '＋ 5 段階評価', onclick: () => ed.addSlide('rating') }),
     el('button', { type: 'button', class: 'btn', text: '＋ 自由記述', onclick: () => ed.addSlide('free') }),
     el('button', { type: 'button', class: 'btn', text: '＋ ワードクラウド', onclick: () => ed.addSlide('cloud') }));
+}
+
+// 縮小表示を描く。編集の画面は先生の準備の画面なので、クイズは正解の印も描く
+function drawThumb(thumb, slide, images) {
+  renderSlide(thumb, slide, images, { mode: 'thumb', correct: slide && slide.type === 'quiz' ? quizCorrect(slide) : null });
 }
 
 function slideActions(ed) {
@@ -39,7 +49,7 @@ export function renderSlideList(host, ed) {
     const slide = deck.slides[id];
     const selected = id === slideId;
     const thumb = el('span', { class: 'ed-thumb' });
-    renderSlide(thumb, slide, deck.images, { mode: 'thumb' });
+    drawThumb(thumb, slide, deck.images);
     list.append(el('li', {},
       el('button', {
         type: 'button', class: 'ed-slide-btn', dataset: { slideId: id },
@@ -70,5 +80,5 @@ export function renderSlideList(host, ed) {
 export function updateThumb(host, ed, slideId) {
   const btn = [...host.querySelectorAll('.ed-slide-btn')].find((b) => b.dataset.slideId === slideId);
   const thumb = btn && btn.querySelector('.ed-thumb');
-  if (thumb) renderSlide(thumb, ed.state.deck.slides[slideId], ed.state.deck.images, { mode: 'thumb' });
+  if (thumb) drawThumb(thumb, ed.state.deck.slides[slideId], ed.state.deck.images);
 }

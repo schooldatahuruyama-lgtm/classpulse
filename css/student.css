@@ -123,3 +123,49 @@
 }
 .st-cloud-input:focus-visible { outline: 3px solid var(--c-main); outline-offset: 2px; }
 .st-cloud-input[readonly] { background: var(--c-bg); cursor: not-allowed; }
+
+/* クイズ: 正解が表示されたあと。正解の選択肢は「○ 正解」の文字と太い枠（色だけに頼らない） */
+.st-option.is-correct { border-color: var(--c-ok-border); box-shadow: inset 0 0 0 2px var(--c-ok-border); }
+.st-option.is-correct.is-selected { box-shadow: inset 0 0 0 2px var(--c-ok-border), 0 0 0 3px var(--c-main); }
+.st-tag-correct { background: var(--c-ok-border); color: #FFFFFF; }
+.st-verdict { margin-top: var(--s-2); }
+.st-verdict:empty { display: none; }
+.st-verdict-text {
+  display: flex; align-items: center; gap: var(--s-1); margin: 0; padding: 12px var(--s-2);
+  border: 2px solid var(--c-border); border-radius: var(--r-1); background: var(--c-card);
+  font-size: 20px; font-weight: 700; overflow-wrap: anywhere;
+}
+.st-verdict-text.is-ok { border-color: var(--c-ok-border); background: #EAF7EF; }
+.st-verdict-text.is-ng { border-color: var(--c-danger-text); }
+.st-verdict-mark {
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 40px; height: 40px; border-radius: 50%; font-size: 24px; color: #FFFFFF; background: var(--c-navy);
+}
+.is-ok > .st-verdict-mark { background: var(--c-ok-border); }
+.is-ng > .st-verdict-mark { background: var(--c-danger-text); }
+
+/* 5 段階評価: 1〜5 の大きなボタンを横に並べ、その下の両はしに言葉 */
+.st-rating-scale { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: var(--s-1); }
+.st-rate {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+  min-width: 0; min-height: 88px; padding: 8px 4px;
+  border: 2px solid var(--c-border); border-radius: var(--r-2);
+  background: var(--c-card); color: var(--c-navy);
+  font: inherit; cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+}
+.st-rate:hover { background: var(--c-bg); }
+.st-rate-num { font-size: 32px; font-weight: 700; line-height: 1; }
+.st-rate .st-tags { justify-content: center; }
+.st-rate .st-tag { padding: 2px 6px; font-size: 12px; white-space: normal; text-align: center; }
+.st-rate.is-selected { border-color: var(--c-main); box-shadow: inset 0 0 0 2px var(--c-main); background: #EEF2FF; }
+.st-rate.is-sent:not(.is-selected) { border-color: var(--c-ok-border); }
+.st-rate[aria-disabled='true'] { cursor: not-allowed; background: var(--c-bg); }
+.st-rate[aria-disabled='true'].is-selected { background: #E4E9FA; }
+.st-rating-ends { display: flex; justify-content: space-between; gap: var(--s-2); margin-top: var(--s-1); font-size: 16px; font-weight: 700; }
+.st-rating-ends > span { min-width: 0; overflow-wrap: anywhere; }
+.st-rating-high { text-align: right; }
+.st-average { margin: var(--s-1) 0 0; font-size: 22px; font-weight: 700; }
+@media (max-width: 480px) {
+  .st-rate { min-height: 76px; }
+  .st-rate-num { font-size: 28px; }
+}

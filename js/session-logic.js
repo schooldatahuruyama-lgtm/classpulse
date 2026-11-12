@@ -8,6 +8,7 @@
 // - 結果をかくすときは、公開済みの集計（results/<slideId>）も消す
 
 import { CONFIG } from './config.js';
+import { isChoiceSlide, choiceCount, ratingOptions, quizCorrect, withoutCorrect } from './model.js';
 
 function toArray(v) {
   if (Array.isArray(v)) return v;
@@ -17,18 +18,31 @@ function toArray(v) {
   return [];
 }
 
+// クイズの正解は、授業の写し（deck）にも pub にも入れず、host/quiz/<slideId> にだけ置く（先生だけが読める）。
+// 評価の写しには options '1'〜'5' を足す（規則の「choice の番号の選択肢が写しにあること」をそのまま使うため）
 export function buildSession(deck, deckId, ownerUid, startedAt) {
   const polls = {};
   for (const id of deck.order) {
     const s = deck.slides[id];
-    if (s && s.type === 'poll') {
+    if (s && s.type === 'quiz') {
+      // クイズは「正解を表示」を押すまで結果を映さない
+      polls[id] = { status: 'waiting', resultsVisible: false };
+    } else if (isChoiceSlide(s)) {
       polls[id] = { status: 'waiting', resultsVisible: s.resultMode === 'live' };
     } else if (s && (s.type === 'free' || s.type === 'cloud')) {
       // 自由記述・ワードクラウドは「結果を表示」を押すまで回答を映さない
       polls[id] = { status: 'waiting', resultsVisible: false };
     }
   }
-  return {
+  const quiz = {};
+  for (const [id, s] of Object.entries(deck.slides)) {
+    if (s && s.type === 'quiz') quiz[id] = quizCorrect(s);
+  }
+  const slides = withoutCorrect({ slides: JSON.parse(JSON.stringify(deck.slides)) }).slides;
+  for (const s of Object.values(slides)) {
+    if (s && s.type === 'rating') s.options = ratingOptions();
+  }
+  const session = {
     owner: ownerUid,
     deckId,
     startedAt,
@@ -40,10 +54,12 @@ export function buildSession(deck, deckId, ownerUid, startedAt) {
     },
     deck: {
       order: [...deck.order],
-      slides: JSON.parse(JSON.stringify(deck.slides)),
+      slides,
       images: { ...(deck.images || {}) },
     },
   };
+  if (Object.keys(quiz).length) session.host = { quiz };
+  return session;
 }
 
 export function goToPatch(pub, order, targetIndex) {
@@ -83,11 +99,14 @@ export function pausePatch(pub, slideId, paused) {
   return null;
 }
 
-export function resultsVisiblePatch(pub, slideId, visible) {
+// closeOnShow（クイズの「正解を表示」）: 表示するときは、同じパッチで質問を締め切る（締切済みならそのまま）。
+// かくすときは status に触れない（締切のまま。受付は再開しない）
+export function resultsVisiblePatch(pub, slideId, visible, { closeOnShow = false } = {}) {
   const poll = (pub.polls || {})[slideId];
   if (!poll || poll.status === 'waiting') return null;
   const patch = { [`polls/${slideId}/resultsVisible`]: !!visible };
   if (!visible) patch[`results/${slideId}`] = null;
+  if (visible && closeOnShow && poll.status !== 'closed') patch[`polls/${slideId}/status`] = 'closed';
   return patch;
 }
 
@@ -107,6 +126,30 @@ export function tally(answers, optionCount) {
 export function percent(count, total) {
   if (!total) return 0;
   return Math.round((count / total) * 100);
+}
+
+// 集計の人数として使える数（数でない・負の値は 0）
+const countOf = (c) => (typeof c === 'number' && Number.isFinite(c) && c > 0 ? c : 0);
+
+// 5 段階評価の平均。counts[i] は i + 1 点の人数。小数 1 けたに丸める。0 人なら null
+export function average(counts) {
+  let sum = 0;
+  let total = 0;
+  toArray(counts).forEach((c, i) => {
+    const n = countOf(c);
+    sum += n * (i + 1);
+    total += n;
+  });
+  if (!total) return null;
+  return Math.round((sum / total) * 10) / 10;
+}
+
+// クイズの正答率。correct が選択肢の番号でなければ、正解の人数は 0。0 人なら percent は null
+export function correctRate(counts, correct) {
+  const list = toArray(counts).map(countOf);
+  const total = list.reduce((a, b) => a + b, 0);
+  const correctCount = Number.isInteger(correct) && correct >= 0 && correct < list.length ? list[correct] : 0;
+  return { correctCount, total, percent: total ? percent(correctCount, total) : null };
 }
 
 const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
@@ -280,8 +323,9 @@ export function cloudList(answers, hidden) {
   return { items, hiddenItems, total: rows.length };
 }
 
-// hidden は { <slideId>: { <uid か hiddenKey>: true } }（省略可）。履歴には uid も鍵も入れない
-export function buildHistory(session, inbox, endedAt, hidden) {
+// hidden は { <slideId>: { <uid か hiddenKey>: true } }（省略可）。履歴には uid も鍵も入れない。
+// quiz は { <slideId>: 正解の番号 }（省略可）。無い・範囲外なら、その質問の correct は null、correctCount は 0
+export function buildHistory(session, inbox, endedAt, hidden, quiz) {
   const deck = session.deck;
   const answers = (inbox && inbox.answers) || {};
   const questions = [];
@@ -313,10 +357,28 @@ export function buildHistory(session, inbox, endedAt, hidden) {
       });
       continue;
     }
-    if (slide.type !== 'poll') continue;
+    if (!isChoiceSlide(slide)) continue;
+    const { counts, total } = tally(answers[slideId], choiceCount(slide));
+    const question = slide.question || '';
+    if (slide.type === 'rating') {
+      questions.push({
+        slideId, type: 'rating', question,
+        lowLabel: String(slide.lowLabel || ''), highLabel: String(slide.highLabel || ''),
+        counts, total, average: average(counts),
+      });
+      continue;
+    }
     const options = toArray(slide.options);
-    const { counts, total } = tally(answers[slideId], options.length);
-    questions.push({ slideId, type: 'poll', question: slide.question || '', options: [...options], counts, total });
+    if (slide.type === 'quiz') {
+      const c = quiz && typeof quiz === 'object' && Object.hasOwn(quiz, slideId) ? quiz[slideId] : null;
+      const correct = Number.isInteger(c) && c >= 0 && c < options.length ? c : null;
+      questions.push({
+        slideId, type: 'quiz', question, options: [...options], counts, total,
+        correct, correctCount: correctRate(counts, correct).correctCount,
+      });
+      continue;
+    }
+    questions.push({ slideId, type: 'poll', question, options: [...options], counts, total });
   }
   return {
     title: session.pub.title,

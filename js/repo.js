@@ -1,6 +1,7 @@
 // 先生のデータ（教材・一覧・授業中の指し先・履歴）の読み書き。
 // 通信は net を引数で受け取る。
 import { normalizeDeck } from './model.js';
+import { CONFIG } from './config.js';
 
 function toArray(v) {
   if (Array.isArray(v)) return [...v];
@@ -48,11 +49,33 @@ function normalizeQuestion(q) {
       total: typeof src.total === 'number' ? src.total : 0,
     };
   }
-  const options = toIndexed(src.options).map((o) => (typeof o === 'string' ? o : o == null ? '' : String(o)));
+  const total = typeof src.total === 'number' ? src.total : 0;
   const rawCounts = toIndexed(src.counts);
-  const counts = Array.from({ length: Math.max(options.length, rawCounts.length) }, (_, i) =>
-    (typeof rawCounts[i] === 'number' ? rawCounts[i] : 0));
-  return { type: 'poll', options, counts, total: typeof src.total === 'number' ? src.total : 0 };
+  const countAt = (i) => (typeof rawCounts[i] === 'number' ? rawCounts[i] : 0);
+  // 5 段階評価は 5 個の人数と平均（データベースは null を落とすので、無ければ null）。言葉は文字列
+  if (src.type === 'rating') {
+    const label = (v) => (typeof v === 'string' ? v : '');
+    return {
+      type: 'rating',
+      lowLabel: label(src.lowLabel),
+      highLabel: label(src.highLabel),
+      counts: Array.from({ length: CONFIG.rating.steps }, (_, i) => countAt(i)),
+      total,
+      average: typeof src.average === 'number' && Number.isFinite(src.average) ? src.average : null,
+    };
+  }
+  const options = toIndexed(src.options).map((o) => (typeof o === 'string' ? o : o == null ? '' : String(o)));
+  const counts = Array.from({ length: Math.max(options.length, rawCounts.length) }, (_, i) => countAt(i));
+  // クイズは正解の番号（選択肢の範囲の整数でなければ null）と正解の人数
+  if (src.type === 'quiz') {
+    const c = src.correct;
+    const correct = Number.isInteger(c) && c >= 0 && c < options.length ? c : null;
+    return {
+      type: 'quiz', options, counts, total, correct,
+      correctCount: correct !== null && typeof src.correctCount === 'number' ? src.correctCount : 0,
+    };
+  }
+  return { type: 'poll', options, counts, total };
 }
 
 export function createRepo(net, uid) {

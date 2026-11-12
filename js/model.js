@@ -31,6 +31,9 @@ export function createDeck(title, now) {
 
 export function createSlide(type) {
   if (type === 'poll') return { type: 'poll', question: '', options: ['', ''], resultMode: 'manual' };
+  // クイズは作った直後、1 つ目の選択肢が正解
+  if (type === 'quiz') return { type: 'quiz', question: '', options: ['', ''], correct: 0 };
+  if (type === 'rating') return { type: 'rating', question: '', lowLabel: '', highLabel: '', resultMode: 'manual' };
   if (type === 'free') return { type: 'free', question: '' };
   if (type === 'cloud') return { type: 'cloud', question: '' };
   return { type: 'content', items: [] };
@@ -124,6 +127,71 @@ function plainObject(v) {
   return v && typeof v === 'object' && !Array.isArray(v) ? v : {};
 }
 
+// ---- 選ぶ種類の質問（アンケート・クイズ・5 段階評価）----
+// どれも回答は { choice, at }、集計は { counts, total } で、アンケートのしくみに乗せる
+
+const CHOICE_TYPES = new Set(['poll', 'quiz', 'rating']);
+
+// 選択肢から 1 つ選ぶ種類のスライドか（poll・quiz・rating）
+export function isChoiceSlide(slide) {
+  return !!slide && typeof slide === 'object' && CHOICE_TYPES.has(slide.type);
+}
+
+// 5 段階評価の選択肢の文（'1'〜'5'）。授業の写しの options にも使う
+export function ratingOptions() {
+  return Array.from({ length: CONFIG.rating.steps }, (_, i) => String(i + 1));
+}
+
+// 選べる選択肢の数。評価は options によらず段階の数。選ぶ種類でなければ 0
+export function choiceCount(slide) {
+  if (!isChoiceSlide(slide)) return 0;
+  if (slide.type === 'rating') return CONFIG.rating.steps;
+  return toArray(slide.options).length;
+}
+
+// クイズの正解の番号。0 以上・選択肢の数未満の整数でなければ 0
+export function quizCorrect(slide) {
+  const c = slide && slide.correct;
+  const n = toArray(slide && slide.options).length;
+  return Number.isInteger(c) && c >= 0 && c < n ? c : 0;
+}
+
+// 選択肢を 1 つ消したスライド（元は書きかえない）。範囲外なら何も消さない。
+// クイズは、正解を消したら 1 つ目を正解にし、正解より前を消したら番号を 1 減らす（正解が別の選択肢にずれない）
+export function removeOption(slide, index) {
+  const options = toArray(slide.options);
+  if (!Number.isInteger(index) || index < 0 || index >= options.length) return { ...slide, options };
+  const next = options.filter((_, k) => k !== index);
+  if (slide.type !== 'quiz') return { ...slide, options: next };
+  const c = quizCorrect(slide);
+  const correct = c === index ? 0 : c > index ? c - 1 : c;
+  return { ...slide, options: next, correct };
+}
+
+// クイズのスライドから correct を外した教材（授業の写し・生徒と発表画面に渡す教材に使う）。元は書きかえない
+export function withoutCorrect(deck) {
+  const slides = {};
+  for (const [id, s] of Object.entries(deck.slides || {})) {
+    if (s && s.type === 'quiz') {
+      const rest = { ...s };
+      delete rest.correct;
+      slides[id] = rest;
+    } else {
+      slides[id] = s;
+    }
+  }
+  return { ...deck, slides };
+}
+
+// 文字列を max 文字までに切る（対になる文字を半分にしない）
+function cutText(v, max) {
+  if (typeof v !== 'string') return '';
+  if (v.length <= max) return v;
+  let t = v.slice(0, max);
+  if (/[\uD800-\uDBFF]$/.test(t)) t = t.slice(0, -1);
+  return t;
+}
+
 function normalizeSlide(raw) {
   const s = plainObject(raw);
   if (s.type === 'poll') {
@@ -132,6 +200,30 @@ function normalizeSlide(raw) {
       type: 'poll',
       question: typeof s.question === 'string' ? s.question : '',
       options: toArray(s.options),
+      resultMode: s.resultMode === 'live' ? 'live' : 'manual',
+    };
+  }
+  // クイズはアンケートと同じに正し、正解の番号を範囲に収める（結果の出し方は持たない）
+  if (s.type === 'quiz') {
+    const rest = { ...s };
+    delete rest.resultMode;
+    const options = toArray(s.options);
+    return {
+      ...rest,
+      type: 'quiz',
+      question: typeof s.question === 'string' ? s.question : '',
+      options,
+      correct: quizCorrect({ options, correct: s.correct }),
+    };
+  }
+  // 評価は質問文・両はしの言葉・結果の出し方だけを残す（授業の写しの options も落とす。数は段階の数で決まる）
+  if (s.type === 'rating') {
+    const max = CONFIG.rating.labelMaxLength;
+    return {
+      type: 'rating',
+      question: typeof s.question === 'string' ? s.question : '',
+      lowLabel: cutText(s.lowLabel, max),
+      highLabel: cutText(s.highLabel, max),
       resultMode: s.resultMode === 'live' ? 'live' : 'manual',
     };
   }
@@ -165,10 +257,10 @@ export function validateDeck(deck) {
   const problems = [];
   deck.order.forEach((id, i) => {
     const s = deck.slides[id];
-    if (!s || (s.type !== 'poll' && s.type !== 'free' && s.type !== 'cloud')) return;
+    if (!s || (!isChoiceSlide(s) && s.type !== 'free' && s.type !== 'cloud')) return;
     const n = `${i + 1} 枚目`;
-    // 自由記述・ワードクラウドは質問文だけを確かめる
-    if (s.type === 'free' || s.type === 'cloud') {
+    // 自由記述・ワードクラウド・評価は質問文だけを確かめる（評価の選択肢は 1〜5 で決まっている）
+    if (s.type === 'free' || s.type === 'cloud' || s.type === 'rating') {
       if (String(s.question || '').trim() === '') problems.push(`${n}: 質問文を入れてください。`);
       return;
     }

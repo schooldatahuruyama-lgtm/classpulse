@@ -6,9 +6,15 @@
 // 文章は textContent でだけ入れる。
 // ワードクラウドも同じ: 結果を表示する前は言葉の要素を 1 つも作らない。言葉は textContent で入れ、
 // かくすための鍵は JavaScript の Map とクロージャの中だけで持つ（属性には入れない）。
-import { el, confirmDialog, closeAllDialogs, statusChip, resultBars, toast } from '../ui.js';
+// クイズは「正解を表示」の前は、正解の印も選択肢ごとの人数も DOM に作らない（「回答 n 人 ／ 参加 m 人」だけ）。
+// 正解を表示すると、その質問は締め切られる（受付の停止・再開のボタンは出さない）。
+import {
+  el, confirmDialog, closeAllDialogs, statusChip, resultBars, toast,
+  ratingAverageText, correctRateText, ratingBarLabels,
+} from '../ui.js';
 import { renderSlide } from '../slide-render.js';
 import { createSessionHost } from '../session-host.js';
+import { isChoiceSlide, ratingOptions } from '../model.js';
 
 const FAIL = '通信できなかったため、進められませんでした。';
 const ENDING = '授業を終了しています…';
@@ -21,6 +27,29 @@ const POLL_STATUS = {
   paused: { kind: 'warn', label: '受付停止中' },
   closed: { kind: 'danger', label: '締切済み' },
 };
+
+// ---- 受付・結果のボタンの決めごと（純粋な関数。テストあり） ----
+// kind はスライドの種類、status は受付の状態、resultsVisible は結果（クイズは正解）を表示しているか。
+// pauseHidden: 受付の停止・再開のボタンを出さないか（クイズは締め切ったあと＝正解を表示したあと）。
+// pauseBlocked・resultsBlocked: 受付の状態のために押せないか（通信待ちなどは画面の側で足す）
+export function pollControls({ kind, status, resultsVisible }) {
+  const quiz = kind === 'quiz';
+  return {
+    pauseLabel: status === 'paused' ? '受付を再開' : '受付を止める',
+    pauseHidden: quiz && (status === 'closed' || !!resultsVisible),
+    pauseBlocked: status !== 'open' && status !== 'paused',
+    resultsLabel: quiz
+      ? (resultsVisible ? '正解をかくす' : '正解を表示')
+      : (resultsVisible ? '結果をかくす' : '結果を表示'),
+    resultsBlocked: status === 'waiting',
+  };
+}
+
+// クイズの結果の下に出す文。正解が分かれば正答率、分からなければ（正解を読みこめなかった）その旨
+export function quizSummaryText(correct, rate) {
+  if (!Number.isInteger(correct)) return '正解のデータを読みこめませんでした';
+  return correctRateText(rate);
+}
 
 // ---- ワードクラウドの見た目の決めごと（純粋な関数。テストあり） ----
 // 文字の大きさ（発表の画面の置き場所の幅に対する %、cqw）。いちばん小さくても CSS で 28px より小さくしない
@@ -269,15 +298,15 @@ export function mount(root, ctx) {
     const cur = state && state.pub && state.pub.current;
     const id = cur && cur.slideId;
     const slide = id ? state.slides[id] : null;
-    // アンケート・自由記述・ワードクラウド（受付の停止・再開と結果の表示は同じ操作）
-    if (!slide || (slide.type !== 'poll' && slide.type !== 'free' && slide.type !== 'cloud')) return null;
+    // アンケート・クイズ・5 段階評価・自由記述・ワードクラウド（受付の停止・再開と結果の表示は同じ操作）
+    if (!slide || (!isChoiceSlide(slide) && slide.type !== 'free' && slide.type !== 'cloud')) return null;
     const poll = (state.pub.polls || {})[id];
     return poll ? { id, slide, poll } : null;
   }
 
   function togglePause() {
     const p = currentPoll();
-    if (!p || isOff(live.pauseBtn)) return;
+    if (!p || isOff(live.pauseBtn) || live.pauseBtn.hidden) return;
     // 表示しているスライドを渡す（順番が来たときに別のスライドになっていたら、host は何もしない）
     once('pause', () => host.setPaused(p.poll.status === 'open', p.id));
   }
@@ -561,11 +590,25 @@ export function mount(root, ctx) {
       info ? statusChip(info.kind, info.label) : null,
       el('p', { class: 'pr-answers', text: `回答 ${answered} 人 ／ 参加 ${state.participants} 人` }),
     ];
-    // 非公開の質問の集計は、ここで止める（DOM に入れない）
-    if (p.poll.resultsVisible === true && t) {
+    // 非公開の質問の集計は、ここで止める（DOM に入れない）。
+    // クイズは表示前の集計に counts が無い（host が人数だけ渡す）。counts が無ければ棒を作らない
+    if (p.poll.resultsVisible === true && t && Array.isArray(t.counts)) {
       const box = el('div', { class: 'pr-results' });
-      const options = Array.isArray(p.slide.options) ? p.slide.options : [];
-      resultBars(box, { options, counts: t.counts, total: t.total });
+      if (p.slide.type === 'rating') {
+        // 5 段階評価: 1〜5 の棒（両はしの行に言葉）と平均
+        const marks = ratingOptions();
+        resultBars(box, { options: ratingBarLabels(p.slide.lowLabel, p.slide.highLabel, marks.length), marks, counts: t.counts, total: t.total });
+        box.append(el('p', { class: 'pr-summary', text: ratingAverageText(state.average, t.total) }));
+      } else if (p.slide.type === 'quiz') {
+        // クイズ: 選択肢ごとの人数・正解の印・正答率（正解を読みこめなかったときは印を付けず、その旨を出す）
+        const options = Array.isArray(p.slide.options) ? p.slide.options : [];
+        const correct = Number.isInteger(state.correct) ? state.correct : null;
+        resultBars(box, { options, counts: t.counts, total: t.total, correct });
+        box.append(el('p', { class: 'pr-summary', text: quizSummaryText(correct, state.correctRate) }));
+      } else {
+        const options = Array.isArray(p.slide.options) ? p.slide.options : [];
+        resultBars(box, { options, counts: t.counts, total: t.total });
+      }
       children.push(box);
     }
     live.poll.replaceChildren(...children);
@@ -591,7 +634,11 @@ export function mount(root, ctx) {
     // （freeItems・cloudItems が null の間は作らない。スライドが変わる・結果をかくすと、一覧・雲・確認も捨てる）
     const showBoard = index >= 0 && !!slide && slide.type === 'free' && Array.isArray(state.freeItems);
     const showCloud = index >= 0 && !!slide && slide.type === 'cloud' && Array.isArray(state.cloudItems);
-    const key = index < 0 ? 'join' : `${showBoard ? 'board' : showCloud ? 'cloud' : 'slide'}:${cur.slideId}`;
+    // クイズの正解の印は、正解を表示している間だけ中央のスライドにも付ける（state.correct は表示中だけ届く）
+    const pollNow = index >= 0 ? currentPoll() : null;
+    const shownCorrect = !!slide && slide.type === 'quiz' && pollNow && pollNow.poll.resultsVisible === true
+      && Number.isInteger(state.correct) ? state.correct : null;
+    const key = index < 0 ? 'join' : `${showBoard ? 'board' : showCloud ? 'cloud' : 'slide'}:${cur.slideId}${shownCorrect !== null ? `:correct:${shownCorrect}` : ''}`;
     if (key !== shownKey) {
       shownKey = key;
       dropBoards();
@@ -602,7 +649,7 @@ export function mount(root, ctx) {
       } else if (showCloud) {
         cloud = buildCloud(cur.slideId, slide);
         l.stage.replaceChildren(cloud.root);
-      } else renderSlide(l.stage, slide, state.images, { sample: false });
+      } else renderSlide(l.stage, slide, state.images, { sample: false, correct: shownCorrect });
       l.stage.classList.toggle('is-join', index < 0);
       l.stage.classList.toggle('is-board', showBoard || showCloud);
     }
@@ -611,7 +658,7 @@ export function mount(root, ctx) {
     l.wrap.querySelectorAll('.pr-join-count').forEach((n) => { n.textContent = participantsText(); });
 
     // アンケートの状況
-    const p = index >= 0 ? currentPoll() : null;
+    const p = pollNow;
     l.poll.hidden = !p;
     if (p) renderPoll(p);
     else l.poll.replaceChildren();
@@ -628,11 +675,12 @@ export function mount(root, ctx) {
     l.pollGroup.hidden = !p;
     if (p) {
       // スライドの移動の通信待ちの間は、どのスライドへの操作か食い違うので押せない
-      const status = p.poll.status;
-      l.pauseBtn.textContent = status === 'paused' ? '受付を再開' : '受付を止める';
-      setOff(l.pauseBtn, off || moving > 0 || pending.pause || (status !== 'open' && status !== 'paused'));
-      l.resultsBtn.textContent = p.poll.resultsVisible ? '結果をかくす' : '結果を表示';
-      setOff(l.resultsBtn, off || moving > 0 || pending.results || status === 'waiting');
+      const c = pollControls({ kind: p.slide.type, status: p.poll.status, resultsVisible: p.poll.resultsVisible });
+      if (l.pauseBtn.textContent !== c.pauseLabel) l.pauseBtn.textContent = c.pauseLabel;
+      l.pauseBtn.hidden = c.pauseHidden;
+      setOff(l.pauseBtn, off || moving > 0 || pending.pause || c.pauseBlocked);
+      if (l.resultsBtn.textContent !== c.resultsLabel) l.resultsBtn.textContent = c.resultsLabel;
+      setOff(l.resultsBtn, off || moving > 0 || pending.results || c.resultsBlocked);
     }
     setOff(l.endBtn, off);
 

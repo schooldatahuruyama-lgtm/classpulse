@@ -123,3 +123,7 @@
 .hist-cloud-word { font-size: 18px; font-weight: 700; overflow-wrap: anywhere; min-width: 0; }
 .hist-cloud-count { flex: none; font-weight: 700; white-space: nowrap; }
 .hist-free-hidden .hist-cloud-item { background: var(--c-card); border-style: dashed; color: #4B5694; }
+
+/* クイズの正答率・5 段階評価の平均 */
+.hist-summary { margin: var(--s-1) 0 4px; font-size: 18px; font-weight: 700; }
+.hist-rating-ends { margin: 0 0 var(--s-1); }

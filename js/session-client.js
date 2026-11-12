@@ -2,7 +2,7 @@
 // DOM・グローバルに触れない（net・auth・storage は引数で受け取る）。
 // 画面には state を 1 つだけ onChange で渡す。生徒の匿名 ID は state に入れない。
 import { NetError } from './errors.js';
-import { normalizeDeck } from './model.js';
+import { normalizeDeck, withoutCorrect, isChoiceSlide, choiceCount } from './model.js';
 import { createOutbox } from './outbox.js';
 import { normalizeText, normalizeWords, sameWords } from './session-logic.js';
 import { CONFIG } from './config.js';
@@ -212,6 +212,10 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
       // text は、送信済み・送信中など、最後に送ろうとした文章（無ければ null）。answer.text と同じ。
       // words は、ワードクラウドで最後に送ろうとした言葉の配列（無ければ null）。answer.words と同じ
       kind: null, text: null, words: null,
+      // クイズ・評価: kind は 'quiz' / 'rating'（選ぶ・送るはアンケートと同じ select / submit）。
+      // correct は、クイズの正解が表示されている間だけ正解の番号（pub/results/<slideId>.correct。表示前は null）。
+      // isCorrect は、そのとき送信済みの自分の答えが正解か（true / false。送信済みの答えが無ければ null）
+      correct: null, isCorrect: null,
       // この授業で、届いたか確かめられなかった回答の数（今のスライドや、教材を読めたかによらない）
       unconfirmedCount: uid ? outbox.unconfirmedCount(okey()) : 0,
     };
@@ -241,6 +245,16 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
       base.kind = 'cloud';
       base.selected = null;
       base.words = base.answer && Array.isArray(base.answer.words) ? [...base.answer.words] : null;
+    }
+    if (base.slide && (base.slide.type === 'quiz' || base.slide.type === 'rating')) base.kind = base.slide.type;
+    if (base.slide && base.slide.type === 'quiz' && base.results) {
+      const r = pub.results[slideId];
+      const c = r && r.correct;
+      if (Number.isInteger(c) && c >= 0 && c < choiceCount(base.slide)) {
+        base.correct = c;
+        const a = base.answer;
+        base.isCorrect = a && a.state === 'sent' && Number.isInteger(a.choice) ? a.choice === c : null;
+      }
     }
     return base;
   }
@@ -337,7 +351,8 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
         const rawDeck = await net.get(`sessions/${sid}/deck`);
         if (stopped) return;
         if (rawDeck === null) throw new NetError('unknown', '教材が見つかりません');
-        deck = normalizeDeck(rawDeck);
+        // クイズの写しに正解は無いが、正したときに足される既定の correct も外す（画面に正解らしい値を渡さない）
+        deck = withoutCorrect(normalizeDeck(rawDeck));
         await join();
         if (stopped) return;
       } catch {
@@ -353,8 +368,9 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
       const cur = pub.current || {};
       const poll = pub.polls && pub.polls[cur.slideId];
       const slide = cur.slideId ? deck.slides[cur.slideId] : null;
-      if (!poll || poll.status === 'closed' || !slide || slide.type !== 'poll') return;
-      if (choice < 0 || choice >= slide.options.length) return;
+      // アンケート・クイズ・評価（評価の選択肢は 0〜4 = 画面の 1〜5）
+      if (!poll || poll.status === 'closed' || !isChoiceSlide(slide)) return;
+      if (choice < 0 || choice >= choiceCount(slide)) return;
       selected = choice;
       emit();
     },
@@ -365,7 +381,7 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
       const slideId = cur.slideId;
       const poll = slideId && pub.polls ? pub.polls[slideId] : null;
       const slide = slideId && deck ? deck.slides[slideId] : null;
-      if (!poll || poll.status !== 'open' || selected === null || !slide || slide.type !== 'poll') return;
+      if (!poll || poll.status !== 'open' || selected === null || !isChoiceSlide(slide)) return;
       const p = outbox.put(okey(), slideId, selected);
       emit(); // 送信中
       await p;

@@ -50,6 +50,8 @@ body:has(.present) #toasts { bottom: 160px; }
 .pr-poll .chip { font-size: 18px; min-height: 36px; }
 .pr-answers { margin: 0; font-size: 22px; font-weight: 700; }
 .pr-results { width: 100%; font-size: 18px; }
+/* クイズの正答率・5 段階評価の平均（結果の棒の下） */
+.pr-summary { margin: var(--s-1) 0 0; font-size: 22px; font-weight: 700; }
 @media (min-aspect-ratio: 1/1) {
   .pr-body { flex-direction: row; }
   .pr-poll { flex: 0 0 280px; max-height: none; }
