@@ -4,6 +4,8 @@
 // 自由記述は、結果を表示する前は文章の要素を 1 つも作らない（かくすのではなく、作らない）。
 // 生徒の uid は DOM（属性・id・dataset も）に入れず、カードとの対応は JavaScript の Map だけで持つ。
 // 文章は textContent でだけ入れる。
+// ワードクラウドも同じ: 結果を表示する前は言葉の要素を 1 つも作らない。言葉は textContent で入れ、
+// かくすための鍵は JavaScript の Map とクロージャの中だけで持つ（属性には入れない）。
 import { el, confirmDialog, closeAllDialogs, statusChip, resultBars, toast } from '../ui.js';
 import { renderSlide } from '../slide-render.js';
 import { createSessionHost } from '../session-host.js';
@@ -19,6 +21,48 @@ const POLL_STATUS = {
   paused: { kind: 'warn', label: '受付停止中' },
   closed: { kind: 'danger', label: '締切済み' },
 };
+
+// ---- ワードクラウドの見た目の決めごと（純粋な関数。テストあり） ----
+// 文字の大きさ（発表の画面の置き場所の幅に対する %、cqw）。いちばん小さくても CSS で 28px より小さくしない
+export const CLOUD_FONT = { min: 3.6, max: 10, same: 5.5 };
+
+// 人数から文字の大きさを決める。minCount・maxCount は、出している言葉の中の最小と最大の人数。
+// 全員が同じ人数なら同じ大きさ（same）、最大の人数は max、最小の人数は min。間は人数の平方根で（差が大きすぎないように）
+export function cloudFontSize(count, minCount, maxCount) {
+  const { min, max, same } = CLOUD_FONT;
+  const lo = Math.max(Number(minCount), 0);
+  const hi = Number(maxCount);
+  if (!Number.isFinite(lo) || !Number.isFinite(hi) || !(hi > lo)) return same;
+  const c = Math.min(Math.max(Number(count) || 0, lo), hi);
+  const t = (Math.sqrt(c) - Math.sqrt(lo)) / (Math.sqrt(hi) - Math.sqrt(lo));
+  return Math.round((min + t * (max - min)) * 10) / 10;
+}
+
+// 文字列から決まる 32 ビットの数（FNV-1a）。並びと色を言葉から決めるのに使う
+function hash32(text) {
+  let h = 0x811c9dc5;
+  const s = String(text);
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h >>> 0;
+}
+
+// 雲の並び: 言葉の鍵から決まる順（人数の順ではないので、大きい言葉が 1 か所に固まらない。
+// 渡された順に左右されず、表示のたびに変わらない）。元の配列は変えない
+export function cloudOrder(items) {
+  return (Array.isArray(items) ? items : [])
+    .map((it) => ({ it, h: hash32(it.key) }))
+    .sort((a, b) => (a.h - b.h) || (a.it.key < b.it.key ? -1 : a.it.key > b.it.key ? 1 : 0))
+    .map((x) => x.it);
+}
+
+// 言葉の色（0〜3。css/present.css の .is-t0〜.is-t3。どれも白い地との明るさの差が足りる色）
+export const CLOUD_TONES = 4;
+export function cloudTone(key) {
+  return hash32(`tone:${key}`) % CLOUD_TONES;
+}
 
 // 参加の URL: 今の場所の # より前（?demo=1 などはそのまま）に #/join/<sid> を付ける
 export function joinUrl(href, sid) {
@@ -71,6 +115,7 @@ export function mount(root, ctx) {
   let live = null; // 発表中の画面の部品（最初に live になったときに作る）
   let shownKey = null; // 中央に出しているもの（'join'、'slide:<id>'、自由記述の一覧は 'board:<id>'）
   let board = null; // 自由記述の回答の一覧（結果の表示中だけ作る。スライドが変わったら作り直す）
+  let cloud = null; // ワードクラウドの雲（結果の表示中だけ作る。スライドが変わったら作り直す）
   let qrDialog = null;
   const pending = { pause: false, results: false };
   let moving = 0; // 通信待ちのスライド移動の数（その間は受付・結果の操作を押せない）
@@ -127,10 +172,17 @@ export function mount(root, ctx) {
     goHistory();
   }
 
+  // 一覧・雲を捨てる。雲の言葉の確認を開いていたら、取り消しとして閉じる（古い言葉に対して操作しない）
+  function dropBoards() {
+    if (cloud && cloud.ask) cloud.ask.abort();
+    cloud = null;
+    board = null;
+  }
+
   function page(...children) {
     live = null;
     shownKey = null;
-    board = null;
+    dropBoards();
     root.replaceChildren(el('div', { class: 'present present-message' }, el('div', { class: 'page-pad' }, ...children)));
   }
 
@@ -217,8 +269,8 @@ export function mount(root, ctx) {
     const cur = state && state.pub && state.pub.current;
     const id = cur && cur.slideId;
     const slide = id ? state.slides[id] : null;
-    // アンケートと自由記述（受付の停止・再開と結果の表示は同じ操作）
-    if (!slide || (slide.type !== 'poll' && slide.type !== 'free')) return null;
+    // アンケート・自由記述・ワードクラウド（受付の停止・再開と結果の表示は同じ操作）
+    if (!slide || (slide.type !== 'poll' && slide.type !== 'free' && slide.type !== 'cloud')) return null;
     const poll = (state.pub.polls || {})[id];
     return poll ? { id, slide, poll } : null;
   }
@@ -277,7 +329,7 @@ export function mount(root, ctx) {
     l.wrap = el('div', { class: 'present' }, l.banner, l.hiddenWarn, l.ending, el('div', { class: 'pr-body' }, l.stage, l.poll), l.bar);
     root.replaceChildren(l.wrap);
     shownKey = null;
-    board = null;
+    dropBoards();
     return l;
   }
 
@@ -392,15 +444,115 @@ export function mount(root, ctx) {
     host.hide(b.slideId, uid).catch(() => { if (alive && endState === 'idle') toast('回答をかくせませんでした。'); });
   }
 
+  // ---- ワードクラウドの雲（結果の表示中だけ） ----
+  // 言葉の鍵（hiddenKey）は、この中の Map のキーと、クロージャの中だけで持つ（DOM には入れない）
+  function buildCloud(slideId, slide) {
+    const c = { slideId, words: new Map(), ask: null };
+    c.list = el('ul', { class: 'pr-cloud-list', 'aria-label': '言葉の一覧' });
+    c.empty = el('p', { class: 'pr-free-empty', hidden: true, text: 'まだ回答はありません。' });
+    c.more = el('p', { class: 'pr-cloud-more muted', hidden: true });
+    c.root = el('div', { class: 'pr-free-board pr-cloud-board' },
+      el('h2', { class: 'pr-free-question', text: typeof slide.question === 'string' ? slide.question : '' }),
+      c.empty,
+      el('div', { class: 'pr-cloud-scroll' }, c.list),
+      c.more);
+    return c;
+  }
+
+  function cloudWord(c, key) {
+    const w = { word: null, count: 0, size: null, label: null };
+    w.btn = el('button', { type: 'button', class: `pr-cloud-word is-t${cloudTone(key)}`, onclick: () => askHideWord(c, key) });
+    w.li = el('li', { class: 'pr-cloud-item' }, w.btn);
+    return w;
+  }
+
+  // 雲を items（[{ key, word, count }]）に合わせる。言葉の要素は作り直さず、増減・文字・大きさの書きかえと並べかえだけ
+  function updateCloud(c, items, more) {
+    const before = document.activeElement;
+    let lostAt = -1;
+    const counts = items.map((it) => it.count);
+    const lo = counts.length ? Math.min(...counts) : 0;
+    const hi = counts.length ? Math.max(...counts) : 0;
+    const seen = new Set();
+    cloudOrder(items).forEach((it, i) => {
+      seen.add(it.key);
+      let w = c.words.get(it.key);
+      if (!w) {
+        w = cloudWord(c, it.key);
+        c.words.set(it.key, w);
+      }
+      if (w.word !== it.word) { w.word = it.word; w.btn.textContent = it.word; }
+      w.count = it.count;
+      const size = String(cloudFontSize(it.count, lo, hi));
+      if (w.size !== size) { w.size = size; w.btn.style.setProperty('--cw', size); }
+      const label = `${it.word}、${it.count} 人`;
+      if (w.label !== label) { w.label = label; w.btn.setAttribute('aria-label', label); }
+      const at = c.list.children[i];
+      if (at !== w.li) c.list.insertBefore(w.li, at || null);
+    });
+    for (const [key, w] of c.words) {
+      if (seen.has(key)) continue;
+      // フォーカスのあった言葉か、確認を開いている言葉（閉じるとフォーカスの戻り先が無い）が消えたら、その位置
+      const askedHere = c.ask && c.ask.key === key;
+      if (askedHere || (before instanceof Node && w.li.contains(before))) lostAt = Array.prototype.indexOf.call(c.list.children, w.li);
+      w.li.remove();
+      c.words.delete(key);
+    }
+    // 確認を開いている言葉が雲から消えたら（かくした・60 語から外れたなど）、確認を閉じる
+    if (c.ask && !c.words.has(c.ask.key)) c.ask.abort();
+    c.empty.hidden = items.length > 0;
+    const n = Number.isInteger(more) && more > 0 ? more : 0;
+    c.more.hidden = n === 0;
+    const moreText = n ? `ほか ${n} 語` : '';
+    if (c.more.textContent !== moreText) c.more.textContent = moreText;
+
+    // 消えた言葉にフォーカスがあったら、近くの言葉（無ければ結果のボタン）へ。並べかえで外れたら戻す
+    if (lostAt >= 0) {
+      const next = c.list.children[Math.min(lostAt, c.list.children.length - 1)];
+      const btn = next ? next.querySelector('.pr-cloud-word') : null;
+      if (btn) btn.focus();
+      else if (live) live.resultsBtn.focus();
+    } else if (before instanceof HTMLElement && before !== document.activeElement && before.isConnected) {
+      before.focus();
+    }
+  }
+
+  // 言葉をタップ: 「『〇〇』 3 人」と「かくす」「とじる」。かくすのは言葉の鍵（確認の間に人数が変わっても同じ言葉）
+  async function askHideWord(c, key) {
+    const w = c.words.get(key);
+    if (!alive || cloud !== c || endState !== 'idle' || !w || c.ask) return;
+    const ctrl = new AbortController();
+    const ask = { key, abort: () => ctrl.abort() };
+    c.ask = ask;
+    let ok = false;
+    try {
+      ok = await confirmDialog({
+        title: `『${w.word}』 ${w.count} 人`,
+        body: 'かくすと、授業中は元にもどせません。',
+        okLabel: 'かくす',
+        cancelLabel: 'とじる',
+        danger: true,
+        signal: ctrl.signal,
+      });
+    } finally {
+      if (c.ask === ask) c.ask = null;
+    }
+    // 確認の間に、スライドが変わった・結果をかくした・画面を離れた・言葉が消えたなら何もしない
+    if (!ok || !alive || cloud !== c || endState !== 'idle' || !c.words.has(key)) return;
+    // 雲からはすぐに消える。保存は host が裏で行う。拒否されることがあるので、必ず受け止める
+    host.hide(c.slideId, key).catch(() => { if (alive && endState === 'idle') toast('言葉をかくせませんでした。'); });
+  }
+
   // アンケートの状況: 状態のチップ、回答数、結果（公開中のときだけ）
   function renderPoll(p) {
     const info = POLL_STATUS[p.poll.status] || null;
-    if (p.slide.type === 'free') {
-      // 自由記述: 状態と件数だけ（文章は中央の一覧に、表示中だけ出す）
+    if (p.slide.type === 'free' || p.slide.type === 'cloud') {
+      // 自由記述・ワードクラウド: 状態と件数だけ（文章・言葉は中央に、表示中だけ出す）
       const n = Number.isInteger(state.answerCount) ? state.answerCount : 0;
+      const unit = p.slide.type === 'free' ? '件' : '人';
       live.poll.replaceChildren(
         info ? statusChip(info.kind, info.label) : '',
-        el('p', { class: 'pr-answers', text: `回答 ${n} 件 ／ 参加 ${state.participants} 人` }));
+        el('p', { class: 'pr-answers', text: `回答 ${n} ${unit} ／ 参加 ${state.participants} 人` }));
       return;
     }
     const t = state.tallies[p.id];
@@ -435,22 +587,27 @@ export function mount(root, ctx) {
     const total = state.order.length;
     const slide = index >= 0 && cur.slideId ? state.slides[cur.slideId] || null : null;
 
-    // 中央: 参加の画面か、今のスライド。自由記述の結果を表示中なら、回答の一覧
-    // （freeItems が null の間は一覧を作らない。スライドが変わる・結果をかくすと、一覧も大きい表示も捨てる）
+    // 中央: 参加の画面か、今のスライド。自由記述の結果を表示中なら回答の一覧、ワードクラウドなら雲
+    // （freeItems・cloudItems が null の間は作らない。スライドが変わる・結果をかくすと、一覧・雲・確認も捨てる）
     const showBoard = index >= 0 && !!slide && slide.type === 'free' && Array.isArray(state.freeItems);
-    const key = index < 0 ? 'join' : `${showBoard ? 'board' : 'slide'}:${cur.slideId}`;
+    const showCloud = index >= 0 && !!slide && slide.type === 'cloud' && Array.isArray(state.cloudItems);
+    const key = index < 0 ? 'join' : `${showBoard ? 'board' : showCloud ? 'cloud' : 'slide'}:${cur.slideId}`;
     if (key !== shownKey) {
       shownKey = key;
-      board = null;
+      dropBoards();
       if (index < 0) l.stage.replaceChildren(joinContent('pr-join-title'));
       else if (showBoard) {
         board = buildBoard(cur.slideId, slide);
         l.stage.replaceChildren(board.root);
+      } else if (showCloud) {
+        cloud = buildCloud(cur.slideId, slide);
+        l.stage.replaceChildren(cloud.root);
       } else renderSlide(l.stage, slide, state.images, { sample: false });
       l.stage.classList.toggle('is-join', index < 0);
-      l.stage.classList.toggle('is-board', showBoard);
+      l.stage.classList.toggle('is-board', showBoard || showCloud);
     }
     if (board) updateBoard(board, state.freeItems);
+    if (cloud) updateCloud(cloud, state.cloudItems, state.cloudMore);
     l.wrap.querySelectorAll('.pr-join-count').forEach((n) => { n.textContent = participantsText(); });
 
     // アンケートの状況
@@ -547,6 +704,7 @@ export function mount(root, ctx) {
 
   return () => {
     alive = false;
+    dropBoards();
     closeAllDialogs(); // 開いたままの確認（授業の終了など）は、取り消しとして閉じる
     document.removeEventListener('keydown', onKey);
     if (qrDialog) { const d = qrDialog; qrDialog = null; d.close(); }

@@ -95,17 +95,30 @@ export function renderPollSettings(host, ed) {
     el('p', { class: 'ed-note', text: POLL_NOTE }));
 }
 
-// 自由記述の右の列（質問文だけ）。入力中は右の列を描き直さず、中央の見本だけ ed.patchSlide で更新する
-export function renderFreeSettings(host, ed) {
+export const CLOUD_NOTE = '生徒は短い言葉を 3 つまで送ります。多くの人が書いた言葉ほど大きく映ります。次のスライドへ進むと締め切ります。';
+
+// 質問文だけを持つスライド（自由記述・ワードクラウド）の右の列。
+// 入力中は右の列を描き直さず、中央の見本だけ ed.patchSlide で更新する
+function renderQuestionSettings(host, ed, title, note) {
   const slide = ed.currentSlide();
   const question = el('textarea', {
     id: 'ed-free-question', rows: '4', value: slide.question || '',
     oninput: () => ed.patchSlide({ question: question.value }),
   });
   host.replaceChildren(
-    el('h2', { class: 'ed-col-title', text: '自由記述の設定' }),
+    el('h2', { class: 'ed-col-title', text: title }),
     el('div', { class: 'field' }, el('label', { class: 'label', for: 'ed-free-question', text: '質問文' }), question),
-    el('p', { class: 'ed-note', text: FREE_NOTE }));
+    el('p', { class: 'ed-note', text: note }));
+}
+
+// 自由記述の右の列（質問文だけ）
+export function renderFreeSettings(host, ed) {
+  renderQuestionSettings(host, ed, '自由記述の設定', FREE_NOTE);
+}
+
+// ワードクラウドの右の列（質問文だけ）
+export function renderCloudSettings(host, ed) {
+  renderQuestionSettings(host, ed, 'ワードクラウドの設定', CLOUD_NOTE);
 }
 
 // アンケートの中央（質問文と選択肢）

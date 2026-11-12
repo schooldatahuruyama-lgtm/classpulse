@@ -5,6 +5,7 @@ import { renderSlide } from '../../slide-render.js';
 const kindLabel = (slide) => {
   if (slide && slide.type === 'poll') return 'アンケート';
   if (slide && slide.type === 'free') return '自由記述';
+  if (slide && slide.type === 'cloud') return 'ワードクラウド';
   return '資料';
 };
 
@@ -13,7 +14,8 @@ export function addButtons(ed) {
   return el('div', { class: 'ed-add' },
     el('button', { type: 'button', class: 'btn', text: '＋ 資料スライド', onclick: () => ed.addSlide('content') }),
     el('button', { type: 'button', class: 'btn', text: '＋ アンケート', onclick: () => ed.addSlide('poll') }),
-    el('button', { type: 'button', class: 'btn', text: '＋ 自由記述', onclick: () => ed.addSlide('free') }));
+    el('button', { type: 'button', class: 'btn', text: '＋ 自由記述', onclick: () => ed.addSlide('free') }),
+    el('button', { type: 'button', class: 'btn', text: '＋ ワードクラウド', onclick: () => ed.addSlide('cloud') }));
 }
 
 function slideActions(ed) {

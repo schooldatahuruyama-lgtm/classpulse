@@ -8,10 +8,12 @@
 // それ以外（保留・失敗・拒否・照合の結果・送られなかった選びなおし）は unconfirmed になる。
 // 終了後の「回答が無い」は、受信されなかったことの証拠にならない（先生が回答を消すため）。
 // freeze の前に sent / rejected だったものは変えない。
-// 値（value）は、アンケートの選択（整数）か、自由記述の文章（normalizeText を通った文字列）。
-// 保管・表示の形は { choice, state } か { text, state }（古い { choice, state } もそのまま読める）。
-// send は成功したら何も返さないか、サーバーに別の回答が残っていたとき { choice } か { text } を返す（その値を送信済みとする）。
-import { normalizeText } from './session-logic.js';
+// 値（value）は、アンケートの選択（整数）か、自由記述の文章（normalizeText を通った文字列）か、
+// ワードクラウドの言葉の配列（normalizeWords を通ったもの）。
+// 保管・表示の形は { choice, state } か { text, state } か { words, state }（古い形もそのまま読める）。
+// send は成功したら何も返さないか、サーバーに別の回答が残っていたとき { choice } か { text } か { words } を返す（その値を送信済みとする）。
+// 同じ値かどうかは中身で比べる（言葉の配列は、要素と並びが同じなら同じ）。配列は写しを持ち、写しを渡す
+import { normalizeText, normalizeWords, sameWords } from './session-logic.js';
 
 const STATES = new Set(['sending', 'sent', 'queued', 'rejected', 'failed', 'unconfirmed']);
 
@@ -20,24 +22,35 @@ const STATES = new Set(['sending', 'sent', 'queued', 'rejected', 'failed', 'unco
 // 作り直す前の遅い送信が、新しい回答のあとから届いて上書きしないようにする
 const chainsByStorage = new WeakMap();
 
-// 回答の値として使えるか（整数、または前後の空白が無く上限以内の、空でない文字列）
+// 回答の値として使えるか（整数、前後の空白が無く上限以内の空でない文字列、または整った言葉の配列）
 function isValue(v) {
+  if (Array.isArray(v)) return sameWords(normalizeWords(v), v);
   return Number.isInteger(v) || (typeof v === 'string' && normalizeText(v) === v);
 }
 
-// 保管・表示の形 { choice } / { text } から値を取り出す。両方ある・どちらも無い・不正なら null
+// 同じ値か（言葉の配列は中身で比べる）
+const sameValue = (a, b) => (Array.isArray(a) || Array.isArray(b) ? sameWords(a, b) : a === b);
+
+// 配列は写しにする（呼び出し側が書きかえても、中の記録が変わらないように）
+const copy = (v) => (Array.isArray(v) ? [...v] : v);
+
+// 保管・表示の形 { choice } / { text } / { words } から値を取り出す。2 つ以上ある・どれも無い・不正なら null
 function valueOf(o) {
   if (!o || typeof o !== 'object') return null;
-  const hasChoice = o.choice !== undefined;
-  const hasText = o.text !== undefined;
-  if (hasChoice === hasText) return null;
-  const v = hasChoice ? o.choice : o.text;
-  if (hasChoice ? !Number.isInteger(v) : typeof v !== 'string') return null;
-  return isValue(v) ? v : null;
+  const present = ['choice', 'text', 'words'].filter((k) => o[k] !== undefined);
+  if (present.length !== 1) return null;
+  const v = o[present[0]];
+  if (present[0] === 'choice' && !Number.isInteger(v)) return null;
+  if (present[0] === 'text' && typeof v !== 'string') return null;
+  if (present[0] === 'words' && !Array.isArray(v)) return null;
+  return isValue(v) ? copy(v) : null;
 }
 
 // 値を保管・表示の形にする
-const shape = (value, state) => (typeof value === 'string' ? { text: value, state } : { choice: value, state });
+function shape(value, state) {
+  if (Array.isArray(value)) return { words: [...value], state };
+  return typeof value === 'string' ? { text: value, state } : { choice: value, state };
+}
 function chainsFor(storage) {
   if (!chainsByStorage.has(storage)) chainsByStorage.set(storage, new Map());
   return chainsByStorage.get(storage);
@@ -117,7 +130,7 @@ export function createOutbox({ storage, send, onSettle = () => {}, canSend = () 
           let result = 'sent';
           let confirmed = null;
           try {
-            const r = await send(sid, slideId, sentValue);
+            const r = await send(sid, slideId, copy(sentValue));
             confirmed = valueOf(r);
           } catch (e) {
             result = classify(e);
@@ -125,7 +138,7 @@ export function createOutbox({ storage, send, onSettle = () => {}, canSend = () 
           if (buckets.get(sid) !== b) break; // 送信中に clear された
           const now = b.data[slideId];
           if (!now || now.state !== 'sending') break;
-          if (now.value !== sentValue) continue; // 送信中に選びなおされた（書き直された）。新しい値を送る
+          if (!sameValue(now.value, sentValue)) continue; // 送信中に選びなおされた（書き直された）。新しい値を送る
           if (confirmed !== null) now.value = confirmed;
           now.inflight = null;
           if (b.frozen) { // 授業が終わった。実際に送った値が成功したときだけ sent。それ以外は未確認
@@ -159,10 +172,12 @@ export function createOutbox({ storage, send, onSettle = () => {}, canSend = () 
   }
 
   return {
-    // value は整数（選択）か文章（normalizeText を通った文字列）。それ以外は受け付けない
-    async put(sid, slideId, value) {
+    // value は整数（選択）か文章（normalizeText を通った文字列）か言葉の配列（normalizeWords を通ったもの）。
+    // それ以外は受け付けない
+    async put(sid, slideId, raw) {
       const b = bucket(sid);
-      if (!isValue(value)) return view(b, b.data[slideId]);
+      if (!isValue(raw)) return view(b, b.data[slideId]);
+      const value = copy(raw);
       if (b.frozen) { // 終わった授業には送らない
         b.data[slideId] = { value, state: 'unconfirmed', unsaved: false };
         save(sid);
@@ -240,12 +255,12 @@ export function createOutbox({ storage, send, onSettle = () => {}, canSend = () 
         .filter(([slideId, e]) => (e.state === 'queued' || e.state === 'failed') && isClosed(slideId))
         .map(([slideId]) => slideId);
     },
-    // サーバーとの照合結果を反映する。value が値（整数か文章）ならその値を送信済みに、null なら rejected。変えたら true
+    // サーバーとの照合結果を反映する。value が値（整数か文章か言葉の配列）ならその値を送信済みに、null なら rejected。変えたら true
     settle(sid, slideId, value) {
       const b = bucket(sid);
       const e = b.data[slideId];
       if (b.frozen || !e || (e.state !== 'queued' && e.state !== 'failed')) return false;
-      if (isValue(value)) { e.value = value; e.state = 'sent'; } else e.state = 'rejected';
+      if (isValue(value)) { e.value = copy(value); e.state = 'sent'; } else e.state = 'rejected';
       e.unsaved = false;
       save(sid);
       return true;

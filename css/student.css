@@ -112,3 +112,14 @@
   margin: var(--s-3) 0 0; padding: 12px var(--s-2); border: 2px solid var(--c-main); border-radius: var(--r-1);
   background: #EEF2FF; font-size: 18px; font-weight: 700;
 }
+
+/* ワードクラウド: 1 行の入力欄が 3 つ（見た目は自由記述の入力欄にそろえる） */
+.st-cloud-hint { margin: var(--s-2) 0 var(--s-1); font-size: 16px; font-weight: 700; }
+.st-cloud-inputs { display: flex; flex-direction: column; gap: var(--s-1); }
+.st-cloud-input {
+  display: block; width: 100%; min-height: 52px; padding: 8px var(--s-2);
+  border: 2px solid var(--c-border); border-radius: var(--r-2);
+  background: var(--c-card); color: var(--c-navy); font: inherit; font-size: 20px;
+}
+.st-cloud-input:focus-visible { outline: 3px solid var(--c-main); outline-offset: 2px; }
+.st-cloud-input[readonly] { background: var(--c-bg); cursor: not-allowed; }

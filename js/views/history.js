@@ -1,6 +1,7 @@
 // 授業履歴（#/history）と、1 回の授業の結果（#/history/<sid>）。
 // 回答は匿名なので、ここには集計した人数だけを出す（個人ごとの一覧や ID は出さない）。
 // 自由記述は件数と文章の一覧（だれが書いたかは出さない。履歴に uid は無い）。type の無い古い項目はアンケート。
+// ワードクラウドは回答した人数と、言葉と人数の一覧（人数の多い順。履歴にある順のまま）。
 import { el, confirmDialog, closeAllDialogs, resultBars, toast } from '../ui.js';
 import { formatDateTime } from '../format.js';
 import { routeHash } from '../router.js';
@@ -72,8 +73,33 @@ export function mount(root, ctx) {
       el('p', { class: 'small muted', text: `回答 ${q.total} 件` }));
   }
 
+  // ワードクラウドの言葉と人数の一覧（言葉は textContent で入れる）
+  const wordList = (words) => el('ul', { class: 'hist-cloud-list' },
+    words.map((w) => el('li', { class: 'hist-cloud-item' },
+      el('span', { class: 'hist-cloud-word', text: w.word }),
+      el('span', { class: 'hist-cloud-count', text: `${w.count} 人` }))));
+
+  function cloudCard(q, i) {
+    const words = Array.isArray(q.words) ? q.words : [];
+    const hiddenWords = Array.isArray(q.hiddenWords) ? q.hiddenWords : [];
+    const body = el('div', { class: 'hist-q-body' },
+      words.length ? wordList(words) : el('p', { class: 'muted', text: hiddenWords.length ? '表示した言葉はありません。' : '回答はありませんでした。' }));
+    // 授業中にかくした言葉は、あるときだけ分けて出す
+    if (hiddenWords.length) {
+      body.append(el('section', { class: 'hist-free-hidden' },
+        el('h4', { class: 'hist-free-hidden-title', text: '授業中にかくした言葉' }),
+        wordList(hiddenWords)));
+    }
+    return el('li', { class: 'hist-q card' },
+      el('h3', { class: 'hist-q-no', text: `質問 ${i + 1}（ワードクラウド）` }),
+      el('p', { class: 'hist-q-text', text: q.question || '' }),
+      body,
+      el('p', { class: 'small muted', text: `回答 ${q.total} 人` }));
+  }
+
   function questionCard(q, i) {
     if (q && q.type === 'free') return freeCard(q, i);
+    if (q && q.type === 'cloud') return cloudCard(q, i);
     const body = el('div', { class: 'hist-q-body' });
     if (q.total > 0) resultBars(body, { options: q.options, counts: q.counts, total: q.total });
     else body.append(el('p', { class: 'muted', text: '回答はありませんでした。' }));

@@ -1,12 +1,12 @@
 // 生徒の画面（#/join/<sid>）。ログインなしで参加し、先生の今のスライドに自動で追従する。
 // 先生の画面・ログインへの道、スライドを前後に動かす操作、名前の欄、生徒の匿名 ID は出さない。
 // 集計の数は state.results があるとき（先生が結果を表示しているとき）だけ DOM に入れる。
-// 自由記述では、ほかの生徒の文章は出さない（結果の表示中は「前の画面を見てください」とだけ出す）。
+// 自由記述・ワードクラウドでは、ほかの生徒の文章・言葉は出さない（結果の表示中は「前の画面を見てください」とだけ出す）。
 // 回答の操作中にフォーカスやスクロールが飛ばないよう、同じスライドの間は部品を作り直さず中身だけ書きかえる。
 import { el, statusChip, resultBars } from '../ui.js';
 import { renderSlide, OPTION_MARKS } from '../slide-render.js';
 import { createSessionClient } from '../session-client.js';
-import { normalizeText } from '../session-logic.js';
+import { normalizeText, normalizeWords, sameWords } from '../session-logic.js';
 import { CONFIG } from '../config.js';
 
 const POLL_CHIP = {
@@ -81,23 +81,30 @@ export function freeDecision({ status, input, answer, resultsVisible }) {
   const raw = typeof input === 'string' ? input : '';
   const text = normalizeText(raw);
   const prev = answer && typeof answer.text === 'string' ? answer.text : null;
-  const st = answer && prev !== null ? answer.state : null;
+  return {
+    ...writtenDecision({ status, answer: prev !== null ? answer : null, empty: text === null, same: text !== null && text === prev, resultsVisible }),
+    remaining: CONFIG.free.maxLength - raw.length,
+  };
+}
+
+// 書いて答える質問（自由記述・ワードクラウド）で共通の決めごと。
+// answer は送った値の記録（無ければ null）、empty は入力が送れる値にならないか、same は送った値と同じか
+function writtenDecision({ status, answer, empty, same, resultsVisible }) {
+  const st = answer ? answer.state : null;
   const readOnly = status === 'paused' || status === 'closed';
-  // 届いた（または届く途中の）文章があるときは「送り直す」。失敗・締切で送れなかったものは「送信」のまま
+  // 届いた（または届く途中の）値があるときは「送り直す」。失敗・締切で送れなかったものは「送信」のまま
   const resend = st === 'sent' || st === 'sending' || st === 'queued';
-  const same = text !== null && text === prev;
   let send;
   if (status === 'paused') send = { label: '受付停止中', off: true };
   else if (status === 'closed') send = { label: '締切済み', off: true };
   else if (same && st === 'sent') send = { label: '送信済み', off: true };
-  else send = { label: resend ? '送り直す' : '送信', off: status !== 'open' || text === null || same };
+  else send = { label: resend ? '送り直す' : '送信', off: status !== 'open' || empty || same };
   return {
     readOnly,
     send,
-    message: answerMessage(prev !== null ? answer : null, status),
-    // retry() は失敗した文章を送り直すので、入力欄がその文章と同じ（または空）のときだけ出す
-    retry: status === 'open' && st === 'failed' && (text === null || same),
-    remaining: CONFIG.free.maxLength - raw.length,
+    message: answerMessage(answer, status),
+    // retry() は失敗した値を送り直すので、入力がその値と同じ（または空）のときだけ出す
+    retry: status === 'open' && st === 'failed' && (empty || same),
     showNote: !!resultsVisible,
   };
 }
@@ -109,6 +116,36 @@ export function freeShownText({ readOnly, draft, text }) {
   const t = typeof text === 'string' ? text : '';
   if (readOnly) return t || d;
   return d || t;
+}
+
+// ---- ワードクラウド ----
+const CLOUD_FIELDS = CONFIG.cloud.maxWords; // 入力欄の数
+
+// ワードクラウドの画面の決めごと。inputs は 3 つの入力欄の今の文、answer は送った言葉の記録（{ words, state } か null）。
+// 送れるのは、正しい言葉（normalizeWords を通るもの）が 1 つ以上あり、送った言葉と違うとき。
+// 戻り値は自由記述と同じ形（readOnly・send・message・retry・showNote）
+export function cloudDecision({ status, inputs, answer, resultsVisible }) {
+  const words = normalizeWords(Array.isArray(inputs) ? inputs : []);
+  const prev = answer && Array.isArray(answer.words) ? answer.words : null;
+  return writtenDecision({
+    status,
+    answer: prev !== null ? answer : null,
+    empty: words === null,
+    same: words !== null && sameWords(words, prev),
+    resultsVisible,
+  });
+}
+
+// 3 つの入力欄に出す文（長さ 3 の配列）。考え方は freeShownText と同じ:
+// 読み取り専用のときは送った言葉（無ければ書きかけ）、書けるときは書きかけ（無ければ送った言葉）
+export function cloudShownWords({ readOnly, draft, words }) {
+  const fill = (list) => Array.from({ length: CLOUD_FIELDS }, (_, i) => (Array.isArray(list) && typeof list[i] === 'string' ? list[i] : ''));
+  const d = fill(draft);
+  const w = fill(words);
+  const hasDraft = d.some((s) => s !== '');
+  const hasWords = w.some((s) => s !== '');
+  if (readOnly) return hasWords ? w : d;
+  return hasDraft ? d : w;
 }
 
 // 終了の画面に何を出すか。未確認の回答は、今の質問だけでなく授業全体で数える
@@ -127,6 +164,7 @@ export function mount(root, ctx) {
   let shownKey = null; // 本体に出しているもの（'loading'・'wait'・'slide:<id>' など）
   let pollUi = null;   // アンケートの部品（同じ質問の間は作り直さない）
   let freeUi = null;   // 自由記述の部品（同じ質問の間は作り直さない。入力欄の文字とカーソルを守る）
+  let cloudUi = null;  // ワードクラウドの部品（同じく作り直さない）
 
   // ---- 骨組み（1 回だけ作る） ----
   const titleEl = el('h1', { class: 'st-title', text: 'ClassPulse' });
@@ -143,6 +181,7 @@ export function mount(root, ctx) {
     shownKey = null;
     pollUi = null;
     freeUi = null;
+    cloudUi = null;
     client = createSessionClient({
       net: ctx.net,
       auth: ctx.auth,
@@ -159,6 +198,7 @@ export function mount(root, ctx) {
     shownKey = key;
     pollUi = null;
     freeUi = null;
+    cloudUi = null;
     body.replaceChildren(...children);
     return true;
   }
@@ -352,6 +392,89 @@ export function mount(root, ctx) {
     ui.note.hidden = !d.showNote;
   }
 
+  // ---- ワードクラウド ----
+  // 入力欄 3 つは 1 回だけ作り、状態が変わっても作り直さない・value を書きかえない（自由記述と同じ考え方）。
+  // 書きかえるのは、読み取り専用に切りかわるときと、読み取り専用の間だけ
+  function buildCloud(slide, slideId) {
+    const ui = { slideId, readOnly: null, decision: null, composing: false };
+    ui.statusChip = el('span', { class: 'st-chip-status', 'aria-live': 'polite' });
+    const values = () => ui.inputs.map((n) => n.value);
+    ui.inputs = Array.from({ length: CONFIG.cloud.maxWords }, (_, i) => el('input', {
+      type: 'text', class: 'st-cloud-input',
+      maxlength: String(CONFIG.cloud.maxLength),
+      'aria-label': `言葉 ${i + 1}`, 'aria-describedby': 'st-cloud-hint',
+      autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', enterkeyhint: i < CONFIG.cloud.maxWords - 1 ? 'next' : 'send',
+    }));
+    ui.inputs.forEach((input, i) => {
+      // 入力のたびに 3 つの書きかけを保存し、ボタンと文だけを書きかえる（入力欄には触らない）
+      input.addEventListener('input', () => {
+        if (!alive || !client || cloudUi !== ui) return;
+        client.setDraft(ui.slideId, values());
+        updateCloud(ui);
+      });
+      // 日本語の変換の途中か（変換の確定の Enter で次へ進まない。読み取り専用に切りかえるときに確定させる）
+      input.addEventListener('compositionstart', () => { ui.composing = true; });
+      input.addEventListener('compositionend', () => { ui.composing = false; });
+      // Enter: 次の欄へ。最後の欄なら、送れるときだけ送る
+      input.addEventListener('keydown', (ev) => {
+        if (ev.key !== 'Enter' || ev.isComposing || ev.keyCode === 229 || ui.composing) return;
+        ev.preventDefault();
+        if (i < ui.inputs.length - 1) ui.inputs[i + 1].focus();
+        else if (!isOff(ui.sendBtn)) ui.sendBtn.click();
+      });
+    });
+    ui.sendBtn = el('button', {
+      type: 'button', class: 'btn btn-primary st-send',
+      onclick: () => { if (alive && client && cloudUi === ui && !isOff(ui.sendBtn)) client.submitWords(values()); },
+    });
+    ui.message = el('p', { class: 'st-answer-text' });
+    ui.retryBtn = el('button', {
+      type: 'button', class: 'btn st-retry', text: 'もう一度送る', hidden: true,
+      // 押した瞬間にも確かめる（書き直したあとに古い言葉を送り直さない）
+      onclick: () => { if (alive && client && ui.decision && ui.decision.retry) client.retry(); },
+    });
+    ui.note = el('p', { class: 'st-free-note', role: 'status', hidden: true, text: RESULTS_NOTE });
+    ui.root = el('section', { class: 'st-poll st-free st-cloud', 'aria-labelledby': 'st-question' },
+      el('h2', { id: 'st-question', class: 'st-question', text: typeof slide.question === 'string' ? slide.question : '' }),
+      el('div', { class: 'st-chips' }, statusChip('info', 'この質問は匿名です'), ui.statusChip),
+      el('p', { id: 'st-cloud-hint', class: 'st-cloud-hint', text: `短い言葉を ${CONFIG.cloud.maxWords} つまで書けます（1 つ ${CONFIG.cloud.maxLength} 文字まで）。` }),
+      el('div', { class: 'st-cloud-inputs', role: 'group', 'aria-labelledby': 'st-question' }, ui.inputs),
+      ui.sendBtn,
+      el('div', { class: 'st-answer', 'aria-live': 'polite' }, ui.message),
+      ui.retryBtn,
+      ui.note);
+    return ui;
+  }
+
+  function updateCloud(ui) {
+    const before = document.activeElement;
+    const status = state.poll ? state.poll.status : '';
+    const answer = state.answer;
+    const readOnly = status === 'paused' || status === 'closed';
+    if (readOnly !== ui.readOnly || readOnly) {
+      // 変換の途中で読み取り専用になったら、先にフォーカスを外して変換を終わらせる（途中の文字と書きかえがぶつからない）
+      if (readOnly && ui.composing && before instanceof HTMLElement && ui.inputs.includes(before)) before.blur();
+      const shown = cloudShownWords({ readOnly, draft: client ? client.draft(ui.slideId) : null, words: state.words });
+      ui.inputs.forEach((n, i) => {
+        if (n.value !== shown[i]) n.value = shown[i];
+        n.readOnly = readOnly;
+      });
+      ui.readOnly = readOnly;
+    }
+    const d = cloudDecision({ status, inputs: ui.inputs.map((n) => n.value), answer, resultsVisible: state.poll && state.poll.resultsVisible });
+    ui.decision = d;
+    updateStatusChip(ui.statusChip, status);
+
+    if (ui.sendBtn.textContent !== d.send.label) ui.sendBtn.textContent = d.send.label;
+    setOff(ui.sendBtn, d.send.off);
+
+    if (ui.message.textContent !== d.message) ui.message.textContent = d.message;
+    ui.message.dataset.state = d.message && answer ? answer.state : '';
+    ui.retryBtn.hidden = !d.retry;
+    if (!d.retry && before === ui.retryBtn) ui.sendBtn.focus(); // 押したボタンが消えたら、送信のボタンへ
+    ui.note.hidden = !d.showNote;
+  }
+
   // ---- 描画 ----
   function render() {
     if (!alive || !state) return;
@@ -411,6 +534,15 @@ export function mount(root, ctx) {
       if (freeUi) updateFree(freeUi);
       return;
     }
+    if (slide.type === 'cloud') {
+      if (show(key)) {
+        cloudUi = buildCloud(slide, state.slideId);
+        body.append(cloudUi.root);
+        window.scrollTo(0, 0);
+      }
+      if (cloudUi) updateCloud(cloudUi);
+      return;
+    }
     if (show(key)) {
       const box = el('section', { class: 'st-slide', 'aria-label': 'スライド' });
       renderSlide(box, slide, state.images);
@@ -427,6 +559,6 @@ export function mount(root, ctx) {
     client = null;
     // 次の画面に替わるまで古い DOM が残ることがある。その間に押されても何もしないよう、ボタンを止める
     for (const b of wrap.querySelectorAll('button')) b.setAttribute('aria-disabled', 'true');
-    for (const t of wrap.querySelectorAll('textarea')) t.readOnly = true;
+    for (const t of wrap.querySelectorAll('textarea, input')) t.readOnly = true;
   };
 }

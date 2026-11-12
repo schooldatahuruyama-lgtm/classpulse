@@ -36,6 +36,18 @@ function normalizeQuestion(q) {
       total: typeof src.total === 'number' ? src.total : 0,
     };
   }
+  // ワードクラウドは { word, count } の配列で持つ。word が文字列でないものは落とし、count は数でなければ 0
+  if (src.type === 'cloud') {
+    const words = (v) => toIndexed(v)
+      .filter((x) => x && typeof x === 'object' && typeof x.word === 'string')
+      .map((x) => ({ word: x.word, count: typeof x.count === 'number' ? x.count : 0 }));
+    return {
+      type: 'cloud',
+      words: words(src.words),
+      hiddenWords: words(src.hiddenWords),
+      total: typeof src.total === 'number' ? src.total : 0,
+    };
+  }
   const options = toIndexed(src.options).map((o) => (typeof o === 'string' ? o : o == null ? '' : String(o)));
   const rawCounts = toIndexed(src.counts);
   const counts = Array.from({ length: Math.max(options.length, rawCounts.length) }, (_, i) =>
