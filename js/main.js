@@ -14,6 +14,7 @@ const bannerRoot = document.getElementById('banner');
 const NAV = [
   { name: 'dashboard', label: 'ホーム' },
   { name: 'history', label: '授業履歴' },
+  { name: 'trash', label: 'ゴミ箱' },
 ];
 
 function showMessage(text, { retry = false } = {}) {

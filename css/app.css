@@ -127,3 +127,16 @@
 /* クイズの正答率・5 段階評価の平均 */
 .hist-summary { margin: var(--s-1) 0 4px; font-size: 18px; font-weight: 700; }
 .hist-rating-ends { margin: 0 0 var(--s-1); }
+
+/* ゴミ箱 */
+.trash-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--s-2); flex-wrap: wrap; margin-bottom: var(--s-2); }
+.trash-h1 { margin-bottom: 4px; }
+.trash-message:empty { display: none; }
+.trash-message { margin-bottom: var(--s-2); }
+.trash-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--s-2); }
+.trash-item { padding: var(--s-2) var(--s-3); }
+.trash-item-title { font-size: 20px; margin-bottom: 4px; overflow-wrap: anywhere; }
+.trash-item-meta { margin-bottom: var(--s-2); }
+.trash-item-actions { display: flex; flex-wrap: wrap; gap: var(--s-1); }
+.trash-danger { color: var(--c-danger-text); border-color: var(--c-danger-text); }
+.trash-empty { margin: 0; }

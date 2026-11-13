@@ -1,5 +1,5 @@
 // ハッシュ（#/...）と画面名の対応。ブラウザの物は使わない
-const SIMPLE = { login: '#/login', history: '#/history', dashboard: '#/' };
+const SIMPLE = { login: '#/login', history: '#/history', trash: '#/trash', dashboard: '#/' };
 const WITH_ID = { editor: ['edit', 'deckId'], present: ['present', 'sid'], join: ['join', 'sid'], result: ['history', 'sid'] };
 const PUBLIC = ['login', 'join', 'not-found'];
 
@@ -22,6 +22,7 @@ export function parseRoute(hash) {
   if (id === undefined) {
     if (head === 'login') return { name: 'login', params: {} };
     if (head === 'history') return { name: 'history', params: {} };
+    if (head === 'trash') return { name: 'trash', params: {} };
     return NOT_FOUND();
   }
   const found = Object.entries(WITH_ID).find(([, [seg]]) => seg === head);
@@ -42,7 +43,7 @@ export function routeHash(name, params = {}) {
 // 画面の名前 → 画面のファイル（js/views/ の中）。結果の画面は履歴の画面が兼ねる
 const VIEW_FILES = {
   login: 'login', dashboard: 'dashboard', editor: 'editor', present: 'present',
-  history: 'history', result: 'history', join: 'student',
+  history: 'history', result: 'history', join: 'student', trash: 'trash',
 };
 
 export function viewFile(name) {

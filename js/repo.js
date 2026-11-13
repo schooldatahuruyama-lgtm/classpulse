@@ -2,6 +2,7 @@
 // 通信は net を引数で受け取る。
 import { normalizeDeck } from './model.js';
 import { CONFIG } from './config.js';
+import { isTrashed, isExpired } from './trash.js';
 
 function toArray(v) {
   if (Array.isArray(v)) return [...v];
@@ -81,40 +82,92 @@ function normalizeQuestion(q) {
 export function createRepo(net, uid) {
   const base = `teachers/${uid}`;
 
+  // 一覧の項目（[id, 項目] の配列。オブジェクトでない項目は落とす）
+  async function readIndex() {
+    const index = (await net.get(`${base}/deckIndex`)) || {};
+    return Object.entries(index).filter(([, e]) => e && typeof e === 'object');
+  }
+
+  const entryFields = (e) => ({
+    title: typeof e.title === 'string' ? e.title : '',
+    slideCount: typeof e.slideCount === 'number' ? e.slideCount : 0,
+  });
+
+  // ゴミ箱の中で、条件に合う教材を 1 回の update で完全に削除する（無ければ書かない）
+  async function purgeWhere(match) {
+    const ids = (await readIndex()).filter(([, e]) => isTrashed(e) && match(e)).map(([id]) => id);
+    if (!ids.length) return 0;
+    const patch = {};
+    for (const id of ids) { patch[`decks/${id}`] = null; patch[`deckIndex/${id}`] = null; }
+    await net.update(base, patch);
+    return ids.length;
+  }
+
   return {
     async isTeacher() {
       return (await net.get(`teacherList/${uid}`)) === true;
     },
 
-    // 一覧は deckIndex から（教材そのものは読まない）。新しい順
+    // 一覧は deckIndex から（教材そのものは読まない）。新しい順。ゴミ箱の中の教材は出さない
     async listDecks() {
-      const index = (await net.get(`${base}/deckIndex`)) || {};
-      return Object.entries(index)
-        .map(([id, e]) => ({
-          id,
-          title: typeof e.title === 'string' ? e.title : '',
-          updatedAt: typeof e.updatedAt === 'number' ? e.updatedAt : 0,
-          slideCount: typeof e.slideCount === 'number' ? e.slideCount : 0,
-        }))
+      return (await readIndex())
+        .filter(([, e]) => !isTrashed(e))
+        .map(([id, e]) => ({ id, ...entryFields(e), updatedAt: typeof e.updatedAt === 'number' ? e.updatedAt : 0 }))
         .sort(byNewest('updatedAt'));
     },
 
-    async loadDeck(id) {
-      const raw = await net.get(`${base}/decks/${id}`);
-      return raw === null ? null : normalizeDeck(raw);
+    // ゴミ箱の中の教材。新しく入れた順（入れた時刻がこわれているものは最後。deletedAt は null）
+    async listTrash() {
+      return (await readIndex())
+        .filter(([, e]) => isTrashed(e))
+        .map(([id, e]) => ({ id, ...entryFields(e), deletedAt: typeof e.deletedAt === 'number' && Number.isFinite(e.deletedAt) ? e.deletedAt : null }))
+        .sort(byNewest('deletedAt'));
     },
 
-    // 教材と一覧の項目は 1 回の update で書く（食い違わないように）
+    // ゴミ箱の中の教材は開かない（null）。印の確認は小さな読みこみで、教材の読みこみと並べて行う
+    async loadDeck(id) {
+      const [raw, deletedAt] = await Promise.all([
+        net.get(`${base}/decks/${id}`),
+        net.get(`${base}/deckIndex/${id}/deletedAt`),
+      ]);
+      if (raw === null || isTrashed({ deletedAt })) return null;
+      return normalizeDeck(raw);
+    },
+
+    // 教材と一覧の項目は 1 回の update で書く（食い違わないように）。
+    // 一覧の項目は 1 つずつ書く（まるごと書くと、別のタブが付けたゴミ箱の印を消してしまう）
     async saveDeck(id, deck, now) {
       const saved = { ...deck, updatedAt: now };
       await net.update(base, {
         [`decks/${id}`]: saved,
-        [`deckIndex/${id}`]: { title: saved.title, updatedAt: now, slideCount: saved.order.length },
+        [`deckIndex/${id}/title`]: saved.title,
+        [`deckIndex/${id}/updatedAt`]: now,
+        [`deckIndex/${id}/slideCount`]: saved.order.length,
       });
     },
 
+    // 完全に削除する（元に戻せない）
     async deleteDeck(id) {
       await net.update(base, { [`decks/${id}`]: null, [`deckIndex/${id}`]: null });
+    },
+
+    // ゴミ箱に移す・戻す。一覧の項目の印だけを書く（教材の中身は読み書きしない）
+    async trashDeck(id, now) {
+      await net.set(`${base}/deckIndex/${id}/deletedAt`, now);
+    },
+
+    async restoreDeck(id) {
+      await net.remove(`${base}/deckIndex/${id}/deletedAt`);
+    },
+
+    // ゴミ箱の中の教材をすべて完全に削除する。消した数を返す
+    async emptyTrash() {
+      return purgeWhere(() => true);
+    },
+
+    // ゴミ箱に入れてから決まった日数がたった教材を完全に削除する。消した数を返す
+    async purgeExpiredTrash(now) {
+      return purgeWhere((e) => isExpired(e.deletedAt, now));
     },
 
     async getActive() {

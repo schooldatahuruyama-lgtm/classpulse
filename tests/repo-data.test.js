@@ -35,7 +35,7 @@ test('教材と一覧は 1 回の update で書く', async () => {
   await repo.saveDeck('d1', sampleDeck(), 5000);
   await repo.deleteDeck('d1');
   assert.deepEqual(calls, [
-    ['teachers/u1', ['deckIndex/d1', 'decks/d1']],
+    ['teachers/u1', ['deckIndex/d1/slideCount', 'deckIndex/d1/title', 'deckIndex/d1/updatedAt', 'decks/d1']],
     ['teachers/u1', ['deckIndex/d1', 'decks/d1']],
   ]);
 });

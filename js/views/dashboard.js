@@ -4,6 +4,7 @@ import { el, confirmDialog, toast } from '../ui.js';
 import { createDeck, newId } from '../model.js';
 import { buildDeckFromPages, importMessage, abortable } from '../pdf-import-logic.js';
 import { formatDateTime } from '../format.js';
+import { CONFIG } from '../config.js';
 import { routeHash } from '../router.js';
 import { backgroundSaver, useAuth } from './editor/background.js';
 import {
@@ -190,22 +191,23 @@ export function mount(root, ctx) {
     if (busy) return;
     const title = d.title || UNTITLED;
     const ok = await confirmDialog({
-      title: 'この教材を削除しますか？',
-      body: `「${title}」を削除します。元に戻せません。授業の記録は残ります。`,
-      okLabel: '削除する', danger: true,
+      title: 'この教材をゴミ箱に移しますか？',
+      body: `「${title}」をゴミ箱に移します。${CONFIG.trash.keepDays} 日間は、ゴミ箱から元に戻せます。授業の記録は残ります。`,
+      okLabel: 'ゴミ箱に移す', danger: true,
     });
     if (!ok || !alive) return;
     setBusy(true);
     message.replaceChildren();
     try {
-      // 編集画面を離れたあとの保存と、1 つの手続きで削除する（成功したら保存待ちを捨て、失敗したら戻す）
+      // 編集画面を離れたあとの保存と、1 つの手続きでゴミ箱に移す（進行中の保存を待ってから移す。
+      // 成功したら保存待ちを捨て、失敗したら戻す）。このタブでは、ゴミ箱から戻すまで開かない・書かない
       useAuth(ctx.auth);
-      await backgroundSaver().deleting(ctx.auth.user.uid, d.id, () => ctx.repo.deleteDeck(d.id));
+      await backgroundSaver().deleting(ctx.auth.user.uid, d.id, () => ctx.repo.trashDeck(d.id, Date.now()));
       if (!alive) return;
-      toast('削除しました。');
+      toast('ゴミ箱に移しました。');
       await load();
     } catch {
-      if (alive) showMessage(el('p', { text: '削除できませんでした。接続を確かめて、もう一度押してください。' }));
+      if (alive) showMessage(el('p', { text: 'ゴミ箱に移せませんでした。接続を確かめて、もう一度押してください。' }));
     } finally {
       if (alive) setBusy(false);
     }
@@ -305,6 +307,8 @@ export function mount(root, ctx) {
     el('div', { class: 'dash-body' }, decksBox, recentBox)));
   decksBox.replaceChildren(el('p', { class: 'loading', text: '読みこんでいます…' }));
   load();
+  // ゴミ箱に入れてから日数がたった教材を完全に削除する（失敗しても出さない。次に開いたときにやり直す）
+  ctx.repo.purgeExpiredTrash(Date.now()).catch(() => {});
   return () => {
     alive = false;
     if (importing) importing.abort(); // 画面を離れたら取込みをやめる（教材は作らない）

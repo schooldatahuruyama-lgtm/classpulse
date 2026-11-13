@@ -32,6 +32,8 @@ export const CONFIG = {
     defaultStroke: '#1F2A6B',
     widths: { s: 0.3, m: 0.6, l: 1.2 },
   },
+  // ゴミ箱: 教材を残す日数
+  trash: { keepDays: 30 },
   idLength: 12,
   sessionIdLength: 22,
   tokenRefreshMarginMs: 300000,
