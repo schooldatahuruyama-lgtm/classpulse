@@ -9,6 +9,7 @@ const kindLabel = (slide) => {
   if (slide && slide.type === 'rating') return '5 段階評価';
   if (slide && slide.type === 'free') return '自由記述';
   if (slide && slide.type === 'cloud') return 'ワードクラウド';
+  if (slide && slide.type === 'video') return '動画';
   return '資料';
 };
 
@@ -20,7 +21,8 @@ export function addButtons(ed) {
     el('button', { type: 'button', class: 'btn', text: '＋ クイズ', onclick: () => ed.addSlide('quiz') }),
     el('button', { type: 'button', class: 'btn', text: '＋ 5 段階評価', onclick: () => ed.addSlide('rating') }),
     el('button', { type: 'button', class: 'btn', text: '＋ 自由記述', onclick: () => ed.addSlide('free') }),
-    el('button', { type: 'button', class: 'btn', text: '＋ ワードクラウド', onclick: () => ed.addSlide('cloud') }));
+    el('button', { type: 'button', class: 'btn', text: '＋ ワードクラウド', onclick: () => ed.addSlide('cloud') }),
+    el('button', { type: 'button', class: 'btn', text: '＋ 動画', onclick: () => ed.addSlide('video') }));
 }
 
 // 縮小表示を描く。編集の画面は先生の準備の画面なので、クイズは正解の印も描く

@@ -5,9 +5,69 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { sendButtonState, answerMessage, pollDecision, endedDecision, freeDecision, freeShownText, cloudDecision, cloudShownWords, quizVerdict } from '../js/views/student.js';
+import { mount as mountStudent } from '../js/views/student.js';
+import { buildSession } from '../js/session-logic.js';
+import { createFakeNet } from './helpers/fake-net.js';
+import { fakeStorage } from './helpers/fakes.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (p) => readFileSync(join(root, p), 'utf8');
+
+// 動画の画面を実際に mount するための小さな DOM。作られた要素も記録する。
+test('生徒 DOM: 動画は案内と題だけ。状態更新・移動後も iframe・画像・リンクを作らない', async (t) => {
+  const previous = Object.fromEntries(['document', 'window', 'Node'].map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+  const made = [];
+  class TestNode {
+    constructor(tag) { this.tagName = tag; this.childNodes = []; this.attributes = {}; this.dataset = {}; made.push(this); }
+    get textContent() { return this.tagName === '#text' ? this.text : this.childNodes.map((n) => n.textContent).join(''); }
+    set textContent(value) { if (this.tagName === '#text') this.text = String(value); else this.replaceChildren(String(value)); }
+    setAttribute(key, value) { this.attributes[key] = String(value); }
+    getAttribute(key) { return this.attributes[key] ?? null; }
+    append(...nodes) { this.childNodes.push(...nodes.map((n) => n instanceof TestNode ? n : document.createTextNode(String(n)))); }
+    replaceChildren(...nodes) { this.childNodes = []; this.append(...nodes); }
+    addEventListener() {}
+    querySelectorAll(selector) {
+      const matches = (n) => selector.split(',').some((s) => s.trim().startsWith('.') ? (n.className || '').split(' ').includes(s.trim().slice(1)) : n.tagName === s.trim());
+      return this.childNodes.flatMap((n) => [...(matches(n) ? [n] : []), ...n.querySelectorAll(selector)]);
+    }
+  }
+  Object.assign(globalThis, {
+    Node: TestNode,
+    document: { createElement: (tag) => new TestNode(tag), createTextNode: (text) => { const n = new TestNode('#text'); n.text = text; return n; } },
+    window: { scrollTo() {} },
+  });
+  let cleanup;
+  t.after(() => {
+    if (cleanup) cleanup();
+    for (const [key, descriptor] of Object.entries(previous)) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete globalThis[key]; }
+  });
+  const video = { type: 'video', videoId: 'AbCdEf01_-2', start: 90, caption: '<script>動画の題</script>' };
+  const deck = { title: '確認', order: ['v', 'empty', 'bad'], slides: {
+    v: video, empty: { ...video, caption: '' }, bad: { ...video, videoId: '../x', caption: '題' },
+  }, images: {} };
+  const session = buildSession(deck, 'deck', 'teacher-test', 1);
+  session.pub.current = { slideId: 'v', index: 0 };
+  const net = createFakeNet();
+  await net.set('sessions/video-student', session);
+  const main = document.createElement('main');
+  cleanup = mountStudent(main, { params: { sid: 'video-student' }, net, storage: fakeStorage(), auth: { signInAnonymous: async () => ({ uid: 'student-test' }) } });
+  const flush = () => new Promise((resolve) => setImmediate(resolve));
+  await flush();
+  assert.match(main.textContent, /動画は、前の画面で見てください。/);
+  assert.ok(main.textContent.includes(video.caption));
+  await net.set('sessions/video-student/pub/title', '更新');
+  await flush();
+  assert.ok(main.textContent.includes(video.caption));
+  await net.set('sessions/video-student/pub/current', { slideId: 'empty', index: 1 });
+  await flush();
+  assert.match(main.textContent, /動画は、前の画面で見てください。/);
+  assert.ok(!main.textContent.includes(video.caption));
+  await net.set('sessions/video-student/pub/current', { slideId: 'bad', index: 2 });
+  await flush();
+  assert.match(main.textContent, /動画は、前の画面で見てください。題/);
+  assert.equal(made.filter((n) => ['iframe', 'script', 'img', 'a', 'input', 'textarea', 'button'].includes(n.tagName)).length, 0);
+  assert.doesNotMatch(main.textContent, /AbCdEf01_-2|youtu/);
+});
 
 test('送信ボタン: 何も選んでいない → 押せない「選択肢を選んでください」', () => {
   assert.deepEqual(sendButtonState({ status: 'open', selected: null, answer: null }), { label: '選択肢を選んでください', off: true });

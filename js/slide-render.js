@@ -3,6 +3,7 @@
 // 図形は createElementNS で組み立てた SVG（色・数は model.js で正した値だけを属性に入れる）。
 import { el } from './ui.js';
 import { clampItem, ratingOptions, normalizeShapeItem, shapeDrawing } from './model.js';
+import { youTubeEmbedUrl } from './video.js';
 
 // 文字の大きさ（枠の幅に対する %）
 export const TEXT_SIZE_PCT = { s: 2.5, m: 4, l: 6, xl: 9 };
@@ -164,7 +165,8 @@ const CLOUD_BOXES = () => el('div', { class: 'slide-cloud-boxes' },
 // sample: 自由記述・ワードクラウドの入力欄の見本を出すか（既定は出す。縮小表示では常に出す）
 // correct: クイズの正解の番号。渡したときだけ正解の印を描く（既定は描かない。
 // 発表・生徒の画面は「正解を表示」のあとだけ渡す。編集の画面は先生の準備の画面なので渡してよい）
-export function renderSlide(container, slide, images, { mode = 'view', sample = true, correct = null } = {}) {
+// player: 明示したときだけ動画を読みこむ。縮小表示には常に見本を出す。
+export function renderSlide(container, slide, images, { mode = 'view', sample = true, correct = null, player = false } = {}) {
   const stage = el('div', { class: 'slide-stage' });
   const frame = el('div', { class: mode === 'thumb' ? 'slide-frame slide-thumb' : 'slide-frame' }, stage);
   if (mode === 'thumb') frame.setAttribute('aria-hidden', 'true');
@@ -183,6 +185,17 @@ export function renderSlide(container, slide, images, { mode = 'view', sample = 
   } else if (slide && slide.type === 'cloud') {
     frame.classList.add('slide-is-cloud');
     renderAsk(stage, slide, mode, mode === 'thumb' || sample, 'ワードクラウド', CLOUD_BOXES);
+  } else if (slide && slide.type === 'video') {
+    frame.classList.add('slide-is-video');
+    const iframe = player === true && mode !== 'thumb' ? createVideoPlayer(slide) : null;
+    if (iframe) stage.append(iframe);
+    else {
+      stage.append(el('div', { class: 'slide-video-sample' },
+        el('span', { class: 'slide-video-mark', 'aria-hidden': 'true', text: '▶' }),
+        el('p', { class: 'slide-video-label', text: mode === 'thumb' ? '動画' : '動画（YouTube）' }),
+        mode !== 'thumb' && slide.caption ? el('p', { class: 'slide-video-caption', text: slide.caption }) : null,
+        player === true && mode !== 'thumb' ? el('p', { class: 'slide-video-missing', text: '動画の URL がありません。' }) : null));
+    }
   } else if (slide && Array.isArray(slide.items)) {
     for (const item of slide.items) {
       const node = renderItem(item, images);
@@ -191,4 +204,16 @@ export function renderSlide(container, slide, images, { mode = 'view', sample = 
   }
   container.replaceChildren(frame);
   watchWidth(frame);
+}
+
+// プレーヤーはここだけで作る。保存データの ID も URL の組み立て時に確かめる。
+export function createVideoPlayer(slide) {
+  const src = youTubeEmbedUrl(slide);
+  if (!src) return null;
+  return el('iframe', {
+    class: 'slide-video-player', src, title: slide.caption || 'YouTube の動画',
+    allow: 'encrypted-media; picture-in-picture; fullscreen', allowfullscreen: true,
+    referrerpolicy: 'strict-origin-when-cross-origin',
+    sandbox: 'allow-scripts allow-same-origin allow-presentation',
+  });
 }

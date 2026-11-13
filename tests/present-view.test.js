@@ -9,6 +9,9 @@ import { createDeck, createSlide, addSlide } from '../js/model.js';
 import { buildSession, hiddenKey } from '../js/session-logic.js';
 import { createRepo } from '../js/repo.js';
 import { createFakeNet } from './helpers/fake-net.js';
+import { renderSlide, createVideoPlayer } from '../js/slide-render.js';
+import { renderSlideList } from '../js/views/editor/slide-list.js';
+import { mount as mountEditor } from '../js/views/editor.js';
 
 test('確認待ち: 結果表示・接続・終了・移動待ちのボタンの決めごと', () => {
   const base = { kind: 'free', heldCount: 1, resultsVisible: true, connection: 'connected' };
@@ -44,7 +47,7 @@ function testDom(t) {
   const cleanups = [];
   let doc;
   class TestNode {
-    constructor(tag) { this.tagName = tag; this.childNodes = []; this.attributes = {}; this.events = new Map(); this.parentElement = null; this.style = { setProperty() {} }; made.push(this); }
+    constructor(tag) { this.tagName = tag; this.childNodes = []; this.attributes = {}; this.dataset = {}; this.events = new Map(); this.parentElement = null; this.style = { setProperty() {} }; made.push(this); }
     get children() { return this.childNodes.filter((n) => n.tagName !== '#text'); }
     get className() { return this.attributes.class || ''; }
     set className(value) { this.attributes.class = value; }
@@ -71,6 +74,8 @@ function testDom(t) {
       if (selector.startsWith('.')) return this.className.split(' ').includes(selector.slice(1));
       if (selector.startsWith('#')) return this.attributes.id === selector.slice(1);
       if (selector === 'dialog[open]') return this.tagName === 'dialog' && this.open;
+      const attr = /^\[([^=]+)="([^"]*)"\]$/.exec(selector);
+      if (attr) return this.getAttribute(attr[1]) === attr[2];
       return this.tagName === selector;
     }
     querySelectorAll(selector) { return this.childNodes.flatMap((node) => [...(node.matches(selector) ? [node] : []), ...node.querySelectorAll(selector)]); }
@@ -94,9 +99,9 @@ function testDom(t) {
   const timers = new Map();
   let seq = 0;
   Object.assign(globalThis, { document: doc, Node: TestNode, Element: TestNode, HTMLElement: TestNode,
-    window: { location: { href: 'http://localhost/?demo=1#/present/test' }, setTimeout: (fn) => { timers.set(++seq, fn); return seq; }, clearTimeout: (id) => timers.delete(id) } });
-  t.after(() => {
-    for (const cleanup of cleanups) cleanup();
+    window: { location: { href: 'http://localhost/?demo=1#/present/test' }, setTimeout: (fn) => { timers.set(++seq, fn); return seq; }, clearTimeout: (id) => timers.delete(id), addEventListener() {}, removeEventListener() {} } });
+  t.after(async () => {
+    for (const cleanup of cleanups) await cleanup();
     for (const [key, descriptor] of Object.entries(previous)) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete globalThis[key]; }
   });
   const root = doc.createElement('main');
@@ -106,6 +111,153 @@ function testDom(t) {
 
 const flushView = () => new Promise((resolve) => setImmediate(resolve));
 const buttonText = (root, text) => root.querySelectorAll('button').find((button) => button.textContent === text);
+
+const VIDEO = { type: 'video', videoId: 'AbCdEf01_-2', start: 90, caption: '動画の題' };
+
+test('動画 DOM: 既定の描画・縮小表示・一覧では iframe を一度も作らない', (t) => {
+  const h = testDom(t);
+  renderSlide(h.root, VIDEO, {});
+  assert.match(h.root.textContent, /▶動画（YouTube）動画の題/);
+  renderSlide(h.root, VIDEO, {}, { mode: 'thumb', player: true });
+  assert.match(h.root.textContent, /▶動画/);
+  assert.doesNotMatch(h.root.textContent, /動画の題/);
+  const deck = addSlide(createDeck('確認', 1), VIDEO, 'v');
+  renderSlideList(h.root, { state: { deck, slideId: 'v' } });
+  assert.match(h.root.querySelector('.ed-slide-btn').getAttribute('aria-label'), /動画/);
+  assert.equal(h.made.filter((n) => n.tagName === 'iframe').length, 0);
+  assert.equal(h.made.filter((n) => n.tagName === 'img' || n.tagName === 'script').length, 0);
+});
+
+test('動画 DOM: 明示したプレーヤーの属性と、壊れた ID の代わりの案内', (t) => {
+  const h = testDom(t);
+  renderSlide(h.root, VIDEO, {}, { player: true });
+  const iframe = h.root.querySelector('iframe');
+  assert.ok(iframe);
+  assert.equal(iframe.getAttribute('src'), 'https://www.youtube-nocookie.com/embed/AbCdEf01_-2?rel=0&playsinline=1&start=90');
+  assert.equal(iframe.getAttribute('title'), VIDEO.caption);
+  assert.equal(iframe.getAttribute('allow'), 'encrypted-media; picture-in-picture; fullscreen');
+  assert.equal(iframe.getAttribute('allowfullscreen'), '');
+  assert.equal(iframe.getAttribute('referrerpolicy'), 'strict-origin-when-cross-origin');
+  assert.equal(iframe.getAttribute('sandbox'), 'allow-scripts allow-same-origin allow-presentation');
+  assert.equal(iframe.getAttribute('loading'), null);
+  assert.equal(iframe.getAttribute('autoplay'), null);
+  assert.doesNotMatch(iframe.getAttribute('src'), /autoplay/);
+  assert.equal(h.root.textContent, '');
+  assert.equal(createVideoPlayer({ ...VIDEO, caption: '' }).getAttribute('title'), 'YouTube の動画');
+  const count = h.made.filter((n) => n.tagName === 'iframe').length;
+  for (const videoId of ['', '"><script>', '../x', 12345678901, 'x'.repeat(12)]) {
+    renderSlide(h.root, { ...VIDEO, videoId }, {}, { player: true });
+    assert.equal(h.root.querySelector('iframe'), null);
+    assert.match(h.root.textContent, /動画の URL がありません。/);
+    assert.equal(createVideoPlayer({ ...VIDEO, videoId }), null);
+  }
+  assert.equal(h.made.filter((n) => n.tagName === 'iframe').length, count);
+});
+
+async function videoPresentSetup(t, video = VIDEO) {
+  const h = testDom(t);
+  let deck = addSlide(createDeck('確認', 1), video, 'v');
+  deck = addSlide(deck, createSlide('content'), 'next');
+  const session = buildSession(deck, 'deck', 'teacher-test', 1);
+  session.pub.current = { slideId: 'v', index: 0 };
+  const net = createFakeNet();
+  await net.set('sessions/test', session);
+  const cleanup = mountPresent(h.root, { params: { sid: 'test' }, net, repo: createRepo(net, 'teacher-test'), navigate: async () => {} });
+  h.onCleanup(cleanup);
+  await flushView();
+  return { ...h, net, cleanup };
+}
+
+test('発表 DOM: 状態更新中は同じ iframe、次へで破棄し、前へで作り直す', async (t) => {
+  const h = await videoPresentSetup(t);
+  const iframe = h.root.querySelector('iframe');
+  assert.ok(iframe);
+  assert.equal(h.root.querySelector('.pr-poll').hidden, true);
+  assert.equal(h.root.querySelector('.pr-group-poll').hidden, true);
+  for (let i = 0; i < 3; i++) {
+    await h.net.set(`sessions/test/inbox/participants/test${i}`, { at: i });
+    await h.net.set(`sessions/test/inbox/answers/other/test${i}`, { choice: 0, at: i });
+    await h.net.set('sessions/test/pub/title', `確認 ${i}`);
+    await flushView();
+    assert.equal(h.root.querySelector('iframe'), iframe);
+  }
+  assert.match(h.root.textContent, /参加 3 人/);
+  assert.equal(h.made.filter((n) => n.tagName === 'iframe').length, 1);
+  h.root.querySelector('.pr-next').click();
+  await flushView();
+  assert.equal(h.root.querySelector('iframe'), null);
+  assert.equal(iframe.isConnected, false);
+  h.root.querySelector('.pr-prev').click();
+  await flushView();
+  assert.ok(h.root.querySelector('iframe'));
+  assert.notEqual(h.root.querySelector('iframe'), iframe);
+  h.cleanup();
+  assert.equal(h.root.querySelector('iframe'), null);
+});
+
+test('発表 DOM: URL が無い動画は見本と案内だけ', async (t) => {
+  const h = await videoPresentSetup(t, createSlide('video'));
+  assert.match(h.root.textContent, /動画の URL がありません。/);
+  assert.equal(h.made.filter((n) => n.tagName === 'iframe').length, 0);
+});
+
+test('編集 DOM: 確認を押すまで通信せず、URL 変更・スライド移動でプレーヤーを捨てる', async (t) => {
+  const h = testDom(t);
+  let deck = addSlide(createDeck('動画の編集', 1), VIDEO, 'v');
+  deck = addSlide(deck, createSlide('video'), 'other');
+  const saved = [];
+  const cleanup = mountEditor(h.root, {
+    params: { deckId: 'video-edit' }, auth: { user: { uid: 'teacher-video-test' } },
+    repo: { deckState: async () => 'live', loadDeck: async () => structuredClone(deck), saveDeck: async (id, value) => saved.push(structuredClone(value)) },
+  });
+  let stopped = false;
+  h.onCleanup(async () => { if (!stopped) cleanup(); await flushView(); });
+  await flushView();
+  const input = () => h.root.querySelector('#ed-video-url');
+  const check = () => buttonText(h.root, 'ここで再生して確かめる');
+  const enter = (text) => { input().value = text; input().dispatch('input'); };
+  const select = (id) => h.root.querySelectorAll('.ed-slide-btn').find((b) => b.dataset.slideId === id).click();
+  assert.equal(input().value, 'https://youtu.be/AbCdEf01_-2?t=90');
+  assert.match(h.root.querySelector('#ed-video-status').textContent, /動画を読み取りました。1 分 30 秒から始めます。/);
+  assert.equal(h.made.filter((n) => n.tagName === 'iframe').length, 0);
+  check().click();
+  const first = h.root.querySelector('iframe');
+  assert.ok(first);
+  assert.equal(h.root.querySelector('.ed-left').querySelector('iframe'), null);
+  const caption = h.root.querySelector('#ed-video-caption');
+  assert.equal(caption.getAttribute('maxlength'), '100');
+  caption.value = '<script>題</script>';
+  caption.dispatch('input');
+  assert.equal(h.root.querySelector('iframe'), first);
+  assert.equal(first.getAttribute('title'), caption.value);
+  enter('https://youtube.com/watch?v=AbCdEf01_-2&t=90&si=changed');
+  assert.equal(first.isConnected, false);
+  assert.equal(h.root.querySelector('iframe'), null);
+  check().click();
+  const second = h.root.querySelector('iframe');
+  select('other');
+  assert.equal(second.isConnected, false);
+  assert.equal(check().disabled, true);
+  select('v');
+  assert.equal(input().value, 'https://youtu.be/AbCdEf01_-2?t=90');
+  assert.equal(h.root.querySelector('iframe'), null);
+  enter('https://youtube.com.example.org/watch?v=AbCdEf01_-2');
+  assert.equal(check().disabled, true);
+  assert.equal(h.root.querySelector('#ed-video-status').getAttribute('role'), 'alert');
+  assert.equal(h.root.querySelector('#ed-video-status').textContent, 'YouTube の動画の URL を入れてください。');
+  assert.equal(h.root.querySelector('iframe'), null);
+  select('other');
+  select('v');
+  assert.equal(input().value, '');
+  enter('youtu.be/AbCdEf01_-2?t=1m30s');
+  check().click();
+  cleanup();
+  stopped = true;
+  await flushView();
+  assert.equal(h.root.querySelector('iframe'), null);
+  assert.deepEqual(saved.at(-1).slides.v, { ...VIDEO, caption: '<script>題</script>' });
+  assert.equal(h.made.filter((n) => n.tagName === 'script').length, 0);
+});
 
 async function presentSetup(t, kind) {
   const dom = testDom(t);

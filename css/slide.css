@@ -14,6 +14,17 @@
 }
 .slide-stage { position: absolute; inset: 0; }
 
+/* 動画: 外部画像を使わない見本。プレーヤーは枠いっぱいに置く */
+.slide-video-player { display: block; width: 100%; height: 100%; border: 0; }
+.slide-video-sample {
+  position: absolute; inset: 0; padding: calc(4 * var(--unit));
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: calc(2 * var(--unit)); text-align: center; background: #F7F8FD;
+}
+.slide-video-mark { font-size: calc(12 * var(--unit)); line-height: 1; }
+.slide-video-label { margin: 0; font-size: calc(5 * var(--unit)); font-weight: 700; }
+.slide-video-caption, .slide-video-missing { margin: 0; font-size: calc(3 * var(--unit)); overflow-wrap: anywhere; }
+
 .slide-item { position: absolute; overflow: hidden; }
 
 .slide-text { font-size: calc(var(--fs, 4) * var(--unit)); }

@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createDeck, createSlide, addSlide } from '../js/model.js';
+import { historyToCsv } from '../js/results-csv.js';
 import {
   buildSession, goToPatch, nextPatch, prevPatch, pausePatch, resultsVisiblePatch,
   tally, percent, applyPatch, closeAllPatch, endPatch, buildHistory,
@@ -26,6 +27,47 @@ function start() {
 function step(pub, patch) {
   return patch ? applyPatch(pub, patch) : pub;
 }
+
+test('動画: 授業の写しには入り、polls・履歴・CSV には入らない', () => {
+  const base = makeDeck();
+  const video = { type: 'video', videoId: 'AbCdEf01_-2', start: 90, caption: '動画の題' };
+  const deck = addSlide(base, video, 'v', 's2');
+  const session = buildSession(deck, 'deck1', 'uid1', 5000);
+  assert.deepEqual(session.deck.slides.v, video);
+  assert.notEqual(session.deck.slides.v, video);
+  assert.equal(session.pub.polls.v, undefined);
+  const inbox = { answers: { s2: { testA: { choice: 1, at: 1 } }, v: { testB: { choice: 0, at: 1 } } } };
+  const history = buildHistory(session, inbox, 9000);
+  const original = buildHistory(buildSession(base, 'deck1', 'uid1', 5000), inbox, 9000);
+  assert.deepEqual(history, original);
+  assert.equal(historyToCsv(history), historyToCsv(original));
+  assert.doesNotMatch(historyToCsv(history), /動画の題|AbCdEf01_-2/);
+});
+
+test('動画: 次へ・前へ・締切は従来どおりで、受付と結果の操作は無い', () => {
+  const deck = addSlide(makeDeck(), { ...createSlide('video'), videoId: 'AbCdEf01_-2' }, 'v', 's2');
+  const session = buildSession(deck, 'deck1', 'uid1', 5000);
+  const order = deck.order;
+  let pub = applyPatch(session.pub, goToPatch(session.pub, order, 1));
+  assert.equal(pub.polls.s2.status, 'open');
+  pub = applyPatch(pub, nextPatch(pub, order));
+  assert.deepEqual(pub.current, { slideId: 'v', index: 2 });
+  assert.equal(pub.polls.s2.status, 'closed');
+  assert.equal(pub.polls.v, undefined);
+  assert.equal(pausePatch(pub, 'v', true), null);
+  assert.equal(resultsVisiblePatch(pub, 'v', true), null);
+  pub = applyPatch(pub, nextPatch(pub, order));
+  assert.equal(pub.polls.s3.status, 'open');
+  pub = applyPatch(pub, prevPatch(pub, order));
+  assert.equal(pub.current.slideId, 'v');
+  assert.equal(pub.polls.s3.status, 'closed');
+  pub = applyPatch(pub, prevPatch(pub, order));
+  assert.equal(pub.polls.s2.status, 'closed');
+  assert.equal(pub.polls.v, undefined);
+  const ended = applyPatch(pub, endPatch(pub));
+  assert.equal(ended.state, 'ended');
+  assert.ok(Object.values(ended.polls).every((p) => p.status === 'closed'));
+});
 
 test('始めたときは参加の画面で、質問は待機中', () => {
   const { session, deck } = start();

@@ -13,6 +13,7 @@ export const CONFIG = {
   cloud: { maxWords: 3, maxLength: 20, maxShown: 60 },
   // 5 段階評価: 段階の数、両はしの言葉の長さ
   rating: { steps: 5, labelMaxLength: 20 },
+  video: { captionMaxLength: 100, maxStart: 86400 },
   // 図形: 選べる色（名前と色。css/base.css の配色に白・黒・灰色を足したもの）。
   // stroke: true の色だけを線の色に使える（白い背景との差が 3:1 以上。見えにくい線を作らない）。
   // 線の太さは、スライドの幅に対する %

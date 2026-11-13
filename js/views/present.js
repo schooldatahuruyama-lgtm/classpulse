@@ -757,7 +757,7 @@ export function mount(root, ctx) {
       } else if (showCloud) {
         cloud = buildCloud(cur.slideId, slide);
         l.stage.replaceChildren(cloud.root);
-      } else renderSlide(l.stage, slide, state.images, { sample: false, correct: shownCorrect });
+      } else renderSlide(l.stage, slide, state.images, { sample: false, correct: shownCorrect, player: slide?.type === 'video' });
       l.stage.classList.toggle('is-join', index < 0);
       l.stage.classList.toggle('is-board', showBoard || showCloud);
     }
@@ -861,6 +861,7 @@ export function mount(root, ctx) {
 
   return () => {
     alive = false;
+    if (live) live.stage.querySelectorAll('iframe').forEach((node) => node.remove());
     dropBoards();
     closeAllDialogs(); // 開いたままの確認（授業の終了など）は、取り消しとして閉じる
     document.removeEventListener('keydown', onKey);

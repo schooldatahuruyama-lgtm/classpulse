@@ -598,6 +598,15 @@ export function mount(root, ctx) {
       return;
     }
     const key = `slide:${state.slideId}`;
+    if (slide.type === 'video') {
+      if (show(key)) {
+        body.append(el('section', { class: 'st-message' },
+          el('p', { text: '動画は、前の画面で見てください。' }),
+          slide.caption ? el('p', { text: slide.caption }) : null));
+        window.scrollTo(0, 0);
+      }
+      return;
+    }
     if (slide.type === 'poll' || slide.type === 'quiz' || slide.type === 'rating') {
       if (show(key)) {
         pollUi = buildPoll(slide);

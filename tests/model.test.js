@@ -31,6 +31,37 @@ test('スライドを足す・途中に足す', () => {
   assert.equal(d3.slides.c.type, 'poll');
 });
 
+test('動画: 初期値と正規化は 4 項目だけ。入力 URL や質問の情報は保存しない', () => {
+  assert.deepEqual(createSlide('video'), { type: 'video', videoId: '', start: 0, caption: '' });
+  const slide = { type: 'video', videoId: 'AbCdEf01_-2', start: 90, caption: '題', url: 'https://example.org', items: [], question: '質問', options: ['a'], resultMode: 'live' };
+  const before = structuredClone(slide);
+  const normalized = normalizeDeck({ order: ['v'], slides: { v: slide } }).slides.v;
+  assert.deepEqual(normalized, { type: 'video', videoId: 'AbCdEf01_-2', start: 90, caption: '題' });
+  assert.deepEqual(slide, before);
+});
+
+test('動画: こわれた ID・開始位置を正し、題を 100 文字までに切る', () => {
+  const norm = (fields) => normalizeDeck({ order: ['v'], slides: { v: { type: 'video', ...fields } } }).slides.v;
+  for (const videoId of ['', '"><script>', '../x', 12345678901, 'x'.repeat(12), 'AbCdEf01_-2\n', null, undefined]) {
+    assert.equal(norm({ videoId }).videoId, '');
+  }
+  for (const start of [-1, 86401, 0.5, '90', NaN, Infinity, null, undefined]) assert.equal(norm({ start }).start, 0);
+  for (const start of [0, 90, 86400]) assert.equal(norm({ start }).start, start);
+  assert.equal(norm({ caption: 'あ'.repeat(101) }).caption, 'あ'.repeat(100));
+  assert.equal(norm({ caption: 'あ'.repeat(99) + '😀' }).caption, 'あ'.repeat(99));
+  assert.equal(norm({ caption: 123 }).caption, '');
+  assert.deepEqual(norm({}), createSlide('video'));
+});
+
+test('動画: 発表前の確かめは題を省略でき、空・こわれた ID の枚数を知らせる', () => {
+  const deck = { order: ['c', 'v', 'bad', 'ok'], slides: {
+    c: createSlide('content'), v: createSlide('video'), bad: { type: 'video', videoId: '../x' },
+    ok: { ...createSlide('video'), videoId: 'AbCdEf01_-2' },
+  } };
+  assert.deepEqual(validateDeck(deck), ['2 枚目: 動画の URL を入れてください。', '3 枚目: 動画の URL を入れてください。']);
+  assert.deepEqual(validateDeck({ ...deck, order: ['ok'] }), []);
+});
+
 test('createSlide と createTextItem の初期値', () => {
   assert.deepEqual(createSlide('content'), { type: 'content', items: [] });
   assert.deepEqual(createSlide('poll'), { type: 'poll', question: '', options: ['', ''], resultMode: 'manual' });

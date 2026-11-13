@@ -16,9 +16,10 @@ import { mountCanvas } from './editor/canvas.js';
 import { renderSlideList, updateThumb, addButtons } from './editor/slide-list.js';
 import {
   renderItemInspector, renderPollSettings, renderPollForm, renderFreeSettings, renderCloudSettings,
-  renderQuizSettings, renderRatingSettings, renderRatingForm,
+  renderQuizSettings, renderRatingSettings, renderRatingForm, renderVideoSettings,
 } from './editor/inspector.js';
 import { renderSlide } from '../slide-render.js';
+import { youTubeEmbedUrl } from '../video.js';
 import { backgroundSaver, useAuth } from './editor/background.js';
 
 const UNTITLED = '無題の教材';
@@ -140,6 +141,7 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
   let opening = false;
   let canvas = null;
   let freePreview = null; // 自由記述・ワードクラウド・5 段階評価の中央の見本。どれでもないときは null
+  let videoPreview = null; // 確認ボタンを押している間だけプレーヤーを持つ
   let thumbTimer = null;
   let imageTask = null;              // 画像の追加中の Promise（同時に 1 つだけ）
   let flushDone = Promise.resolve(); // 画面を離れたときの最後の保存
@@ -235,14 +237,38 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
 
   function renderList() { renderSlideList(left, ed); }
 
+  function updateVideoPreview(reset = false) {
+    const slide = currentSlide();
+    if (!videoPreview || !slide || slide.type !== 'video') return;
+    if (reset) videoPreview.playing = false;
+    videoPreview.button.disabled = !youTubeEmbedUrl(slide);
+    const iframe = videoPreview.box.querySelector('iframe');
+    if (videoPreview.playing && iframe) iframe.setAttribute('title', slide.caption || 'YouTube の動画');
+    else renderSlide(videoPreview.box, slide, state.deck.images, { player: videoPreview.playing });
+  }
+
   function renderCenter() {
     canvas = null;
     freePreview = null;
+    videoPreview = null;
     const slide = currentSlide();
     if (!slide) {
       center.replaceChildren(el('div', { class: 'ed-empty card' },
-        el('p', { text: 'スライドがありません。「＋ 資料スライド」「＋ アンケート」「＋ クイズ」「＋ 5 段階評価」「＋ 自由記述」「＋ ワードクラウド」のどれかで追加してください。' }),
+        el('p', { text: 'スライドがありません。「＋ 資料スライド」「＋ アンケート」「＋ クイズ」「＋ 5 段階評価」「＋ 自由記述」「＋ ワードクラウド」「＋ 動画」のどれかで追加してください。' }),
         addButtons(ed)));
+    } else if (slide.type === 'video') {
+      const box = el('div', { class: 'ed-video-preview' });
+      const button = el('button', {
+        type: 'button', class: 'btn', text: 'ここで再生して確かめる',
+        onclick: () => {
+          if (!alive || button.disabled || !videoPreview) return;
+          videoPreview.playing = true;
+          updateVideoPreview();
+        },
+      });
+      videoPreview = { box, button, playing: false };
+      updateVideoPreview();
+      center.replaceChildren(el('div', { class: 'ed-video card' }, box, el('p', {}, button)));
     } else if (slide.type === 'poll' || slide.type === 'quiz') {
       // クイズはアンケートと同じ入力欄に、選択肢ごとの「正解」を足したもの
       renderPollForm(center, ed);
@@ -275,6 +301,7 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
     else if (slide.type === 'rating') renderRatingSettings(right, ed);
     else if (slide.type === 'free') renderFreeSettings(right, ed);
     else if (slide.type === 'cloud') renderCloudSettings(right, ed);
+    else if (slide.type === 'video') renderVideoSettings(right, ed);
     else renderItemInspector(right, ed);
     if (key) [...right.querySelectorAll('[data-focus-key]')].find((b) => b.dataset.focusKey === key)?.focus();
   }
@@ -450,6 +477,7 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
       // 自由記述・ワードクラウド・5 段階評価は、中央の見本も描き直す（入力欄はそのまま）
       const cur = currentSlide();
       if (freePreview && cur && (cur.type === 'free' || cur.type === 'cloud' || cur.type === 'rating')) renderSlide(freePreview, cur, state.deck.images);
+      if (videoPreview) updateVideoPreview(Object.hasOwn(patch, 'videoId') || Object.hasOwn(patch, 'start'));
     },
   };
 
@@ -628,6 +656,7 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
     closeAllDialogs();
     if (canvas) canvas.finishEdit();
     document.removeEventListener('click', onLinkClick, true);
+    if (videoPreview) videoPreview.box.replaceChildren();
     window.removeEventListener('beforeunload', onBeforeUnload);
     document.removeEventListener('visibilitychange', onVisibility);
     if (thumbTimer !== null) window.clearTimeout(thumbTimer);
