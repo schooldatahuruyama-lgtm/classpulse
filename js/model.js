@@ -62,6 +62,169 @@ export function clampItem(item) {
   return { ...src, x, y, w, h };
 }
 
+// ---- 図形（kind:'shape'）----
+
+// 図形の種類（四角形・円・三角形・線・矢印）
+export const SHAPE_KINDS = ['rect', 'ellipse', 'triangle', 'line', 'arrow'];
+// 線の向き（よこ・たて・左上から右下・左下から右上）と、矢印の先（終わり・始め・両方）
+export const SHAPE_DIRS = ['h', 'v', 'd1', 'd2'];
+export const ARROW_HEADS = ['end', 'start', 'both'];
+
+const isLineShape = (shape) => shape === 'line' || shape === 'arrow';
+
+// 決まった色の値（大文字）か 'none'。どちらでもなければ null。
+// forStroke: 線に使える色（stroke: true）だけを認める
+function shapeColor(v, forStroke) {
+  if (v === 'none') return 'none';
+  if (typeof v !== 'string') return null;
+  const up = v.toUpperCase();
+  const c = CONFIG.shape.colors.find((x) => x.value === up && (!forStroke || x.stroke));
+  return c ? c.value : null;
+}
+
+// 図形の要素を作る。置く場所はスライドの中央あたり。
+// 四角形・円・三角形は画面の上で正方形（16:9 の枠なので h = w × 16 / 9）、線と矢印は横長の箱
+export function createShapeItem(id, shape) {
+  const s = SHAPE_KINDS.includes(shape) ? shape : 'rect';
+  const { defaultFill, defaultStroke } = CONFIG.shape;
+  if (s === 'line') {
+    return { id, kind: 'shape', shape: s, x: 0.3, y: 0.45, w: 0.4, h: 0.1, stroke: defaultStroke, strokeWidth: 'm', dir: 'h' };
+  }
+  if (s === 'arrow') {
+    return { id, kind: 'shape', shape: s, x: 0.3, y: 0.45, w: 0.4, h: 0.1, stroke: defaultStroke, strokeWidth: 'm', dir: 'h', head: 'end' };
+  }
+  return { id, kind: 'shape', shape: s, x: 0.3875, y: 0.3, w: 0.225, h: 0.4, fill: defaultFill, stroke: defaultStroke, strokeWidth: 'm' };
+}
+
+// 保存された図形を正す（元は書きかえない）。種類に合う項目だけを残し、知らない値は既定値にする。
+// 色は決まった色か 'none' だけ。塗りも線も 'none'（見えない）にはしない。線と矢印の線は 'none' にしない
+export function normalizeShapeItem(item) {
+  const src = item && typeof item === 'object' ? item : {};
+  const { x, y, w, h } = clampItem(src);
+  const { defaultFill, defaultStroke, widths } = CONFIG.shape;
+  const shape = SHAPE_KINDS.includes(src.shape) ? src.shape : 'rect';
+  const out = { ...(src.id !== undefined ? { id: src.id } : {}), kind: 'shape', shape, x, y, w, h };
+  const strokeWidth = typeof src.strokeWidth === 'string' && Object.hasOwn(widths, src.strokeWidth) ? src.strokeWidth : 'm';
+  let stroke = shapeColor(src.stroke, true) ?? defaultStroke;
+  if (isLineShape(shape)) {
+    if (stroke === 'none') stroke = defaultStroke;
+    out.stroke = stroke;
+    out.strokeWidth = strokeWidth;
+    out.dir = SHAPE_DIRS.includes(src.dir) ? src.dir : 'h';
+    if (shape === 'arrow') out.head = ARROW_HEADS.includes(src.head) ? src.head : 'end';
+    return out;
+  }
+  const fill = shapeColor(src.fill, false) ?? defaultFill;
+  if (fill === 'none' && stroke === 'none') stroke = defaultStroke;
+  out.fill = fill;
+  out.stroke = stroke;
+  out.strokeWidth = strokeWidth;
+  return out;
+}
+
+// 描くための座標（箱を 0〜1 とした座標）。正していない値でもよい（中で正す）。
+// box: 四角形・円の範囲、points: 三角形の頂点、line: 線の始点と終点、heads: 矢印の先の有無
+export function shapeGeometry(item) {
+  const n = normalizeShapeItem(item);
+  const heads = {
+    start: n.shape === 'arrow' && (n.head === 'start' || n.head === 'both'),
+    end: n.shape === 'arrow' && (n.head === 'end' || n.head === 'both'),
+  };
+  if (n.shape === 'triangle') return { shape: n.shape, points: [[0.5, 0], [1, 1], [0, 1]], heads };
+  if (isLineShape(n.shape)) {
+    const line = {
+      h: { x1: 0, y1: 0.5, x2: 1, y2: 0.5 },
+      v: { x1: 0.5, y1: 0, x2: 0.5, y2: 1 },
+      d1: { x1: 0, y1: 0, x2: 1, y2: 1 },
+      d2: { x1: 0, y1: 1, x2: 1, y2: 0 },
+    }[n.dir];
+    return { shape: n.shape, line, heads };
+  }
+  return { shape: n.shape, box: { x: 0, y: 0, w: 1, h: 1 }, heads };
+}
+
+// SVG に描く部品（純粋な関数）。単位は「スライドの幅の 1%」。スライドは 16:9 なので、
+// 箱の大きさは width = w × 100、height = h × 100 × 9 / 16 で、画面の上の縦横比と同じになる。
+// そのため viewBox を箱いっぱいに広げても、線の太さ・矢印の先はのびず、どの画面でもスライドの幅に比例する。
+// 線の端が切れないよう、線の太さの半分だけ内側に描く（角と端は丸める）。
+// parts: [{ tag, attrs, points?, role? }]。attrs の値は数か決まった文字だけ（色は正した値）
+export function shapeDrawing(item) {
+  const n = normalizeShapeItem(item);
+  const g = shapeGeometry(n);
+  const width = n.w * 100;
+  const height = n.h * 100 * 9 / 16;
+  const sw = CONFIG.shape.widths[n.strokeWidth];
+  const p = sw / 2;
+  const iw = Math.max(0, width - 2 * p);
+  const ih = Math.max(0, height - 2 * p);
+  const X = (u) => p + u * iw;
+  const Y = (v) => p + v * ih;
+  const paint = {
+    fill: isLineShape(n.shape) ? 'none' : n.fill,
+    stroke: n.stroke,
+    'stroke-width': sw,
+    'stroke-linejoin': 'round',
+    'stroke-linecap': 'round',
+  };
+  const parts = [];
+  if (n.shape === 'rect') {
+    parts.push({ tag: 'rect', attrs: { x: X(0), y: Y(0), width: iw, height: ih, ...paint } });
+  } else if (n.shape === 'ellipse') {
+    parts.push({ tag: 'ellipse', attrs: { cx: width / 2, cy: height / 2, rx: iw / 2, ry: ih / 2, ...paint } });
+  } else if (n.shape === 'triangle') {
+    parts.push({ tag: 'polygon', role: 'body', points: g.points.map(([u, v]) => [X(u), Y(v)]), attrs: paint });
+  } else {
+    let x1 = X(g.line.x1); let y1 = Y(g.line.y1);
+    let x2 = X(g.line.x2); let y2 = Y(g.line.y2);
+    const len = Math.hypot(x2 - x1, y2 - y1);
+    const count = (g.heads.start ? 1 : 0) + (g.heads.end ? 1 : 0);
+    if (count && len > 0) {
+      // 矢印の先: 線の太さに合った大きさの 2 等辺三角形。線が短いときは形を保ったまま小さくする
+      let headLen = 1.5 + 3 * sw;
+      if (count * headLen > 0.8 * len) headLen = (0.8 * len) / count;
+      const half = headLen * 0.55;
+      const ux = (x2 - x1) / len;
+      const uy = (y2 - y1) / len;
+      const head = (tx, ty, dx, dy) => {
+        const bx = tx - dx * headLen;
+        const by = ty - dy * headLen;
+        parts.push({
+          tag: 'polygon', role: 'head',
+          points: [[tx, ty], [bx - dy * half, by + dx * half], [bx + dy * half, by - dx * half]],
+          attrs: { fill: n.stroke, stroke: 'none' },
+        });
+        return [bx, by];
+      };
+      // 線は先の底辺まで（先の三角形の先端に、線の丸い端が出ないように）
+      if (g.heads.end) [x2, y2] = head(x2, y2, ux, uy);
+      if (g.heads.start) [x1, y1] = head(x1, y1, -ux, -uy);
+    }
+    parts.unshift({ tag: 'line', attrs: { x1, y1, x2, y2, ...paint } });
+  }
+  return { width, height, strokeWidth: sw, parts };
+}
+
+// 要素を、重なりのいちばん前（items の最後）・いちばん後ろ（最初）へ動かした新しいスライド。
+// 見つからなければ元のまま（中身の同じ新しい値）
+function moveItemTo(slide, itemId, front) {
+  if (!slide || !Array.isArray(slide.items)) return { ...slide };
+  const items = [...slide.items];
+  const at = items.findIndex((it) => it && it.id === itemId);
+  if (at < 0) return { ...slide, items };
+  const [it] = items.splice(at, 1);
+  if (front) items.push(it);
+  else items.unshift(it);
+  return { ...slide, items };
+}
+
+export function bringToFront(slide, itemId) {
+  return moveItemTo(slide, itemId, true);
+}
+
+export function sendToBack(slide, itemId) {
+  return moveItemTo(slide, itemId, false);
+}
+
 // afterId が無い（または見つからない）ときは最後に足す
 export function addSlide(deck, slide, id, afterId) {
   const order = [...deck.order];
@@ -232,7 +395,11 @@ function normalizeSlide(raw) {
     return { type: s.type, question: typeof s.question === 'string' ? s.question : '' };
   }
   // 保存された位置が枠の外・大きさ 0 でも、表示と編集で困らないように直す
-  const items = toArray(s.items).map((it) => (it && typeof it === 'object' ? clampItem(it) : it));
+  // 図形は、種類・色などの値も正す（文字・画像は今までどおり位置と大きさだけ）
+  const items = toArray(s.items).map((it) => {
+    if (!it || typeof it !== 'object') return it;
+    return it.kind === 'shape' ? normalizeShapeItem(it) : clampItem(it);
+  });
   return { ...s, type: 'content', items };
 }
 

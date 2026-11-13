@@ -1,8 +1,8 @@
 // スライド編集: 右の列（選んだ要素の設定）と、アンケート・クイズ・5 段階評価の入力欄・設定
 import { el } from '../../ui.js';
-import { TEXT_COLORS, OPTION_MARKS } from '../../slide-render.js';
+import { TEXT_COLORS, OPTION_MARKS, SHAPE_NAMES } from '../../slide-render.js';
 import { CONFIG } from '../../config.js';
-import { removeOption as withoutOption, quizCorrect } from '../../model.js';
+import { removeOption as withoutOption, quizCorrect, normalizeShapeItem } from '../../model.js';
 
 const SIZES = [
   { value: 's', label: '小' },
@@ -15,6 +15,24 @@ const ALIGNS = [
   { value: 'center', label: '中央' },
   { value: 'right', label: '右' },
 ];
+
+const STROKE_WIDTHS = [
+  { value: 's', label: '細い' },
+  { value: 'm', label: 'ふつう' },
+  { value: 'l', label: '太い' },
+];
+const DIRS = [
+  { value: 'h', label: 'よこ' },
+  { value: 'v', label: 'たて' },
+  { value: 'd1', label: 'ななめ ＼' },
+  { value: 'd2', label: 'ななめ ／' },
+];
+const HEADS = [
+  { value: 'end', label: '終わり' },
+  { value: 'start', label: '始め' },
+  { value: 'both', label: '両方' },
+];
+const BOTH_NONE_NOTE = '塗りと線の両方を「なし」にはできません。';
 
 export const POLL_NOTE = 'このアンケートは匿名です。次のスライドへ進むと締め切ります。締め切る前は、生徒は答えを変えられます。';
 
@@ -46,6 +64,69 @@ function deleteItemButton(ed, item) {
   return el('button', { type: 'button', class: 'btn btn-danger ed-wide', text: 'この要素を削除', onclick: () => ed.removeItem(item.id) });
 }
 
+// 重なりの順番（文字・画像・図形のどれにも出す）
+function layerButtons(ed, item) {
+  return el('div', { class: 'ed-group', role: 'group', 'aria-labelledby': 'ed-layer' },
+    el('p', { id: 'ed-layer', class: 'ed-side-label', text: '重なりの順番' }),
+    el('div', { class: 'ed-btn-grid' },
+      el('button', { type: 'button', class: 'btn', text: 'いちばん前へ', dataset: { focusKey: 'ed-layer:front' }, onclick: () => ed.moveItemLayer(item.id, true) }),
+      el('button', { type: 'button', class: 'btn', text: 'いちばん後ろへ', dataset: { focusKey: 'ed-layer:back' }, onclick: () => ed.moveItemLayer(item.id, false) })));
+}
+
+// 色の丸いボタンの組。色の名前は読み上げの名前（aria-label）と、選んでいる色の文字で持つ。
+// 選んでいる色は aria-pressed と、枠・「✓」の印で示す（色だけに頼らない）。
+// 「なし」は、ななめの線が入った丸。noneDisabled のときは選べない
+function colorGroup(id, label, colors, current, onPick, { none = false, noneDisabled = false } = {}) {
+  const swatch = (value, name) => {
+    const on = value === current;
+    const disabled = value === 'none' && noneDisabled && !on;
+    return el('button', {
+      type: 'button', class: on ? 'ed-color is-on' : 'ed-color', disabled,
+      'aria-pressed': on ? 'true' : 'false', 'aria-label': `${label}: ${name}`, title: name,
+      dataset: { focusKey: `${id}:${value}` },
+      onclick: () => onPick(value),
+    },
+    value === 'none'
+      ? el('span', { class: 'ed-color-dot is-none', 'aria-hidden': 'true' })
+      : el('span', { class: 'ed-color-dot', 'aria-hidden': 'true', style: `background:${value}` }),
+    on ? el('span', { class: 'ed-color-check', 'aria-hidden': 'true', text: '✓' }) : null);
+  };
+  const currentName = current === 'none' ? 'なし' : (colors.find((c) => c.value === current)?.name ?? '');
+  return el('div', { class: 'ed-group', role: 'group', 'aria-labelledby': id },
+    el('p', { id, class: 'ed-side-label', text: label }),
+    el('div', { class: 'ed-colors' },
+      colors.map((c) => swatch(c.value, c.name)),
+      none ? swatch('none', 'なし') : null),
+    el('p', { class: 'small ed-color-now', text: `いまの色: ${currentName}` }));
+}
+
+// 図形の右の列（その種類で変えられるものだけ）
+function renderShapeInspector(host, ed, raw) {
+  const item = normalizeShapeItem(raw);
+  const id = item.id;
+  const isLine = item.shape === 'line' || item.shape === 'arrow';
+  // いつも最新の要素に重ねて、正してから渡す（決まった値だけを保存する）
+  const set = (patch) => {
+    const cur = (ed.currentSlide()?.items || []).find((it) => it.id === id);
+    if (cur) ed.updateItem(normalizeShapeItem({ ...cur, ...patch }), { refresh: true, side: true });
+  };
+  const all = CONFIG.shape.colors;
+  const lineColors = all.filter((c) => c.stroke);
+  const oneNone = !isLine && (item.fill === 'none' || item.stroke === 'none');
+  // replaceChildren は null を文字にしてしまうので、出さない部品を除いてから渡す
+  host.replaceChildren(...[
+    el('h2', { class: 'ed-col-title', text: `図形の設定（${SHAPE_NAMES[item.shape]}）` }),
+    isLine ? null : colorGroup('ed-fill', '塗りの色', all, item.fill, (v) => set({ fill: v }), { none: true, noneDisabled: item.stroke === 'none' }),
+    colorGroup('ed-stroke', '線の色', lineColors, item.stroke, (v) => set({ stroke: v }), { none: !isLine, noneDisabled: item.fill === 'none' }),
+    oneNone ? el('p', { class: 'small muted', text: BOTH_NONE_NOTE }) : null,
+    choiceGroup('ed-stroke-width', '線の太さ', STROKE_WIDTHS, item.strokeWidth, (v) => set({ strokeWidth: v })),
+    isLine ? choiceGroup('ed-dir', '向き', DIRS, item.dir, (v) => set({ dir: v })) : null,
+    item.shape === 'arrow' ? choiceGroup('ed-head', '矢印の先', HEADS, item.head, (v) => set({ head: v })) : null,
+    layerButtons(ed, item),
+    deleteItemButton(ed, item),
+  ].filter(Boolean));
+}
+
 // 資料スライドの右の列
 export function renderItemInspector(host, ed) {
   const id = ed.state.itemId;
@@ -59,7 +140,12 @@ export function renderItemInspector(host, ed) {
   if (item.kind === 'image') {
     host.replaceChildren(
       el('h2', { class: 'ed-col-title', text: '画像の設定' }),
+      layerButtons(ed, item),
       deleteItemButton(ed, item));
+    return;
+  }
+  if (item.kind === 'shape') {
+    renderShapeInspector(host, ed, item);
     return;
   }
   // 入力中に文字が変わっていることがあるので、いつも最新の要素に重ねる
@@ -78,6 +164,7 @@ export function renderItemInspector(host, ed) {
       }, el('span', { class: 'ed-bold-mark', text: '太字' }), item.bold ? el('span', { class: 'ed-check', 'aria-hidden': 'true', text: '✓' }) : null)),
     choiceGroup('ed-color', '色', TEXT_COLORS, color, (v) => set({ color: v }), { swatch: true }),
     choiceGroup('ed-align', 'そろえ', ALIGNS, item.align, (v) => set({ align: v })),
+    layerButtons(ed, item),
     deleteItemButton(ed, item));
 }
 

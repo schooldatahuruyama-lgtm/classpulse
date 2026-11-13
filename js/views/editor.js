@@ -3,8 +3,8 @@
 import { el, confirmDialog, closeAllDialogs, statusChip, toast } from '../ui.js';
 import { CONFIG } from '../config.js';
 import {
-  newId, createSlide, createTextItem, addSlide, removeSlide, moveSlide, duplicateSlide,
-  updateSlide, deckImageBytes,
+  newId, createSlide, createTextItem, createShapeItem, addSlide, removeSlide, moveSlide, duplicateSlide,
+  updateSlide, deckImageBytes, bringToFront, sendToBack,
 } from '../model.js';
 import { createAutosaver } from '../autosave.js';
 import {
@@ -377,6 +377,28 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
       state.itemId = item.id;
       state.editingId = item.id; // 足したらすぐ入力できるように
       change(updateSlide(state.deck, state.slideId, { ...slide, items: [...slide.items, item] }), { thumb: true, center: true, side: true });
+    },
+
+    // 図形を足して選ぶ（文字と違い、入力は始めない）
+    addShape(shape) {
+      const slide = currentSlide();
+      if (!slide || slide.type !== 'content') return;
+      if (canvas) canvas.finishEdit();
+      const item = createShapeItem(newId(), shape);
+      state.itemId = item.id;
+      state.editingId = null;
+      change(updateSlide(state.deck, state.slideId, { ...slide, items: [...slide.items, item] }), { thumb: true, center: true, side: true });
+      // 足した図形にフォーカスを置く（キーボードでもすぐ動かせるように）
+      center.querySelector('.ed-item.is-selected')?.focus({ preventScroll: true });
+    },
+
+    // 重なりの順番を変える（いちばん前へ・いちばん後ろへ）。選んだままにする
+    moveItemLayer(id, front) {
+      const slide = currentSlide();
+      if (!slide || !Array.isArray(slide.items)) return;
+      if (canvas) canvas.finishEdit();
+      const next = front ? bringToFront(slide, id) : sendToBack(slide, id);
+      change(updateSlide(state.deck, state.slideId, next), { thumb: true, center: true, side: true });
     },
 
     isImageBusy: () => imageTask !== null,
