@@ -206,7 +206,7 @@ export function normalizeText(raw) {
 
 // 自由記述の回答の一覧。answers は inbox.answers[slideId]、hidden は { <uid>: true }。
 // 不正な text の回答は数えない。並びは at の古い順、同じなら uid の順
-export function freeList(answers, hidden) {
+export function freeList(answers, hidden, { isFlagged = () => false, released = {} } = {}) {
   const hid = hidden && typeof hidden === 'object' ? hidden : {};
   const rows = [];
   for (const [uid, a] of Object.entries(answers || {})) {
@@ -218,10 +218,12 @@ export function freeList(answers, hidden) {
   rows.sort((x, y) => (x.at - y.at) || (x.uid < y.uid ? -1 : x.uid > y.uid ? 1 : 0));
   const items = [];
   const hiddenItems = [];
+  const heldItems = [];
   for (const { uid, text } of rows) {
-    (hid[uid] === true ? hiddenItems : items).push({ uid, text });
+    const held = isFlagged(text) && (!released || !Object.hasOwn(released, uid) || released[uid] !== text);
+    (hid[uid] === true ? hiddenItems : held ? heldItems : items).push({ uid, text });
   }
-  return { items, hiddenItems, total: rows.length };
+  return { items, hiddenItems, heldItems, total: rows.length };
 }
 
 // ---- ワードクラウド ----
@@ -288,7 +290,7 @@ export function sameWords(a, b) {
 // ワードクラウドの一覧。answers は inbox.answers[slideId]、hidden は { <hiddenKey>: true }。
 // 言葉ごとに { key（hiddenKey）, word（いちばん多く書かれた形。同じ数なら先に届いた形）, count（書いた人数） }。
 // 並びは count の多い順、同じなら key の順。total は正しい言葉を 1 つ以上送った人数（かくした言葉も含む）
-export function cloudList(answers, hidden) {
+export function cloudList(answers, hidden, { isFlagged = () => false, released = {} } = {}) {
   const hid = hidden && typeof hidden === 'object' ? hidden : {};
   const rows = [];
   for (const [uid, a] of Object.entries(answers || {})) {
@@ -310,22 +312,28 @@ export function cloudList(answers, hidden) {
     }
   }
   const all = [];
+  const flagged = new Set();
   for (const [k, g] of groups) {
     let word = '';
     let best = 0;
     for (const [w, n] of g.forms) if (n > best) { word = w; best = n; }
     all.push({ key: encodeKey(k), word, count: g.count });
+    if ([...g.forms.keys()].some(isFlagged)) flagged.add(encodeKey(k));
   }
   all.sort((x, y) => (y.count - x.count) || (x.key < y.key ? -1 : x.key > y.key ? 1 : 0));
   const items = [];
   const hiddenItems = [];
-  for (const it of all) (hid[it.key] === true ? hiddenItems : items).push(it);
-  return { items, hiddenItems, total: rows.length };
+  const heldItems = [];
+  for (const it of all) {
+    const held = flagged.has(it.key) && (!released || !Object.hasOwn(released, it.key) || released[it.key] !== true);
+    (hid[it.key] === true ? hiddenItems : held ? heldItems : items).push(it);
+  }
+  return { items, hiddenItems, heldItems, total: rows.length };
 }
 
 // hidden は { <slideId>: { <uid か hiddenKey>: true } }（省略可）。履歴には uid も鍵も入れない。
 // quiz は { <slideId>: 正解の番号 }（省略可）。無い・範囲外なら、その質問の correct は null、correctCount は 0
-export function buildHistory(session, inbox, endedAt, hidden, quiz) {
+export function buildHistory(session, inbox, endedAt, hidden, quiz, { isFlagged, released = {} } = {}) {
   const deck = session.deck;
   const answers = (inbox && inbox.answers) || {};
   const questions = [];
@@ -333,19 +341,20 @@ export function buildHistory(session, inbox, endedAt, hidden, quiz) {
     const slide = (deck.slides || {})[slideId];
     if (!slide) continue;
     if (slide.type === 'free') {
-      const { items, hiddenItems, total } = freeList(answers[slideId], (hidden || {})[slideId]);
+      const { items, hiddenItems, heldItems, total } = freeList(answers[slideId], (hidden || {})[slideId], { isFlagged, released: released?.[slideId] });
       questions.push({
         slideId,
         type: 'free',
         question: slide.question || '',
         texts: items.map((x) => x.text),
         hiddenTexts: hiddenItems.map((x) => x.text),
+        heldTexts: heldItems.map((x) => x.text),
         total,
       });
       continue;
     }
     if (slide.type === 'cloud') {
-      const { items, hiddenItems, total } = cloudList(answers[slideId], (hidden || {})[slideId]);
+      const { items, hiddenItems, heldItems, total } = cloudList(answers[slideId], (hidden || {})[slideId], { isFlagged, released: released?.[slideId] });
       const plain = (x) => ({ word: x.word, count: x.count });
       questions.push({
         slideId,
@@ -353,6 +362,7 @@ export function buildHistory(session, inbox, endedAt, hidden, quiz) {
         question: slide.question || '',
         words: items.map(plain),
         hiddenWords: hiddenItems.map(plain),
+        heldWords: heldItems.map(plain),
         total,
       });
       continue;
