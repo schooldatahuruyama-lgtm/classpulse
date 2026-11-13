@@ -179,12 +179,28 @@ export function shapeDrawing(item) {
     const len = Math.hypot(x2 - x1, y2 - y1);
     const count = (g.heads.start ? 1 : 0) + (g.heads.end ? 1 : 0);
     if (count && len > 0) {
-      // 矢印の先: 線の太さに合った大きさの 2 等辺三角形。線が短いときは形を保ったまま小さくする
-      let headLen = 1.5 + 3 * sw;
-      if (count * headLen > 0.8 * len) headLen = (0.8 * len) / count;
-      const half = headLen * 0.55;
+      // 矢印の先: 線の太さに合った大きさの 2 等辺三角形（長さ headLen、底辺の半分 0.55 × headLen）。
+      // 線が短いとき・箱が平たい（細い）ときは、形を保ったまま（相似に）小さくして、3 点とも箱の中に収める。
+      // 箱からはみ出すと、スライドの端で発表・生徒の画面と縮小表示だけ切れてしまうため
       const ux = (x2 - x1) / len;
       const uy = (y2 - y1) / len;
+      const ends = [];
+      if (g.heads.end) ends.push([x2, y2, ux, uy]);
+      if (g.heads.start) ends.push([x1, y1, -ux, -uy]);
+      // 大きさ 1 の先の、先端から底辺の 2 点へのずれ（k 倍すると大きさ k の先）
+      const corners = (dx, dy) => [[-dx + dy * 0.55, -dy - dx * 0.55], [-dx - dy * 0.55, -dy + dx * 0.55]];
+      let headLen = Math.min(1.5 + 3 * sw, (0.8 * len) / count);
+      for (const [tx, ty, dx, dy] of ends) {
+        for (const [ox, oy] of corners(dx, dy)) {
+          // 先端は箱の中（内側に描いた線の端）。ずれの向きの、箱の辺までの残りで大きさを決める
+          if (ox > 0) headLen = Math.min(headLen, (width - tx) / ox);
+          if (ox < 0) headLen = Math.min(headLen, tx / -ox);
+          if (oy > 0) headLen = Math.min(headLen, (height - ty) / oy);
+          if (oy < 0) headLen = Math.min(headLen, ty / -oy);
+        }
+      }
+      headLen = Math.max(0, headLen);
+      const half = headLen * 0.55;
       const head = (tx, ty, dx, dy) => {
         const bx = tx - dx * headLen;
         const by = ty - dy * headLen;

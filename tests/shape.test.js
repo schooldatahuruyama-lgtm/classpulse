@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   createShapeItem, normalizeShapeItem, normalizeDeck, bringToFront, sendToBack,
-  shapeGeometry, shapeDrawing, clampItem, duplicateSlide, SHAPE_KINDS,
+  shapeGeometry, shapeDrawing, clampItem, duplicateSlide, SHAPE_KINDS, MIN_ITEM_SIZE,
 } from '../js/model.js';
 import { CONFIG } from '../js/config.js';
 
@@ -310,20 +310,98 @@ test('shapeDrawing: 線の端・線の太さの分が箱からはみ出さない
   }
 });
 
-test('shapeDrawing: 箱をつぶしても矢印の先の形はゆがまない（先端からの距離と角度が同じ）', () => {
-  const head = (w, h) => {
-    const d = shapeDrawing({ ...createShapeItem('a', 'arrow'), dir: 'h', w, h });
-    const p = d.parts.find((q) => q.role === 'head').points;
-    return p.map(([x, y]) => [x - p[0][0], y - p[0][1]]);
+// 箱の大きさの組（最小の大きさを含む）。スライドの端（y:0・y:1-h）に置いても同じ
+const SIZES = [MIN_ITEM_SIZE, 0.08, 0.15, 0.4, 1];
+const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+
+// 図形の部品が描く範囲（箱の単位）。線は太さの半分、丸い端の分だけふくらませる
+function extents(d) {
+  const r = d.strokeWidth / 2;
+  const out = [];
+  for (const p of d.parts) {
+    const a = p.attrs;
+    const sr = a.stroke && a.stroke !== 'none' ? r : 0;
+    if (p.tag === 'rect') out.push([a.x - sr, a.y - sr], [a.x + a.width + sr, a.y + a.height + sr]);
+    if (p.tag === 'ellipse') out.push([a.cx - a.rx - sr, a.cy - a.ry - sr], [a.cx + a.rx + sr, a.cy + a.ry + sr]);
+    if (p.tag === 'line') {
+      for (const [x, y] of [[a.x1, a.y1], [a.x2, a.y2]]) out.push([x - sr, y - sr], [x + sr, y + sr]);
+    }
+    if (p.tag === 'polygon') for (const [x, y] of p.points) out.push([x - sr, y - sr], [x + sr, y + sr]);
+  }
+  return out;
+}
+
+test('shapeDrawing: どの大きさ・向き・矢印の先・太さでも、線と矢印の先の 3 点すべてが箱の中（0〜1）', () => {
+  const eps = 1e-9;
+  let count = 0;
+  for (const shape of SHAPE_KINDS) {
+    for (const w of SIZES) {
+      for (const h of SIZES) {
+        for (const dir of ['h', 'v', 'd1', 'd2']) {
+          for (const head of ['end', 'start', 'both']) {
+            for (const strokeWidth of ['s', 'm', 'l']) {
+              const item = { ...createShapeItem('x', shape), x: 0, y: 1 - h, w, h, strokeWidth, dir, head };
+              const d = shapeDrawing(item);
+              for (const [x, y] of extents(d)) {
+                const u = x / d.width;
+                const v = y / d.height;
+                assert.ok(u >= -eps && u <= 1 + eps && v >= -eps && v <= 1 + eps,
+                  `${shape} w=${w} h=${h} ${dir} ${head} ${strokeWidth}: (${u}, ${v})`);
+                count += 1;
+              }
+              // 矢印の先は、3 点とも（先端だけでなく）箱の中
+              for (const p of d.parts.filter((q) => q.role === 'head')) {
+                assert.equal(p.points.length, 3);
+                for (const [x, y] of p.points) {
+                  assert.ok(x >= -eps && x <= d.width + eps && y >= -eps && y <= d.height + eps,
+                    `head ${shape} w=${w} h=${h} ${dir} ${head} ${strokeWidth}: (${x}, ${y})`);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  assert.ok(count > 1000);
+});
+
+test('shapeDrawing: 箱をつぶすと矢印の先は相似のまま小さくなる（形はゆがまない）', () => {
+  const shapeOf = (d) => {
+    const [t, b1, b2] = d.parts.find((q) => q.role === 'head').points;
+    const base = [(b1[0] + b2[0]) / 2, (b1[1] + b2[1]) / 2];
+    return { len: dist(t, base), half: dist(b1, b2) / 2, sides: [dist(t, b1), dist(t, b2)] };
   };
-  const wide = head(0.6, 0.3);
-  const flat = head(0.6, 0.05);
-  wide.forEach(([x, y], i) => { assert.ok(near(x, flat[i][0])); assert.ok(near(y, flat[i][1])); });
-  // ななめでも、先の 3 点の距離の比は同じ（2 等辺三角形）
-  const d = shapeDrawing({ ...createShapeItem('a', 'arrow'), dir: 'd1', w: 0.6, h: 0.1 });
-  const [t, b1, b2] = d.parts.find((q) => q.role === 'head').points;
-  const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
-  assert.ok(near(dist(t, b1), dist(t, b2)));
+  const wide = shapeOf(shapeDrawing({ ...createShapeItem('a', 'arrow'), dir: 'h', w: 0.6, h: 0.3, strokeWidth: 'l' }));
+  for (const [dir, w, h] of [['h', 0.6, MIN_ITEM_SIZE], ['v', MIN_ITEM_SIZE, 0.6], ['d1', 0.6, MIN_ITEM_SIZE], ['d2', 0.8, 0.08]]) {
+    const flat = shapeOf(shapeDrawing({ ...createShapeItem('a', 'arrow'), dir, w, h, strokeWidth: 'l' }));
+    assert.ok(flat.len < wide.len, `${dir} ${w}x${h} は小さくなる`);
+    assert.ok(near(flat.half / flat.len, wide.half / wide.len), `${dir} 相似`);
+    assert.ok(near(flat.sides[0], flat.sides[1]), `${dir} 2 等辺`);
+  }
+});
+
+test('shapeDrawing: 収まるときの矢印の先は、ふつうの大きさ（線の太さで決まる）', () => {
+  for (const strokeWidth of ['s', 'm', 'l']) {
+    const sw = CONFIG.shape.widths[strokeWidth];
+    for (const [dir, w, h] of [['h', 0.4, 0.1], ['v', 0.1, 0.4], ['d1', 0.4, 0.4], ['d2', 0.5, 0.6]]) {
+      const d = shapeDrawing({ ...createShapeItem('a', 'arrow'), head: 'both', dir, strokeWidth, w, h });
+      for (const p of d.parts.filter((q) => q.role === 'head')) {
+        const [t, b1, b2] = p.points;
+        const len = dist(t, [(b1[0] + b2[0]) / 2, (b1[1] + b2[1]) / 2]);
+        assert.ok(near(len, 1.5 + 3 * sw), `${strokeWidth} ${dir}: ${len}`);
+      }
+    }
+  }
+});
+
+test('shapeDrawing: スライドの端の平たい矢印（レビューの例 w:0.4, h:0.05, y:0）も欠けない', () => {
+  for (const y of [0, 0.95]) {
+    const d = shapeDrawing({ ...createShapeItem('a', 'arrow'), w: 0.4, h: 0.05, y, dir: 'h', strokeWidth: 'm' });
+    for (const p of d.parts.filter((q) => q.role === 'head')) {
+      for (const [px, py] of p.points) assert.ok(px >= 0 && px <= d.width && py >= 0 && py <= d.height, `(${px}, ${py})`);
+    }
+  }
 });
 
 test('shapeDrawing: 矢印の先は、線の向きの終わり・始め・両方に付く', () => {

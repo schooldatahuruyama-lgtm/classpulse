@@ -24,7 +24,8 @@
   overflow-wrap: anywhere;
 }
 
-/* 図形: SVG を箱いっぱいに広げる。つぶした箱で矢印の先が箱の外に出ても切らない（スライドの枠では切れる） */
+/* 図形: SVG を箱いっぱいに広げる。線・矢印の先は model.js の shapeDrawing が箱の中に収める
+  （overflow: visible は、丸めの誤差で端の 1px が切れないための念のため） */
 .slide-shape { overflow: visible; }
 .slide-shape-svg { display: block; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
 
