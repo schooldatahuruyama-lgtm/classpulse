@@ -2,6 +2,20 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { csvCell, historyToCsv, exportFileName } from '../js/results-csv.js';
 
+test('CSV: かくした回答のあとに確認待ちを分け、文章を式にしない', () => {
+  const csv = historyToCsv({ questions: [
+    { type: 'free', texts: ['雲'], hiddenTexts: ['かくす'], heldTexts: ['=死ね', 'バカ,"文"\n次'], total: 4 },
+    { type: 'cloud', words: [], hiddenWords: [{ word: 'かくす', count: 1 }], heldWords: [{ word: '+バカ', count: 2 }], total: 3 },
+  ] });
+  assert.ok(csv.includes('授業中にかくした回答\r\nかくす\r\n自動チェックで止めた回答\r\n\'=死ね\r\n"バカ,""文""\n次"\r\n回答,4'));
+  assert.ok(csv.includes('授業中にかくした言葉\r\nかくす,1\r\n自動チェックで止めた言葉\r\n\'+バカ,2\r\n回答,3'));
+});
+
+test('CSV: 確認待ちが空なら、追加前と同じ文字列', () => {
+  const questions = [{ type: 'free', texts: ['雲'], total: 1 }, { type: 'cloud', words: [{ word: '雲', count: 1 }], total: 1 }];
+  assert.equal(historyToCsv({ questions }), historyToCsv({ questions: questions.map((q) => ({ ...q, heldTexts: [], heldWords: [] })) }));
+});
+
 const endedAt = new Date(2026, 10, 13, 10, 7).getTime();
 
 test('CSV: 5 種類の質問・かくした回答を含む履歴を、全体の文字列で確かめる', () => {

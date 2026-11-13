@@ -213,6 +213,47 @@ test('履歴', () => {
 
 // ---- 自由記述（free）----
 import { normalizeText, freeList } from '../js/session-logic.js';
+import { createChecker } from '../js/moderation.js';
+
+test('自動チェック: 自由記述はかくす・確認待ち・映すに分かれ、承認は同じ文章だけ', () => {
+  const answers = { a: { text: '死ね', at: 3 }, b: { text: 'バカ', at: 2 }, c: { text: '雲', at: 1 }, d: { text: 'うざい', at: 4 } };
+  const options = { isFlagged: createChecker(), released: { a: '死ね', b: 'バカ', d: true } };
+  const list = freeList(answers, { b: true }, options);
+  assert.deepEqual(list, {
+    items: [{ uid: 'c', text: '雲' }, { uid: 'a', text: '死ね' }], hiddenItems: [{ uid: 'b', text: 'バカ' }],
+    heldItems: [{ uid: 'd', text: 'うざい' }], total: 4,
+  });
+  assert.deepEqual(freeList({ a: { text: '死ね！' } }, {}, options).heldItems, [{ uid: 'a', text: '死ね！' }]);
+  assert.deepEqual(freeList({ a: { text: '雲' } }, {}, options).items, [{ uid: 'a', text: '雲' }]);
+});
+
+test('自動チェック: 雲はどれかの形が当たれば鍵全体を止める。かくすを優先する', () => {
+  const answers = { a: { words: ['cat', '雲'], at: 1 }, b: { words: ['CAT'], at: 2 }, c: { words: ['cat'], at: 3 } };
+  const key = hiddenKey('cat');
+  const options = { isFlagged: (word) => word === 'CAT' };
+  const list = cloudList(answers, {}, options);
+  assert.deepEqual(list.heldItems, [{ key, word: 'cat', count: 3 }]);
+  assert.equal(list.total, 3);
+  assert.deepEqual(cloudList(answers, {}, { ...options, released: { [key]: true } }).heldItems, []);
+  assert.equal(cloudList(answers, {}, { ...options, released: { [key]: 'cat' } }).heldItems.length, 1);
+  assert.deepEqual(cloudList(answers, { [key]: true }, { ...options, released: { [key]: true } }).hiddenItems, list.heldItems);
+});
+
+test('自動チェック: 履歴の確認待ちは uid・鍵を含めず、承認・かくすを反映する', () => {
+  const session = { pub: { title: 'T' }, deck: { order: ['f', 'c'], slides: { f: { type: 'free' }, c: { type: 'cloud' } } } };
+  const inbox = { answers: {
+    f: { secret1: { text: '死ね' }, secret2: { text: 'バカ' }, secret3: { text: 'うぜー' } },
+    c: { secret1: { words: ['死ね', 'バカ', '雲'] } },
+  } };
+  const h = buildHistory(session, inbox, 1, { f: { secret3: true } }, null,
+    { isFlagged: createChecker(), released: { f: { secret2: 'バカ' }, c: { [hiddenKey('バカ')]: true } } });
+  assert.deepEqual(h.questions[0].texts, ['バカ']);
+  assert.deepEqual(h.questions[0].hiddenTexts, ['うぜー']);
+  assert.deepEqual(h.questions[0].heldTexts, ['死ね']);
+  assert.deepEqual(h.questions[1].heldWords, [{ word: '死ね', count: 1 }]);
+  assert.doesNotMatch(JSON.stringify(h), /secret|"uid"|"key"/);
+  assert.equal(JSON.stringify(h).includes(hiddenKey('死ね')), false);
+});
 import { CONFIG } from '../js/config.js';
 
 function makeMixedDeck() {
@@ -277,7 +318,7 @@ test('freeList: at の古い順（同じなら uid 順）、かくす、total、
   assert.deepEqual(r.items, [{ uid: 'u1', text: '一' }, { uid: 'u3', text: '三' }]);
   assert.deepEqual(r.hiddenItems, [{ uid: 'u2', text: 'に' }, { uid: 'u9', text: '九' }]);
   assert.equal(r.total, 4);
-  assert.deepEqual(freeList(undefined, undefined), { items: [], hiddenItems: [], total: 0 });
+  assert.deepEqual(freeList(undefined, undefined), { items: [], hiddenItems: [], heldItems: [], total: 0 });
 });
 
 test('buildHistory: free は texts / hiddenTexts / total を持ち、uid を含まない。poll は type:poll が付く', () => {
@@ -298,7 +339,7 @@ test('buildHistory: free は texts / hiddenTexts / total を持ち、uid を含�
   assert.equal(h.questions.length, 2);
   assert.deepEqual(h.questions[0], {
     slideId: 'f1', type: 'free', question: '感想は？',
-    texts: ['一番', '三番'], hiddenTexts: ['二番'], total: 3,
+    texts: ['一番', '三番'], hiddenTexts: ['二番'], heldTexts: [], total: 3,
   });
   assert.deepEqual(h.questions[1], {
     slideId: 'p1', type: 'poll', question: '色は？', options: ['赤', '青'], counts: [1, 1], total: 2,
@@ -402,7 +443,7 @@ test('cloudList: 人数・1 人の重複は 1・並び・かくす・total', () 
   assert.deepEqual(h.items.map((x) => x.word).sort(), ['いぬ', 'ネコ']);
   assert.deepEqual(h.hiddenItems, [{ key: hiddenKey('ねこ'), word: 'ねこ', count: 2 }]);
   assert.equal(h.total, 3);
-  assert.deepEqual(cloudList(undefined, undefined), { items: [], hiddenItems: [], total: 0 });
+  assert.deepEqual(cloudList(undefined, undefined), { items: [], hiddenItems: [], heldItems: [], total: 0 });
 });
 
 test('cloudList: 表示の形は多く書かれた形、同じ数なら先に届いた形。データベースの形も読む', () => {
@@ -458,6 +499,7 @@ test('buildHistory: cloud は words・hiddenWords・total を持ち、uid も鍵
     slideId: 'c1', type: 'cloud', question: '好きな動物は？',
     words: [{ word: 'ねこ', count: 2 }, ...ones.map((x) => ({ word: x.word, count: 1 }))],
     hiddenWords: [{ word: 'a.b', count: 1 }],
+    heldWords: [],
     total: 3,
   });
   assert.equal(h.questions[1].type, 'free');

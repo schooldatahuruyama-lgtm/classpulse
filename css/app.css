@@ -161,3 +161,12 @@
 .teacher-email { font-size: 20px; margin-bottom: var(--s-1); }
 .teacher-actions { display: flex; flex-wrap: wrap; gap: var(--s-1); }
 .teacher-danger { color: var(--c-danger-text); border-color: var(--c-danger-text); }
+
+/* 止める言葉 */
+.words-page { max-width: 800px; margin: 0 auto; }
+.words-form { display: flex; flex-direction: column; gap: var(--s-2); }
+.words-enabled { display: flex; align-items: center; gap: var(--s-1); min-height: 44px; }
+.words-form textarea { width: 100%; resize: vertical; }
+.words-form summary { cursor: pointer; min-height: 44px; }
+.words-builtin { overflow-wrap: anywhere; }
+.words-message:empty { display: none; }

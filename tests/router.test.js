@@ -54,6 +54,14 @@ test('履歴と結果は同じ画面ファイル（history）を使う', () => {
   assert.equal(viewFile('join'), 'student');
 });
 
+test('止める言葉の道順と先生だけの守り', () => {
+  assert.deepEqual(parseRoute('#/words'), { name: 'words', params: {} });
+  assert.equal(routeHash('words'), '#/words');
+  assert.equal(viewFile('words'), 'words');
+  assert.equal(needsTeacher('words'), true);
+  assert.equal(parseRoute('#/words/extra').name, 'not-found');
+});
+
 test('ゴミ箱の道順', () => {
   assert.deepEqual(parseRoute('#/trash'), { name: 'trash', params: {} });
   assert.equal(routeHash('trash'), '#/trash');

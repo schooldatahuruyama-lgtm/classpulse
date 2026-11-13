@@ -123,13 +123,18 @@ export function mount(root, ctx) {
   function freeCard(q, i) {
     const texts = Array.isArray(q.texts) ? q.texts : [];
     const hiddenTexts = Array.isArray(q.hiddenTexts) ? q.hiddenTexts : [];
+    const heldTexts = Array.isArray(q.heldTexts) ? q.heldTexts : [];
     const body = el('div', { class: 'hist-q-body' },
-      texts.length ? textList(texts) : el('p', { class: 'muted', text: hiddenTexts.length ? '表示した回答はありません。' : '回答はありませんでした。' }));
+      texts.length ? textList(texts) : el('p', { class: 'muted', text: hiddenTexts.length || heldTexts.length ? '表示した回答はありません。' : '回答はありませんでした。' }));
     // 授業中にかくした回答は、あるときだけ分けて出す
     if (hiddenTexts.length) {
       body.append(el('section', { class: 'hist-free-hidden' },
         el('h4', { class: 'hist-free-hidden-title', text: '授業中にかくした回答' }),
         textList(hiddenTexts)));
+    }
+    if (heldTexts.length) {
+      body.append(el('section', { class: 'hist-free-hidden' },
+        el('h4', { class: 'hist-free-hidden-title', text: '自動チェックで止めた回答（授業では映していません）' }), textList(heldTexts)));
     }
     return el('li', { class: 'hist-q card' },
       el('h3', { class: 'hist-q-no', text: `質問 ${i + 1}（自由記述）` }),
@@ -147,13 +152,18 @@ export function mount(root, ctx) {
   function cloudCard(q, i) {
     const words = Array.isArray(q.words) ? q.words : [];
     const hiddenWords = Array.isArray(q.hiddenWords) ? q.hiddenWords : [];
+    const heldWords = Array.isArray(q.heldWords) ? q.heldWords : [];
     const body = el('div', { class: 'hist-q-body' },
-      words.length ? wordList(words) : el('p', { class: 'muted', text: hiddenWords.length ? '表示した言葉はありません。' : '回答はありませんでした。' }));
+      words.length ? wordList(words) : el('p', { class: 'muted', text: hiddenWords.length || heldWords.length ? '表示した言葉はありません。' : '回答はありませんでした。' }));
     // 授業中にかくした言葉は、あるときだけ分けて出す
     if (hiddenWords.length) {
       body.append(el('section', { class: 'hist-free-hidden' },
         el('h4', { class: 'hist-free-hidden-title', text: '授業中にかくした言葉' }),
         wordList(hiddenWords)));
+    }
+    if (heldWords.length) {
+      body.append(el('section', { class: 'hist-free-hidden' },
+        el('h4', { class: 'hist-free-hidden-title', text: '自動チェックで止めた言葉（授業では映していません）' }), wordList(heldWords)));
     }
     return el('li', { class: 'hist-q card' },
       el('h3', { class: 'hist-q-no', text: `質問 ${i + 1}（ワードクラウド）` }),

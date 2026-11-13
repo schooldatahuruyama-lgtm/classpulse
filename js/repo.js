@@ -2,6 +2,7 @@
 // 通信は net を引数で受け取る。
 import { normalizeDeck } from './model.js';
 import { CONFIG } from './config.js';
+import { normalizeModeration } from './moderation.js';
 import { isTrashed, isExpired } from './trash.js';
 
 function toArray(v) {
@@ -39,6 +40,7 @@ function normalizeQuestion(q) {
       type: 'free',
       texts: texts(src.texts),
       hiddenTexts: texts(src.hiddenTexts),
+      heldTexts: texts(src.heldTexts),
       total: typeof src.total === 'number' ? src.total : 0,
     };
   }
@@ -51,6 +53,7 @@ function normalizeQuestion(q) {
       type: 'cloud',
       words: words(src.words),
       hiddenWords: words(src.hiddenWords),
+      heldWords: words(src.heldWords),
       total: typeof src.total === 'number' ? src.total : 0,
     };
   }
@@ -108,6 +111,14 @@ export function createRepo(net, uid) {
   }
 
   return {
+    async getModeration() {
+      return normalizeModeration(await net.get(`${base}/settings/moderation`));
+    },
+
+    async saveModeration(settings) {
+      await net.set(`${base}/settings/moderation`, normalizeModeration(settings));
+    },
+
     async isTeacher() {
       return (await net.get(`teacherList/${uid}`)) === true;
     },

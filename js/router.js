@@ -1,5 +1,5 @@
 // ハッシュ（#/...）と画面名の対応。ブラウザの物は使わない
-const SIMPLE = { login: '#/login', signup: '#/signup', pending: '#/pending', teachers: '#/teachers', history: '#/history', trash: '#/trash', dashboard: '#/' };
+const SIMPLE = { login: '#/login', signup: '#/signup', pending: '#/pending', teachers: '#/teachers', history: '#/history', trash: '#/trash', words: '#/words', dashboard: '#/' };
 const WITH_ID = { editor: ['edit', 'deckId'], present: ['present', 'sid'], join: ['join', 'sid'], result: ['history', 'sid'] };
 const PUBLIC = ['login', 'signup', 'join', 'not-found'];
 
@@ -41,7 +41,7 @@ export function routeHash(name, params = {}) {
 // 画面の名前 → 画面のファイル（js/views/ の中）。結果の画面は履歴の画面が兼ねる
 const VIEW_FILES = {
   login: 'login', dashboard: 'dashboard', editor: 'editor', present: 'present',
-  history: 'history', result: 'history', join: 'student', trash: 'trash',
+  history: 'history', result: 'history', join: 'student', trash: 'trash', words: 'words',
   signup: 'signup', pending: 'pending', teachers: 'teachers',
 };
 

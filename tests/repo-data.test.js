@@ -4,6 +4,34 @@ import { createFakeNet } from './helpers/fake-net.js';
 import { createRepo } from '../js/repo.js';
 import { createDeck, createSlide, addSlide } from '../js/model.js';
 
+test('止める言葉: 先生ごとの場所へ正して保存し、読めないときは拒否する', async () => {
+  const { net, repo } = setup();
+  assert.deepEqual(await repo.getModeration(), { enabled: true, words: [] });
+  await repo.saveModeration({ enabled: false, words: [' ＡＢ ', 'ab', 'a'] });
+  assert.deepEqual(net.dump().teachers.u1.settings.moderation, { enabled: false, words: ['ＡＢ'] });
+  assert.deepEqual(await repo.getModeration(), { enabled: false, words: ['ＡＢ'] });
+  await net.set('teachers/u1/settings/moderation', { enabled: 'false', words: [] });
+  assert.deepEqual(await repo.getModeration(), { enabled: true, words: [] });
+  net.get = async () => { throw new Error('offline'); };
+  await assert.rejects(repo.getModeration(), /offline/);
+  net.set = async () => { throw new Error('offline'); };
+  await assert.rejects(repo.saveModeration({ enabled: true, words: [] }), /offline/);
+});
+
+test('履歴: 古い確認待ちは空、配列の形を直し、uid・鍵を落とす', async () => {
+  const { net, repo } = setup();
+  await net.set('teachers/u1/history/held', { questions: [
+    { type: 'free' }, { type: 'cloud' },
+    { type: 'free', heldTexts: { 0: '死ね', 1: 3, 2: null, 3: 'バカ' } },
+    { type: 'cloud', heldWords: { 0: { word: '死ね', count: 2, key: 'secret' }, 1: { word: 'バカ', count: 'bad' }, 2: { count: 1 } } },
+  ] });
+  const qs = (await repo.getHistory('held')).questions;
+  assert.deepEqual(qs[0].heldTexts, []);
+  assert.deepEqual(qs[1].heldWords, []);
+  assert.deepEqual(qs[2].heldTexts, ['死ね', 'バカ']);
+  assert.deepEqual(qs[3].heldWords, [{ word: '死ね', count: 2 }, { word: 'バカ', count: 0 }]);
+});
+
 function setup() {
   const net = createFakeNet();
   const repo = createRepo(net, 'u1');

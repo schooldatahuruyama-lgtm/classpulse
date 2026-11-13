@@ -45,6 +45,17 @@ export function pollControls({ kind, status, resultsVisible }) {
   };
 }
 
+export function heldControls({ kind, heldCount, resultsVisible, connection, ending = false, moving = 0 }) {
+  const hidden = !['free', 'cloud'].includes(kind) || !(heldCount > 0);
+  return { hidden, blocked: hidden || resultsVisible !== true || connection === 'disconnected' || ending || moving > 0 };
+}
+
+// 開いたときの写しから消すだけ。新しい回答や、書き直された文章を足さない。
+export function remainingHeld(shown, current) {
+  const texts = new Map(current.map((item) => [item.key, item.text]));
+  return shown.filter((item) => texts.has(item.key) && texts.get(item.key) === item.text);
+}
+
 // クイズの結果の下に出す文。正解が分かれば正答率、分からなければ（正解を読みこめなかった）その旨
 export function quizSummaryText(correct, rate) {
   if (!Number.isInteger(correct)) return '正解のデータを読みこめませんでした';
@@ -146,6 +157,8 @@ export function mount(root, ctx) {
   let board = null; // 自由記述の回答の一覧（結果の表示中だけ作る。スライドが変わったら作り直す）
   let cloud = null; // ワードクラウドの雲（結果の表示中だけ作る。スライドが変わったら作り直す）
   let qrDialog = null;
+  let heldDialog = null;
+  let heldAsk = null;
   const pending = { pause: false, results: false };
   let moving = 0; // 通信待ちのスライド移動の数（その間は受付・結果の操作を押せない）
   // 授業の終了: 'idle'（まだ）、'running'（後片づけの途中）、'failed'（終了したが後片づけが残った）、'done'（済んだ）
@@ -182,6 +195,7 @@ export function mount(root, ctx) {
   async function finishEnd() {
     if (endState === 'running' || !alive) return;
     endState = 'running';
+    closeHeld();
     render();
     try {
       await host.end();
@@ -203,6 +217,7 @@ export function mount(root, ctx) {
 
   // 一覧・雲を捨てる。雲の言葉の確認を開いていたら、取り消しとして閉じる（古い言葉に対して操作しない）
   function dropBoards() {
+    closeHeld();
     if (cloud && cloud.ask) cloud.ask.abort();
     cloud = null;
     board = null;
@@ -261,6 +276,92 @@ export function mount(root, ctx) {
     live.wrap.append(dlg);
     dlg.showModal();
     close.focus();
+  }
+
+  function heldOptions() {
+    const p = currentPoll();
+    return heldControls({ kind: p?.slide.type, heldCount: state?.heldCount, resultsVisible: p?.poll.resultsVisible,
+      connection: state?.connection, ending: endState !== 'idle', moving });
+  }
+
+  function heldFocus() {
+    if (alive && live) (live.checkBtn.isConnected && !live.held.hidden ? live.checkBtn : live.resultsBtn).focus();
+  }
+
+  function closeHeld() {
+    if (heldAsk) { heldAsk.ctrl.abort(); heldAsk = null; }
+    if (heldDialog) {
+      const d = heldDialog;
+      heldDialog = null;
+      d.dlg.close();
+      d.dlg.remove();
+    }
+  }
+
+  async function askHeld() {
+    if (!alive || heldDialog || heldAsk || heldOptions().blocked) return;
+    const slideId = currentPoll().id;
+    const ask = { slideId, ctrl: new AbortController() };
+    heldAsk = ask;
+    const ok = await confirmDialog({
+      title: '確認待ちの回答を、この画面に出しますか？',
+      body: '自動チェックで止めた回答です。この画面は教室にも映ります。',
+      okLabel: '出す', cancelLabel: 'やめる', signal: ask.ctrl.signal,
+    });
+    if (heldAsk !== ask) return;
+    heldAsk = null;
+    if (!ok || !alive || heldOptions().blocked || currentPoll()?.id !== slideId) { heldFocus(); return; }
+    // ここで初めて文章を読む。以後はこの写しにある行を消すだけ。
+    const d = { slideId, shown: host.heldItems(slideId), rows: new Map() };
+    d.list = el('ul', { class: 'pr-held-list' });
+    d.empty = el('p', { text: '確認待ちの回答はありません。', hidden: d.shown.length > 0 });
+    d.close = el('button', { type: 'button', class: 'btn', text: 'とじる', onclick: closeHeld });
+    for (const item of d.shown) {
+      const release = el('button', { type: 'button', class: 'btn btn-primary', text: '映す', onclick: () => {
+        if (!alive || heldDialog !== d || heldOptions().blocked) return;
+        // 押す直前にも照合し、見ていない書き直しを承認しない。
+        if (!remainingHeld([item], host.heldItems(slideId)).length) { updateHeld(); return; }
+        host.release(slideId, item.key).catch(() => {
+          if (alive) toast('保存できませんでした。読みこみ直すと、もう一度確認待ちになります。');
+        });
+      } });
+      const row = el('li', {}, el('span', { text: item.count === undefined ? item.text : `${item.text} ${item.count} 人` }), release);
+      d.rows.set(item.key, { row, release });
+      d.list.append(row);
+    }
+    d.dlg = el('dialog', { class: 'pr-held-dialog', 'aria-labelledby': 'pr-held-title' },
+      el('h2', { id: 'pr-held-title', text: '確認待ちの回答' }), d.list, d.empty, d.close);
+    d.dlg.addEventListener('close', () => {
+      d.dlg.remove();
+      if (heldDialog === d) heldDialog = null;
+      heldFocus();
+    });
+    heldDialog = d;
+    live.wrap.append(d.dlg);
+    d.dlg.showModal();
+    d.close.focus();
+  }
+
+  function updateHeld() {
+    const p = currentPoll();
+    if (!p || p.poll.resultsVisible !== true || endState !== 'idle'
+      || (heldDialog && heldDialog.slideId !== p.id) || (heldAsk && heldAsk.slideId !== p.id)) {
+      closeHeld();
+      return;
+    }
+    const d = heldDialog;
+    if (!d) return;
+    d.shown = remainingHeld(d.shown, host.heldItems(d.slideId));
+    const keys = new Set(d.shown.map((item) => item.key));
+    let lostFocus = false;
+    for (const [key, row] of d.rows) {
+      if (keys.has(key)) { setOff(row.release, heldOptions().blocked); continue; }
+      if (row.row.contains(document.activeElement)) lostFocus = true;
+      row.row.remove();
+      d.rows.delete(key);
+    }
+    d.empty.hidden = d.shown.length > 0;
+    if (lostFocus) d.close.focus();
   }
 
   // ---- 操作 ----
@@ -336,6 +437,9 @@ export function mount(root, ctx) {
     l.banner = el('div', { class: 'pr-offline', role: 'alert', hidden: true, text: '接続が切れています。つなぎ直しています…' });
     l.stage = el('section', { class: 'pr-stage', 'aria-label': 'スライド' });
     l.poll = el('aside', { class: 'pr-poll', 'aria-label': 'アンケートの状況', 'aria-live': 'polite', hidden: true });
+    l.heldCount = el('p', { class: 'pr-held-count' });
+    l.checkBtn = btn('pr-check', '確かめる', askHeld);
+    l.held = el('div', { class: 'pr-held', hidden: true }, l.heldCount, l.checkBtn);
     l.prevBtn = btn('pr-prev', '← 前へ', () => go(-1));
     l.prevBtn.setAttribute('aria-label', '前へ'); // 矢印の記号は読み上げない
     l.pos = el('span', { class: 'pr-pos' });
@@ -581,7 +685,11 @@ export function mount(root, ctx) {
       const unit = p.slide.type === 'free' ? '件' : '人';
       live.poll.replaceChildren(
         info ? statusChip(info.kind, info.label) : '',
-        el('p', { class: 'pr-answers', text: `回答 ${n} ${unit} ／ 参加 ${state.participants} 人` }));
+        el('p', { class: 'pr-answers', text: `回答 ${n} ${unit} ／ 参加 ${state.participants} 人` }), live.held);
+      const c = heldOptions();
+      live.held.hidden = c.hidden;
+      live.heldCount.textContent = c.hidden ? '' : `確認待ち ${state.heldCount} ${p.slide.type === 'free' ? '件' : '語'}`;
+      setOff(live.checkBtn, c.blocked);
       return;
     }
     const t = state.tallies[p.id];
@@ -683,6 +791,7 @@ export function mount(root, ctx) {
       setOff(l.resultsBtn, off || moving > 0 || pending.results || c.resultsBlocked);
     }
     setOff(l.endBtn, off);
+    updateHeld();
 
     // 押していたボタンが消えたら、帯の中の押せるボタンへフォーカスを移す
     if (before instanceof HTMLElement && l.bar.contains(before) && !isShown(before)) {

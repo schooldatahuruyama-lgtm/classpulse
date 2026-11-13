@@ -58,11 +58,16 @@ export function historyToCsv(history, { bom = false } = {}) {
         row('授業中にかくした回答');
         q.hiddenTexts.forEach((text) => row(csvCell(text)));
       }
+      if (listOf(q.heldTexts).length) {
+        row('自動チェックで止めた回答');
+        q.heldTexts.forEach((text) => row(csvCell(text)));
+      }
     } else if (type === 'cloud') {
       const words = (items) => listOf(items).forEach((w) => row(csvCell(w?.word), countOf(w?.count)));
       row('言葉', '人数');
       words(q.words);
       if (listOf(q.hiddenWords).length) { row('授業中にかくした言葉'); words(q.hiddenWords); }
+      if (listOf(q.heldWords).length) { row('自動チェックで止めた言葉'); words(q.heldWords); }
     } else {
       const options = type === 'rating' ? [1, 2, 3, 4, 5] : listOf(q.options);
       const counts = options.map((_, index) => countOf(listOf(q.counts)[index]));

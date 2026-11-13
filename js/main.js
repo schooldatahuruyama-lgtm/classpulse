@@ -17,6 +17,7 @@ const NAV = [
   { name: 'dashboard', label: 'ホーム' },
   { name: 'history', label: '授業履歴' },
   { name: 'trash', label: 'ゴミ箱' },
+  { name: 'words', label: '止める言葉' },
 ];
 
 function showMessage(text, { retry = false } = {}) {

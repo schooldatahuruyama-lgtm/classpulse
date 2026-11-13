@@ -3,6 +3,242 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { cloudFontSize, cloudOrder, cloudTone, CLOUD_FONT, CLOUD_TONES, pollControls, quizSummaryText } from '../js/views/present.js';
 import { ratingAverageText, correctRateText, ratingBarLabels } from '../js/ui.js';
+import { mount as mountPresent, heldControls, remainingHeld } from '../js/views/present.js';
+import { mount as mountWords, wordsInput } from '../js/views/words.js';
+import { createDeck, createSlide, addSlide } from '../js/model.js';
+import { buildSession, hiddenKey } from '../js/session-logic.js';
+import { createRepo } from '../js/repo.js';
+import { createFakeNet } from './helpers/fake-net.js';
+
+test('確認待ち: 結果表示・接続・終了・移動待ちのボタンの決めごと', () => {
+  const base = { kind: 'free', heldCount: 1, resultsVisible: true, connection: 'connected' };
+  assert.deepEqual(heldControls(base), { hidden: false, blocked: false });
+  assert.equal(heldControls({ ...base, kind: 'cloud' }).blocked, false);
+  for (const change of [{ resultsVisible: false }, { connection: 'disconnected' }, { ending: true }, { moving: 1 }]) {
+    assert.deepEqual(heldControls({ ...base, ...change }), { hidden: false, blocked: true });
+  }
+  for (const change of [{ kind: 'poll' }, { heldCount: 0 }, { heldCount: null }]) {
+    assert.deepEqual(heldControls({ ...base, ...change }), { hidden: true, blocked: true });
+  }
+});
+
+test('確認待ちの写し: 新着・書き直しは加えず、消えた回答は戻らない。人数も書きかえない', () => {
+  const shown = [{ key: 'a', text: '元の文' }, { key: 'b', text: '言葉', count: 2 }];
+  const next = remainingHeld(shown, [{ key: 'a', text: '新しい文' }, { key: 'b', text: '言葉', count: 3 }, { key: 'c', text: '新着' }]);
+  assert.deepEqual(next, [shown[1]]);
+  assert.deepEqual(remainingHeld(next, shown), [shown[1]]);
+  assert.deepEqual(remainingHeld(next, []), []);
+});
+
+test('止める言葉の入力: 空行・重複は通知に数えず、不適切な長さと 100 語超えを数える', () => {
+  assert.deepEqual(wordsInput(' ＡＢ \nab\na\n' + '長'.repeat(21) + '\n\n'), { words: ['ＡＢ'], removed: 2 });
+  const input = Array.from({ length: 102 }, (_, i) => `語句${i}`).join('\n');
+  assert.equal(wordsInput(input).words.length, 100);
+  assert.equal(wordsInput(input).removed, 2);
+});
+
+// 外部ライブラリを使わない小さな DOM。実際の mount とイベントを通して、本文の作成時点と破棄を確かめる。
+function testDom(t) {
+  const previous = Object.fromEntries(['document', 'window', 'Node', 'Element', 'HTMLElement'].map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+  const made = [];
+  const cleanups = [];
+  let doc;
+  class TestNode {
+    constructor(tag) { this.tagName = tag; this.childNodes = []; this.attributes = {}; this.events = new Map(); this.parentElement = null; this.style = { setProperty() {} }; made.push(this); }
+    get children() { return this.childNodes.filter((n) => n.tagName !== '#text'); }
+    get className() { return this.attributes.class || ''; }
+    set className(value) { this.attributes.class = value; }
+    get classList() {
+      const toggle = (name, on) => { const names = new Set(this.className.split(' ').filter(Boolean)); if (on) names.add(name); else names.delete(name); this.className = [...names].join(' '); };
+      return { toggle, add: (...names) => names.forEach((name) => toggle(name, true)) };
+    }
+    get hidden() { return Object.hasOwn(this.attributes, 'hidden'); }
+    set hidden(value) { if (value) this.setAttribute('hidden', ''); else this.removeAttribute('hidden'); }
+    get open() { return Object.hasOwn(this.attributes, 'open'); }
+    get isConnected() { return this === doc.body || !!this.parentElement?.isConnected; }
+    get textContent() { return this.tagName === '#text' ? this.text : this.childNodes.map((n) => n.textContent).join(''); }
+    set textContent(value) { if (this.tagName === '#text') this.text = String(value); else this.replaceChildren(doc.createTextNode(String(value))); }
+    setAttribute(key, value) { this.attributes[key] = String(value); }
+    getAttribute(key) { return this.attributes[key] ?? null; }
+    removeAttribute(key) { delete this.attributes[key]; }
+    append(...nodes) { nodes.forEach((n) => this.insertBefore(n instanceof TestNode ? n : doc.createTextNode(String(n)), null)); }
+    insertBefore(node, before) { node.remove(); const i = before ? this.childNodes.indexOf(before) : -1; this.childNodes.splice(i < 0 ? this.childNodes.length : i, 0, node); node.parentElement = this; }
+    replaceChildren(...nodes) { for (const node of this.childNodes) node.parentElement = null; this.childNodes = []; this.append(...nodes); }
+    remove() { if (this.parentElement) { const p = this.parentElement; p.childNodes.splice(p.childNodes.indexOf(this), 1); this.parentElement = null; } }
+    contains(node) { return node === this || this.childNodes.some((n) => n.contains(node)); }
+    matches(selector) {
+      if (selector.includes(',')) return selector.split(',').some((s) => this.matches(s.trim()));
+      if (selector.startsWith('.')) return this.className.split(' ').includes(selector.slice(1));
+      if (selector.startsWith('#')) return this.attributes.id === selector.slice(1);
+      if (selector === 'dialog[open]') return this.tagName === 'dialog' && this.open;
+      return this.tagName === selector;
+    }
+    querySelectorAll(selector) { return this.childNodes.flatMap((node) => [...(node.matches(selector) ? [node] : []), ...node.querySelectorAll(selector)]); }
+    querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+    closest(selector) { return this.matches(selector) ? this : this.parentElement?.closest(selector) || null; }
+    addEventListener(name, fn) { if (!this.events.has(name)) this.events.set(name, new Set()); this.events.get(name).add(fn); }
+    removeEventListener(name, fn) { this.events.get(name)?.delete(fn); }
+    dispatch(name, fields = {}) { const ev = { target: this, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, ...fields }; for (const fn of [...(this.events.get(name) || [])]) fn(ev); return ev; }
+    click() { this.dispatch('click'); }
+    focus() { doc.activeElement = this; }
+    showModal() { this.setAttribute('open', ''); }
+    close() { if (this.open) { this.removeAttribute('open'); this.dispatch('close'); } }
+  }
+  doc = new TestNode('#document');
+  doc.body = new TestNode('body');
+  doc.append(doc.body);
+  doc.activeElement = doc.body;
+  doc.createElement = (tag) => new TestNode(tag);
+  doc.createTextNode = (text) => { const node = new TestNode('#text'); node.text = text; return node; };
+  doc.getElementById = (id) => doc.querySelector(`#${id}`);
+  const timers = new Map();
+  let seq = 0;
+  Object.assign(globalThis, { document: doc, Node: TestNode, Element: TestNode, HTMLElement: TestNode,
+    window: { location: { href: 'http://localhost/?demo=1#/present/test' }, setTimeout: (fn) => { timers.set(++seq, fn); return seq; }, clearTimeout: (id) => timers.delete(id) } });
+  t.after(() => {
+    for (const cleanup of cleanups) cleanup();
+    for (const [key, descriptor] of Object.entries(previous)) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete globalThis[key]; }
+  });
+  const root = doc.createElement('main');
+  doc.body.append(root);
+  return { root, doc, made, onCleanup: (fn) => cleanups.push(fn) };
+}
+
+const flushView = () => new Promise((resolve) => setImmediate(resolve));
+const buttonText = (root, text) => root.querySelectorAll('button').find((button) => button.textContent === text);
+
+async function presentSetup(t, kind) {
+  const dom = testDom(t);
+  let deck = addSlide(createDeck('確認', 1), { ...createSlide(kind), question: '問い' }, 's1');
+  deck = addSlide(deck, createSlide('content'), 's2');
+  const session = buildSession(deck, 'deck', 'teacher-test', 1);
+  session.pub.current = { slideId: 's1', index: 0 };
+  session.pub.polls.s1.status = 'open';
+  const net = createFakeNet();
+  await net.set('sessions/test', session);
+  const repo = createRepo(net, 'teacher-test');
+  const cleanup = mountPresent(dom.root, { params: { sid: 'test' }, net, repo, navigate: async () => {} });
+  dom.onCleanup(cleanup);
+  await flushView();
+  const answer = async (key, text) => { await net.set(`sessions/test/inbox/answers/s1/${key}`, kind === 'free' ? { text, at: 1 } : { words: [text], at: 1 }); await flushView(); };
+  const open = async () => {
+    buttonText(dom.root, '確かめる').click();
+    assert.ok(dom.doc.querySelector('.confirm'));
+    buttonText(dom.doc, '出す').click();
+    await flushView();
+    return dom.root.querySelector('.pr-held-dialog');
+  };
+  return { ...dom, net, repo, cleanup, answer, open };
+}
+
+for (const kind of ['free', 'cloud']) {
+  test(`発表 DOM (${kind}): 確認前は本文なし。開いても新着・書き直しを映さず、映すと即反映`, async (t) => {
+    const h = await presentSetup(t, kind);
+    await h.answer('private-a', '死ね');
+    await h.answer('private-b', 'バカ');
+    assert.doesNotMatch(h.root.textContent, /死ね|バカ/);
+    assert.equal(buttonText(h.root, '確かめる').getAttribute('aria-disabled'), 'true');
+    buttonText(h.root, '確かめる').click();
+    assert.equal(h.doc.querySelector('.confirm'), null);
+    buttonText(h.root, '結果を表示').click();
+    await flushView();
+    assert.doesNotMatch(h.root.textContent, /死ね|バカ/);
+    assert.ok(h.made.every((node) => !/死ね|バカ/.test(node.textContent)));
+    const dlg = await h.open();
+    assert.match(dlg.textContent, /死ね/);
+    assert.match(dlg.textContent, /バカ/);
+    assert.ok(h.made.every((node) => !/private-a|private-b/.test(JSON.stringify(node.attributes))));
+    assert.ok(h.made.every((node) => !JSON.stringify(node.attributes).includes(hiddenKey('死ね'))));
+    const current = h.net.dump().sessions.test.pub.current;
+    h.doc.dispatch('keydown', { key: 'ArrowRight', target: h.doc.body });
+    h.doc.dispatch('keydown', { key: ' ', target: h.doc.body });
+    await flushView();
+    assert.deepEqual(h.net.dump().sessions.test.pub.current, current);
+    await h.answer('private-c', 'うぜー');
+    await h.answer('private-a', '死ねよ');
+    assert.doesNotMatch(dlg.textContent, /うぜー|死ね/);
+    assert.match(dlg.textContent, /バカ/);
+    buttonText(dlg, '映す').click();
+    await flushView();
+    assert.match(dlg.textContent, /確認待ちの回答はありません。/);
+    assert.doesNotMatch(dlg.textContent, /バカ/);
+    assert.match(h.root.querySelector('.pr-stage').textContent, /バカ/);
+    buttonText(dlg, 'とじる').click();
+    assert.equal(h.root.querySelector('.pr-held-dialog'), null);
+    assert.equal(h.doc.activeElement, buttonText(h.root, '確かめる'));
+    const next = await h.open();
+    assert.match(next.textContent, /うぜー|死ねよ/);
+    await h.net.update('sessions/test/pub', { 'polls/s1/resultsVisible': false });
+    await flushView();
+    assert.equal(h.root.querySelector('.pr-held-dialog'), null);
+    assert.doesNotMatch(h.root.textContent, /うぜー|死ねよ|バカ/);
+  });
+}
+
+test('発表 DOM: 確認中のスライド移動、一覧中のスライド移動・終了・画面離脱で閉じる', async (t) => {
+  const h = await presentSetup(t, 'free');
+  await h.answer('private-a', '死ね');
+  buttonText(h.root, '結果を表示').click(); await flushView();
+  buttonText(h.root, '確かめる').click();
+  await h.net.update('sessions/test/pub', { current: { slideId: 's2', index: 1 } }); await flushView();
+  assert.equal(h.doc.querySelector('dialog[open]'), null);
+  await h.net.update('sessions/test/pub', { current: { slideId: 's1', index: 0 } }); await flushView();
+  await h.open();
+  await h.net.update('sessions/test/pub', { current: { slideId: 's2', index: 1 } }); await flushView();
+  assert.equal(h.doc.querySelector('dialog[open]'), null);
+  await h.net.update('sessions/test/pub', { current: { slideId: 's1', index: 0 } }); await flushView();
+  await h.open();
+  await h.net.update('sessions/test/pub', { state: 'ended' }); await flushView();
+  assert.equal(h.doc.querySelector('.pr-held-dialog'), null);
+  h.cleanup();
+  assert.equal(h.doc.querySelector('dialog[open]'), null);
+});
+
+test('止める言葉 DOM: 読みこみ失敗と再試行、保存の正規化・成功・失敗', async (t) => {
+  const { root } = testDom(t);
+  let failLoad = true;
+  let failSave = false;
+  let saved;
+  const repo = {
+    getModeration: async () => { if (failLoad) throw new Error('offline'); return { enabled: true, words: [] }; },
+    saveModeration: async (value) => { if (failSave) throw new Error('offline'); saved = value; },
+  };
+  const cleanup = mountWords(root, { repo }); t.after(cleanup);
+  await flushView();
+  assert.match(root.textContent, /読みこめませんでした。/);
+  failLoad = false;
+  buttonText(root, 'もう一度').click(); await flushView();
+  assert.equal(root.querySelector('details').open, false);
+  root.querySelector('textarea').value = 'ＡＢ\nab\na';
+  root.querySelector('input').checked = false;
+  root.querySelector('form').dispatch('submit'); await flushView();
+  assert.deepEqual(saved, { enabled: false, words: ['ＡＢ'] });
+  assert.equal(root.querySelector('textarea').value, 'ＡＢ');
+  assert.match(root.textContent, /保存しました。次に発表の画面を開いたときから使われます。/);
+  assert.match(root.textContent, /使えない言葉を 1 個はずしました。/);
+  failSave = true;
+  root.querySelector('form').dispatch('submit'); await flushView();
+  assert.match(root.textContent, /保存できませんでした。接続を確かめて、もう一度押してください。/);
+  assert.equal(buttonText(root, '保存').disabled, false);
+});
+
+for (const operation of ['load', 'save']) {
+  for (const rejected of [false, true]) {
+    test(`止める言葉 DOM: 離れたあと ${operation} が ${rejected ? '失敗' : '成功'} しても画面を変えない`, async (t) => {
+      const { root } = testDom(t);
+      let resolve, reject;
+      const pending = new Promise((a, b) => { resolve = a; reject = b; });
+      const repo = { getModeration: () => operation === 'load' ? pending : Promise.resolve({ enabled: true, words: [] }), saveModeration: () => pending };
+      const cleanup = mountWords(root, { repo });
+      if (operation === 'save') { await flushView(); root.querySelector('form').dispatch('submit'); }
+      const before = root.textContent;
+      cleanup();
+      if (rejected) reject(new Error('offline')); else resolve({ enabled: false, words: [] });
+      await flushView();
+      assert.equal(root.textContent, before);
+    });
+  }
+}
 
 test('文字の大きさ: 全員が同じ人数なら、どの言葉も同じ大きさ', () => {
   assert.equal(cloudFontSize(3, 3, 3), CLOUD_FONT.same);

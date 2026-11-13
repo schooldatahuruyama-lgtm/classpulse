@@ -7,6 +7,161 @@ import { createSessionHost, startSession } from '../js/session-host.js';
 import { CONFIG } from '../js/config.js';
 import { createFakeNet } from './helpers/fake-net.js';
 
+test('自動チェック: 確認待ちは状態に入らず、heldItems だけが本文を返す', async () => {
+  const env = setup();
+  const { sid, host, states, last } = await openFree(env);
+  await write(env, sid, 's2', 'u1', '死ね', 1);
+  await write(env, sid, 's2', 'u2', '空の色', 2);
+  assert.equal(last().heldCount, 1);
+  assert.equal(last().answerCount, 2);
+  assert.equal(last().freeItems, null);
+  await host.setResultsVisible(true);
+  await env.clock.advance(1000);
+  assert.deepEqual(texts(last()), ['空の色']);
+  assert.ok(states.every((s) => !JSON.stringify(s).includes('死ね')));
+  const held = host.heldItems('s2');
+  assert.deepEqual(held, [{ key: 'u1', text: '死ね' }]);
+  held[0].text = '書きかえ';
+  assert.equal(host.heldItems()[0].text, '死ね');
+  await host.next();
+  assert.equal(last().heldCount, null);
+  await host.stop();
+});
+
+test('自動チェック: 映すと間引きを待たず反映。書き直しで確認待ち、かくすが優先', async () => {
+  const env = setup();
+  const { sid, host, last } = await openFree(env);
+  await write(env, sid, 's2', 'u1', '死ね', 1);
+  await host.setResultsVisible(true);
+  const saved = host.release('s2', 'u1');
+  assert.deepEqual(texts(last()), ['死ね']);
+  assert.equal(last().heldCount, 0);
+  await saved;
+  assert.equal(sessionOf(env, sid).host.released.s2.u1, '死ね');
+  await write(env, sid, 's2', 'u1', '死ね！', 2);
+  assert.equal(last().heldCount, 1);
+  assert.deepEqual(texts(last()), []);
+  await host.hide('s2', 'u1');
+  assert.equal(last().heldCount, 0);
+  await host.release('s2', 'u1');
+  assert.deepEqual(texts(last()), []);
+  await host.end();
+  const q = env.net.dump().teachers[UID].history[sid].questions[0];
+  assert.deepEqual(q.hiddenTexts, ['死ね！']);
+  assert.deepEqual((await env.repo.getHistory(sid)).questions[0].heldTexts, []);
+  await assert.rejects(host.release('s2', 'u1'));
+  await host.stop();
+});
+
+test('自動チェック: release 保存失敗は拒否、手元では映したまま。再試行せず開き直すと確認待ち', async () => {
+  const env = setup();
+  const { sid, host, last } = await openFree(env);
+  await write(env, sid, 's2', 'u1', '死ね', 1);
+  await host.setResultsVisible(true);
+  let calls = 0;
+  env.ctl.extraDeny = (op, path) => { if (op === 'set' && path.includes('/released/')) { calls++; return true; } return false; };
+  await assert.rejects(host.release('s2', 'u1'));
+  assert.deepEqual(texts(last()), ['死ね']);
+  await env.clock.advance(5000);
+  assert.equal(calls, 1);
+  await host.stop();
+  await assert.rejects(host.release('s2', 'u1'));
+  const again = await openHost(env, sid);
+  assert.equal(again.last().heldCount, 1);
+  assert.deepEqual(texts(again.last()), []);
+  await again.host.stop();
+});
+
+for (const settings of ['offline', { enabled: 'false', words: ['空'] }, null]) {
+  test(`自動チェック: 設定が読めない・こわれていても開始できる (${JSON.stringify(settings)})`, async () => {
+    const env = setup();
+    env.repo.getModeration = async () => { if (settings === 'offline') throw new Error('offline'); return settings; };
+    const { sid, host, last } = await openFree(env);
+    await write(env, sid, 's2', 'u1', '死ね', 1);
+    await host.setResultsVisible(true);
+    assert.equal(last().heldCount, 1);
+    assert.deepEqual(texts(last()), []);
+    await host.stop();
+  });
+}
+
+test('自動チェック: 設定は開始時だけ読み、先生の言葉と無効設定も使える', async () => {
+  const env = setup();
+  await env.repo.saveModeration({ enabled: true, words: ['青空'] });
+  const { sid, host, last } = await openFree(env);
+  await write(env, sid, 's2', 'u1', '青空', 1);
+  assert.equal(last().heldCount, 1);
+  await env.repo.saveModeration({ enabled: false, words: [] });
+  await write(env, sid, 's2', 'u2', '死ね', 2);
+  assert.equal(last().heldCount, 2);
+  await host.stop();
+  const again = await openHost(env, sid);
+  assert.equal(again.last().heldCount, 0);
+  await again.host.stop();
+});
+
+test('自動チェック: 雲は語数を返し、承認は同じ鍵の別の形にも効く', async () => {
+  const env = setup();
+  const { sid, host, states, last } = await openCloud(env);
+  await say(env, sid, 's2', 'u1', ['ＦＵＣＫ', '雲']);
+  await say(env, sid, 's2', 'u2', ['fuck']);
+  await host.setResultsVisible(true);
+  assert.equal(last().heldCount, 1);
+  assert.equal(last().answerCount, 2);
+  assert.ok(states.every((s) => !/ＦＵＣＫ|fuck/.test(JSON.stringify(s))));
+  const held = host.heldItems();
+  assert.deepEqual(held, [{ key: hiddenKey('fuck'), text: 'ＦＵＣＫ', count: 2 }]);
+  await host.release('s2', held[0].key);
+  assert.equal(last().heldCount, 0);
+  assert.ok(last().cloudItems.some((x) => x.count === 2));
+  assert.equal(sessionOf(env, sid).host.released.s2[held[0].key], true);
+  await say(env, sid, 's2', 'u3', ['Fuck']);
+  assert.equal(last().heldCount, 0);
+  await host.end();
+  assert.deepEqual((await env.repo.getHistory(sid)).questions[0].heldWords, []);
+  await host.stop();
+});
+
+test('自動チェック: 起動時の承認は正しい鍵・値だけ読み、終了時はサーバーと手元を合わせる', async () => {
+  const env = setup();
+  const sid = await begin(env, freeDeck());
+  const path = `sessions/${sid}/host/released`;
+  await env.net.set(path, { s2: { u1: '死ね', u2: 1, u3: 'x'.repeat(201), u4: true, 'bad.key': '死ね' }, 'bad.slide': { u1: '死ね' } });
+  const { host, last } = await openHost(env, sid);
+  await host.next(); await host.next();
+  for (const uid of ['u1', 'u2', 'u3', 'u4', 'u5']) await write(env, sid, 's2', uid, '死ね', 1);
+  assert.equal(last().heldCount, 4);
+  await host.release('s2', 'u2');
+  // サーバーだけの承認は終了時に読む。手元で承認した u2 はサーバーの古い文より優先する。
+  await env.net.set(path, { s2: { u2: '古い文', u3: '死ね' } });
+  await host.end();
+  const q = env.net.dump().teachers[UID].history[sid].questions[0];
+  assert.deepEqual(q.texts, ['死ね', '死ね', '死ね']);
+  assert.deepEqual(q.heldTexts, ['死ね', '死ね']);
+  assert.equal(sessionOf(env, sid).host, undefined);
+  await host.stop();
+});
+
+test('自動チェック: 終了は実行中の承認保存を待ち、後片づけで host が復活しない', async () => {
+  const env = setup();
+  const { sid, host } = await openFree(env);
+  await write(env, sid, 's2', 'u1', '死ね', 1);
+  const set = env.net.set;
+  let resume;
+  const wait = new Promise((resolve) => { resume = resolve; });
+  env.net.set = async (path, value) => { if (path.includes('/released/')) await wait; return set(path, value); };
+  const releasing = host.release('s2', 'u1');
+  const ending = host.end();
+  await settle();
+  await assert.rejects(host.release('s2', 'u1'));
+  resume();
+  await releasing;
+  await ending;
+  assert.equal(sessionOf(env, sid).host, undefined);
+  assert.deepEqual(env.net.dump().teachers[UID].history[sid].questions[0].texts, ['死ね']);
+  await host.stop();
+});
+
 const UID = 'teacher1';
 
 // 3 枚の教材: s1 資料、s2 アンケート(2択・manual)、s3 アンケート(3択・live)

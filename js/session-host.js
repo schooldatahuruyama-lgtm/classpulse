@@ -6,6 +6,7 @@
 // - 操作（次へ・停止・公開など）は、順番が来た時点でサーバーの最新の pub を読んでからパッチを作る
 // - 集計を書くかどうかは、その時点の state.pub で決める（かくした質問の集計は、規則でも書けない）
 import { CONFIG } from './config.js';
+import { createChecker } from './moderation.js';
 import {
   validateDeck, newSessionId, normalizeDeck, withoutCorrect, isChoiceSlide, choiceCount,
 } from './model.js';
@@ -97,6 +98,23 @@ function validHidden(v) {
   return out;
 }
 
+// 「映す」の記録。あとの表（手元）を優先し、文字列は書き直さずに照合する。
+function cleanReleased(...sources) {
+  const out = Object.create(null);
+  for (const source of sources) {
+    if (!source || typeof source !== 'object' || Array.isArray(source)) continue;
+    for (const [slideId, values] of Object.entries(source)) {
+      if (!validKey(slideId) || !values || typeof values !== 'object' || Array.isArray(values)) continue;
+      for (const [key, value] of Object.entries(values)) {
+        if (!validKey(key) || !(value === true || (typeof value === 'string' && value.length <= CONFIG.free.maxLength))) continue;
+        if (!out[slideId]) out[slideId] = Object.create(null);
+        out[slideId][key] = value;
+      }
+    }
+  }
+  return out;
+}
+
 // storage（localStorage と同じ形。無くてもよい）: この端末でかくした回答を授業ごとに残す。
 // 再読み込みのとき、host/hidden に書けていなかったものを失わないため。
 // storage の操作はどれも例外を投げうるので、失敗しても無視する（無いときと同じに動く）
@@ -106,6 +124,7 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
   const inboxPath = `${base}/inbox`;
   const hostPath = `${base}/host`;
   const hiddenPath = `${hostPath}/hidden`;
+  const releasedPath = `${hostPath}/released`;
   const quizPath = `${hostPath}/quiz`;
   const storeKey = `classpulse:hidden:${sid}`;
 
@@ -158,6 +177,9 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
   // 自由記述・ワードクラウド: かくした回答（手元のもの。まだ書けていないものも入る）。start で 1 回読み、end で読み直す。
   // 鍵は、自由記述は生徒の uid、ワードクラウドは言葉の鍵（hiddenKey）
   let hidden = cleanHidden();
+  let released = cleanReleased();
+  let isFlagged = createChecker();
+  const releaseWrites = new Set();
   const unsaved = new Map();    // "slideId/鍵" → { slideId, uid: 鍵, promise, resolve, reject }（host/hidden に書けていないもの）
   const hideTimers = new Map(); // "slideId/鍵" → 再試行のタイマー
   const hideWrites = new Set(); // 実行中の host/hidden の書きこみ
@@ -228,6 +250,20 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
     clearListTimer();
   }
 
+  function answerList(id) {
+    const spec = listSpec(state.slides[id]);
+    return spec ? spec.list(inbox?.answers?.[id], hidden[id], { isFlagged, released: released[id] }) : null;
+  }
+
+  function heldItems(slideId = currentSlideId()) {
+    if (stopped || state.phase !== 'live') return [];
+    const spec = listSpec(state.slides[slideId]);
+    if (!spec) return [];
+    return answerList(slideId).heldItems.map((item) => state.slides[slideId].type === 'free'
+      ? { key: item.uid, text: item.text }
+      : { key: item.key, text: item.word, count: item.count });
+  }
+
   // 今のスライドが自由記述・ワードクラウドのときの項目。結果を表示していない間は、文章も言葉も uid も 1 つも入れない
   // （一覧の写しも捨てる）。freeItems の uid は hide に渡すためだけのもの（画面の DOM には入れない）。
   // cloudItems は人数の多い順に CONFIG.cloud.maxShown 個まで。cloudMore は、かくしていないのに出していない言葉の数
@@ -237,6 +273,7 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
     const out = {
       kind: slide ? slide.type : null,
       answerCount: null,
+      heldCount: null,
       freeItems: null,
       cloudItems: null,
       cloudMore: null,
@@ -261,9 +298,9 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
     }
     const spec = listSpec(slide);
     if (!spec || state.phase !== 'live') { dropListView(); return out; }
-    const answers = (inbox && inbox.answers) || {};
-    const list = spec.list(answers[id], hidden[id]);
+    const list = answerList(id);
     out.answerCount = list.total;
+    out.heldCount = list.heldItems.length;
     const poll = state.pub && state.pub.polls && state.pub.polls[id];
     if (!poll || poll.resultsVisible !== true) { dropListView(); return out; }
     const t = now();
@@ -278,7 +315,8 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
     }
     // かくしたものは、写しを作ったあとでも、すぐに外す
     const hid = hidden[id] || {};
-    const visible = listView.items.filter((x) => hid[spec.keyOf(x)] !== true);
+    const heldKeys = new Set(list.heldItems.map(spec.keyOf));
+    const visible = listView.items.filter((x) => hid[spec.keyOf(x)] !== true && !heldKeys.has(spec.keyOf(x)));
     if (slide.type === 'free') {
       out.freeItems = visible.map((x) => ({ uid: x.uid, text: x.text }));
     } else {
@@ -507,6 +545,8 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
       // かくした回答も読み直し、手元でかくしたもの（まだ書けていないものも）と合わせる
       const finalHidden = await net.get(hiddenPath);
       guard();
+      const finalReleased = await net.get(releasedPath);
+      guard();
       // クイズの正解も読み直す（クイズのある授業だけ）。読めた値を、開いたときに読んだ値より優先する
       let finalQuiz = null;
       if (state.order.some((id) => state.slides[id] && state.slides[id].type === 'quiz')) {
@@ -519,6 +559,7 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
           deck: { order: state.order, slides: state.slides, images: state.images },
         },
         finalInbox, now(), cleanHidden(finalHidden, hidden), cleanQuiz(quizKeys, finalQuiz),
+        { isFlagged, released: cleanReleased(finalReleased, released) },
       );
       // 3. 履歴を保存できなければここで止める（live のまま、inbox も残す）
       await repo.saveHistory(sid, history);
@@ -534,6 +575,7 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
     // かくしたものは履歴に入れた（または別のタブが終えた）。再試行を止め、実行中の書きこみを待ってから host を消す
     closeHide((e) => e.resolve());
     await settledHideWrites();
+    await Promise.allSettled([...releaseWrites]);
     guard();
     await net.remove(hostPath);
     guard();
@@ -555,6 +597,11 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
       emit();
       const session = await net.get(base);
       if (stopped) return;
+      // 設定を読めなくても、はじめから入っている言葉で確認を続ける。
+      let settings;
+      try { settings = await repo.getModeration(); } catch { /* 既定値を使う */ }
+      if (stopped) return;
+      isFlagged = createChecker(settings);
       if (session === null || typeof session !== 'object' || !session.pub) {
         state.phase = 'not-found';
         removeStored(); // 授業はもう無い
@@ -568,6 +615,7 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
       const serverHidden = cleanHidden(session.host && session.host.hidden);
       const stored = readStored();
       hidden = cleanHidden(serverHidden, stored, hidden);
+      released = cleanReleased(session.host && session.host.released);
       // クイズの正解（host/quiz）も、授業全体の読みこみから 1 回だけ読む
       quizKeys = cleanQuiz(session.host && session.host.quiz);
       meta = { deckId: String(session.deckId || ''), startedAt: Number(session.startedAt) || 0 };
@@ -599,6 +647,29 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
       if (!stopped && state.phase === 'live') unsubscribePub = net.subscribe(pubPath, onPub, (st) => onStatus('pub', st));
       if (stopped || state.phase !== 'live') unsubscribeAll();
       syncResults();
+    },
+
+    heldItems,
+
+    // 保存より先に手元で映す。失敗は呼び出し側へ返し、再試行・端末への保存はしない。
+    release(slideId, key) {
+      if (stopped) return Promise.reject(stoppedError());
+      if (state.phase !== 'live' || ending) return Promise.reject(new Error('授業が開かれていません'));
+      if (!validKey(slideId) || !validKey(key)) return Promise.resolve();
+      const item = heldItems(slideId).find((x) => x.key === key);
+      if (!item) return Promise.resolve();
+      const value = state.slides[slideId].type === 'free' ? item.text : true;
+      released = cleanReleased(released, { [slideId]: { [key]: value } });
+      if (listView && listView.slideId === slideId) {
+        clearListTimer();
+        listView = { slideId, items: answerList(slideId).items, at: now() };
+      }
+      const write = Promise.resolve().then(() => net.set(`${releasedPath}/${slideId}/${key}`, value));
+      releaseWrites.add(write);
+      const forget = () => releaseWrites.delete(write);
+      write.then(forget, forget);
+      emit();
+      return write;
     },
 
     next() { return operate((pub) => nextPatch(pub, state.order)); },
@@ -689,7 +760,7 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
       // かくしたものの再試行も止める（書けていないものは拒否する）
       closeHide((e) => e.reject(stoppedError()));
       // 前の host の分と自分の分をつなぐ（置きかえない）。登録中のものが済んだら表から消す
-      const own = Promise.all([tail.then(() => {}, () => {}), settledHideWrites()]).then(() => {});
+      const own = Promise.all([tail.then(() => {}, () => {}), settledHideWrites(), Promise.allSettled([...releaseWrites])]).then(() => {});
       const earlier = drains.get(sid);
       const chained = earlier ? Promise.all([earlier, own]).then(() => {}) : own;
       drains.set(sid, chained);
