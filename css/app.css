@@ -74,9 +74,9 @@
 }
 .dash-recent-link:hover { background: var(--c-bg); }
 .dash-recent-title { font-weight: 700; overflow-wrap: anywhere; }
-/* PDF から作る: ボタンを並べる。ファイルを選ぶ入力は見せない（ボタンから開く） */
+/* PDF・PowerPoint から作る: ボタンを並べる。ファイルを選ぶ入力は見せない（ボタンから開く） */
 .dash-create-actions { display: flex; flex-wrap: wrap; gap: var(--s-1); }
-.dash-pdf-input { display: none; }
+.dash-pdf-input, .dash-pptx-input { display: none; }
 .dash-progress:empty { display: none; }
 .dash-progress { margin-bottom: var(--s-2); }
 .dash-progress-card {

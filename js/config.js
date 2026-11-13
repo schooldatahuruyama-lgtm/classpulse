@@ -2,6 +2,11 @@
 export const CONFIG = {
   image: { maxEdge: 1280, maxBytes: 204800, deckMaxBytes: 5242880 },
   pdf: { maxPages: 30, maxFileBytes: 52428800 },
+  pptx: {
+    maxSlides: 100, maxFileBytes: 52428800, maxEntries: 5000,
+    maxXmlBytes: 5242880, maxImageBytes: 31457280, maxTotalBytes: 209715200,
+    maxXmlDepth: 200, maxTextLength: 2000,
+  },
   autosaveDelayMs: 1000,
   autosaveRetryMs: 5000,
   autosaveMaxWaitMs: 5000,

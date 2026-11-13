@@ -20,7 +20,7 @@ export function mount(root, ctx) {
   let busy = false; // 作成・発表開始・削除の最中は、ほかの操作を受けつけない
   let createdSid = null; // 作ったが、まだ発表の画面へ移れていない授業（作り直さず、これを開き直す）
   let opening = false;
-  let importing = null; // PDF の取込みの最中なら、その中止用の AbortController
+  let importing = null; // PDF・PowerPoint の取込みの最中なら、その中止用の AbortController
   const message = el('div', { class: 'dash-message' });
   const progressBox = el('div', { class: 'dash-progress', role: 'status', 'aria-live': 'polite' });
   const activeBox = el('div', { class: 'dash-active' });
@@ -67,6 +67,20 @@ export function mount(root, ctx) {
   function choosePdf() {
     if (busy) return;
     pdfInput.click();
+  }
+
+  const pptxInput = el('input', {
+    type: 'file', accept: '.pptx', class: 'dash-pptx-input', tabindex: '-1', 'aria-hidden': 'true',
+    onchange: () => {
+      const file = pptxInput.files && pptxInput.files[0];
+      pptxInput.value = '';
+      if (file) importFromPptx(file);
+    },
+  });
+
+  function choosePptx() {
+    if (busy) return;
+    pptxInput.click();
   }
 
   // 進みぐあいの表示。ac を渡すと「やめる」を出す（ほかのボタンと違い、取込みの最中も押せる）。
@@ -125,6 +139,71 @@ export function mount(root, ctx) {
       } catch {
         if (alive) showMessage(el('p', { text: MSG_CREATE_FAILED }));
       }
+    } finally {
+      if (importing === ac) importing = null;
+      if (alive) {
+        progressBox.replaceChildren();
+        setBusy(false);
+      }
+    }
+  }
+
+  // 文字と画像をすべて読み終えてから保存する。まとめは読み終えるまで消さない。
+  async function importFromPptx(file) {
+    if (busy || !alive) return;
+    setBusy(true);
+    message.replaceChildren();
+    const ac = new AbortController();
+    importing = ac;
+    showProgress('PowerPoint を読みこんでいます…', ac);
+    let module;
+    try {
+      let result;
+      try {
+        const cancelled = () => Object.assign(new Error('cancelled'), { code: 'cancelled' });
+        module = await abortable(import('../pptx-import.js'), ac.signal, cancelled);
+        if (!alive || ac.signal.aborted) return;
+        result = await module.importPptx(file, {
+          signal: ac.signal,
+          onProgress: (done, total) => {
+            if (alive && !ac.signal.aborted) showProgress(`PowerPoint を読みこんでいます… ${done} / ${total} 枚`, ac);
+          },
+        });
+      } catch (e) {
+        if (!alive) return;
+        const text = module ? module.importMessage(e) : ac.signal.aborted
+          ? 'PowerPoint の取りこみをやめました。教材は作っていません。'
+          : 'この PowerPoint を読みこめませんでした。パスワードが付いていないか、ファイルがこわれていないか確かめてください。';
+        showMessage(el('p', { text }));
+        return;
+      }
+      if (!alive || ac.signal.aborted) return;
+      importing = null;
+      showProgress('教材を保存しています…', null);
+      const id = newId();
+      const now = Date.now();
+      try {
+        await ctx.repo.saveDeck(id, module.buildDeckFromPptx(result, now), now);
+      } catch {
+        if (alive) showMessage(el('p', { text: MSG_CREATE_FAILED }));
+        return;
+      }
+      if (!alive) return;
+      progressBox.replaceChildren();
+      // 保存後の案内。短いトーストだと注意点と件数を読みきれないため、ダイアログにする。
+      const paragraphs = module.summaryMessage(result).split('\n');
+      const confirmation = confirmDialog({ title: 'PowerPoint の取りこみ', body: paragraphs[0],
+        okLabel: '教材を開く', cancelLabel: 'ホームに戻る' });
+      if (paragraphs.length > 1) {
+        // confirmDialog が同期的に追加した今回の本文だけを、段落に分ける。
+        const dialogs = document.body.querySelectorAll('.confirm');
+        const dialog = dialogs[dialogs.length - 1];
+        dialog.querySelectorAll('p')[0].replaceWith(...paragraphs.map((text) => el('p', { text })));
+      }
+      const open = await confirmation;
+      if (!alive) return;
+      if (open) ctx.navigate('editor', { deckId: id });
+      else await load();
     } finally {
       if (importing === ac) importing = null;
       if (alive) {
@@ -302,7 +381,8 @@ export function mount(root, ctx) {
       el('div', { class: 'dash-create-actions' },
         el('button', { type: 'button', class: 'btn btn-primary dash-create', text: '＋ 新規作成', 'data-dash-action': '', onclick: create }),
         el('button', { type: 'button', class: 'btn dash-create', text: 'PDF から作る', 'data-dash-action': '', onclick: choosePdf }),
-        pdfInput)),
+        el('button', { type: 'button', class: 'btn dash-create', text: 'PowerPoint から作る', 'data-dash-action': '', onclick: choosePptx }),
+        pdfInput, pptxInput)),
     activeBox, progressBox, message,
     el('div', { class: 'dash-body' }, decksBox, recentBox)));
   decksBox.replaceChildren(el('p', { class: 'loading', text: '読みこんでいます…' }));
