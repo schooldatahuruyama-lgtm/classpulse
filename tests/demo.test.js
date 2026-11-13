@@ -4,6 +4,58 @@ import { createDemoBackend, isDemoAllowed } from '../js/dev/demo.js';
 import { createRepo } from '../js/repo.js';
 import { fakeStorage } from './helpers/fakes.js';
 
+test('練習用の先生は管理者。既存のデータにも足され、消去後も残る', async () => {
+  const storage = fakeStorage();
+  storage.setItem('classpulse:demo:db', JSON.stringify({ teacherList: { 'demo-teacher': true }, keep: 1 }));
+  const d = make(storage, null);
+  assert.equal(await createRepo(d.net, 'demo-teacher').isAdmin(), true);
+  assert.equal(await d.net.get('keep'), 1);
+  d.net.clear();
+  assert.equal(await createRepo(d.net, 'demo-teacher').isAdmin(), true);
+});
+
+test('練習モードの登録とログイン: メールごとに uid が決まり、パスワードを保存しない', async () => {
+  const storage = fakeStorage();
+  const d = make(storage, null);
+  const a = await d.teacherAuth.signUpTeacher('new@example.com', 'fake-signup-pass');
+  const b = await d.teacherAuth.signUpTeacher('other@example.com', 'fake-other-pass');
+  assert.notEqual(a.uid, b.uid);
+  assert.notEqual(a.uid, 'demo-teacher');
+  const saved = storage.getItem('classpulse:demo:teacher');
+  assert.doesNotMatch(saved, /password|fake-signup-pass|fake-other-pass/);
+  assert.deepEqual(JSON.parse(saved), b);
+  d.teacherAuth.signOut();
+  assert.deepEqual(await make(storage, null).teacherAuth.signInTeacher('new@example.com'), a);
+  assert.equal(await createRepo(d.net, a.uid).teacherStatus(), 'none');
+  assert.equal(await createRepo(d.net, a.uid).isAdmin(), false);
+  await assert.rejects(d.studentAuth.signUpTeacher('new@example.com', 'fake-signup-pass'), { code: 'unknown' });
+});
+
+test('練習モードで申しこみ・ことわる・再申請・承認・停止・再開を試せる', async () => {
+  const d = make(fakeStorage(), null);
+  const user = await d.teacherAuth.signUpTeacher('new@example.com', 'fake-signup-pass');
+  const repo = createRepo(d.net, user.uid);
+  await repo.requestAccess(user.email);
+  d.teacherAuth.signOut();
+  const admin = await d.teacherAuth.signInTeacher('a@b.c');
+  const manage = createRepo(d.net, admin.uid);
+  assert.equal(await manage.isAdmin(), true);
+  assert.deepEqual(await manage.listRequests(), [{ uid: user.uid, email: user.email, at: 1000 }]);
+  await manage.rejectRequest(user.uid);
+  assert.equal(await repo.getMyRequest(), null);
+  await d.teacherAuth.signInTeacher(user.email);
+  await repo.requestAccess(user.email);
+  await d.teacherAuth.signInTeacher('a@b.c');
+  await manage.approveTeacher(user.uid, user.email, 2000);
+  assert.equal(await repo.teacherStatus(), 'active');
+  assert.equal(await repo.getMyRequest(), null);
+  await manage.setTeacherActive(user.uid, false);
+  assert.equal(await repo.teacherStatus(), 'suspended');
+  await manage.setTeacherActive(user.uid, true);
+  assert.equal(await repo.teacherStatus(), 'active');
+  assert.deepEqual(await d.teacherAuth.signInTeacher(user.email), user);
+});
+
 // 同じ名前の BroadcastChannel どうしで届け合う代役
 function fakeBroadcastHub() {
   const all = new Set();
@@ -39,7 +91,7 @@ test('読み直し（新しい backend）でもデータが残る', async () => 
   assert.ok(shared.getItem('classpulse:demo:db'));
 });
 
-test('先生は何でもログインでき、teacherList に登録済み', async () => {
+test('従来の練習用メールは同じ先生で、teacherList に登録済み', async () => {
   const d = make(fakeStorage(), fakeBroadcastHub());
   const u = await d.teacherAuth.signInTeacher('a@b.c', 'zzz');
   assert.equal(u.uid, 'demo-teacher');
@@ -76,7 +128,7 @@ test('生徒の uid はタブごとに別で、同じタブの読み直しでは
 test('auth の形は本物と同じメソッドを持つ', () => {
   const d = make(fakeStorage(), fakeBroadcastHub());
   for (const a of [d.teacherAuth, d.studentAuth]) {
-    for (const m of ['signInTeacher', 'signInAnonymous', 'restore', 'getToken', 'forceRefresh', 'signOut']) {
+    for (const m of ['signUpTeacher', 'signInTeacher', 'signInAnonymous', 'restore', 'getToken', 'forceRefresh', 'signOut']) {
       assert.equal(typeof a[m], 'function', m);
     }
     assert.ok('user' in a);
@@ -178,16 +230,22 @@ function asyncHub() {
 }
 const tick = () => new Promise((r) => setTimeout(r, 30));
 
-test('非同期の通知: A が x を書き、B が（受け取って）y を書くと、A の購読は y を受け取る', async () => {
+test('非同期の通知: A が x を書き、B が（受け取って）y を書くと、A の購読は y を受け取る', { timeout: 2000 }, async () => {
   const shared = fakeStorage();
   const BC = asyncHub();
   const a = make(shared, BC);
   const b = make(shared, BC);
   const seenA = [];
-  a.net.subscribe('pub/results', (v) => seenA.push(v));
+  let received;
+  const delivered = new Promise((resolve) => { received = resolve; });
+  a.net.subscribe('pub/results', (v) => {
+    seenA.push(v);
+    if (v?.s1?.n === 7) received();
+  });
   b.net.subscribe('inbox/x', async (v) => { if (v === 1) await b.net.set('pub/results/s1', { n: 7 }); });
   await a.net.set('inbox/x', 1);
-  await tick();
+  // 全体テストの負荷で 30ms を超えても、往復の通知が届くまで待つ
+  await delivered;
   assert.deepEqual(seenA[seenA.length - 1], { s1: { n: 7 } });
   assert.deepEqual(await a.net.get('pub/results/s1'), { n: 7 });
 });
@@ -235,7 +293,7 @@ test('同期的に届く通知: B の返信の書きこみが A 自身の通知�
   a.net.subscribe('', (v) => seenA.push(v));
   b.net.subscribe('inbox/x', (v) => { if (v === 1) b.net.set('pub/y', 7); });
   await a.net.set('inbox/x', 1);
-  assert.deepEqual(seenA[seenA.length - 1], { inbox: { x: 1 }, pub: { y: 7 }, teacherList: { 'demo-teacher': true } });
+  assert.deepEqual(seenA[seenA.length - 1], { inbox: { x: 1 }, pub: { y: 7 }, teacherList: { 'demo-teacher': true }, admins: { 'demo-teacher': true } });
   assert.equal(await a.net.get('pub/y'), 7);
   assert.equal(JSON.parse(shared.getItem('classpulse:demo:db')).pub.y, 7);
 });

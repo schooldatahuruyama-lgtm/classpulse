@@ -25,6 +25,10 @@ function toIndexed(v) {
 }
 
 const byNewest = (key) => (a, b) => (b[key] || 0) - (a[key] || 0);
+const isRecord = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+const entries = (v) => isRecord(v) ? Object.entries(v) : [];
+const timeOrZero = (v) => typeof v === 'number' && Number.isFinite(v) ? v : 0;
+const requestFields = (v) => isRecord(v) ? { email: typeof v.email === 'string' ? v.email : '', at: timeOrZero(v.at) } : null;
 
 function normalizeQuestion(q) {
   const src = q && typeof q === 'object' ? q : {};
@@ -106,6 +110,60 @@ export function createRepo(net, uid) {
   return {
     async isTeacher() {
       return (await net.get(`teacherList/${uid}`)) === true;
+    },
+
+    async teacherStatus() {
+      const value = await net.get(`teacherList/${uid}`);
+      return value === true ? 'active' : value === false ? 'suspended' : 'none';
+    },
+
+    async isAdmin() {
+      try { return (await net.get(`admins/${uid}`)) === true; }
+      catch { return false; } // 古い規則や通信失敗でも、ほかの画面は使える
+    },
+
+    async getMyRequest() {
+      return requestFields(await net.get(`teacherRequests/${uid}`));
+    },
+
+    async requestAccess(email) {
+      await net.set(`teacherRequests/${uid}`, { email, at: net.serverTimestamp() });
+    },
+
+    async listRequests() {
+      return entries(await net.get('teacherRequests'))
+        .filter(([, v]) => isRecord(v))
+        .map(([id, v]) => ({ uid: id, ...requestFields(v) }))
+        .sort((a, b) => a.at - b.at);
+    },
+
+    async listTeachers() {
+      const [list, directory] = await Promise.all([net.get('teacherList'), net.get('teacherDirectory')]);
+      return entries(list)
+        .filter(([, active]) => typeof active === 'boolean')
+        .map(([id, active]) => {
+          const d = isRecord(directory) && isRecord(directory[id]) ? directory[id] : {};
+          return { uid: id, email: typeof d.email === 'string' ? d.email : '', active, approvedAt: timeOrZero(d.approvedAt) };
+        })
+        .sort((a, b) => Number(!a.email) - Number(!b.email) || a.email.localeCompare(b.email) || a.uid.localeCompare(b.uid));
+    },
+
+    // 承認の 3 か所はまとめて書く（申しこみだけ残る途中の状態を作らない）
+    async approveTeacher(targetUid, email, now) {
+      await net.update('', {
+        [`teacherList/${targetUid}`]: true,
+        [`teacherDirectory/${targetUid}`]: { email, approvedAt: now },
+        [`teacherRequests/${targetUid}`]: null,
+      });
+    },
+
+    async rejectRequest(targetUid) {
+      await net.remove(`teacherRequests/${targetUid}`);
+    },
+
+    async setTeacherActive(targetUid, active) {
+      if (targetUid === uid) throw new Error('自分自身の利用状態は変更できません');
+      await net.set(`teacherList/${targetUid}`, active);
     },
 
     // 一覧は deckIndex から（教材そのものは読まない）。新しい順。ゴミ箱の中の教材は出さない

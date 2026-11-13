@@ -11,6 +11,14 @@ const TEACHER_KEY = 'classpulse:demo:teacher';
 const STUDENT_KEY = 'classpulse:demo:student-uid';
 const CHANNEL = 'classpulse-demo';
 export const DEMO_TEACHER_UID = 'demo-teacher';
+// これまでの練習用アカウント（既存のテストと同じメールアドレス）は、同じ uid を使う
+const DEMO_TEACHER_EMAIL = 'a@b.c';
+
+function teacherUid(email) {
+  if (email === DEMO_TEACHER_EMAIL) return DEMO_TEACHER_UID;
+  // メールアドレスの各文字を固定幅で表す。同じメールなら同じ uid、別のメールとは重ならない
+  return `demo-t-${Array.from(email, (c) => c.codePointAt(0).toString(16).padStart(6, '0')).join('')}`;
+}
 
 // 練習モードにしてよい場所か。localhost 系で、URL に ?demo=1 があるときだけ
 export function isDemoAllowed(hostname, search) {
@@ -69,13 +77,17 @@ export function resultsWriteDenied(root, op, path, value) {
 }
 
 // 先生の登録だけが入った初期の中身
-const seedDb = () => ({ teacherList: { [DEMO_TEACHER_UID]: true } });
+const seedDb = () => ({ teacherList: { [DEMO_TEACHER_UID]: true }, admins: { [DEMO_TEACHER_UID]: true } });
 
 export function createDemoBackend({ storage, sessionStorage, BroadcastChannel, now = Date.now }) {
   let initial = readDb(storage) || null;
   // 先生の登録を最初から入れておく（teacherList に demo-teacher）
-  if (!initial || !initial.teacherList || initial.teacherList[DEMO_TEACHER_UID] !== true) {
-    initial = { ...(initial || {}), teacherList: { ...((initial && initial.teacherList) || {}), [DEMO_TEACHER_UID]: true } };
+  if (!initial || initial.teacherList?.[DEMO_TEACHER_UID] !== true || initial.admins?.[DEMO_TEACHER_UID] !== true) {
+    initial = {
+      ...(initial || {}),
+      teacherList: { ...((initial && initial.teacherList) || {}), [DEMO_TEACHER_UID]: true },
+      admins: { ...((initial && initial.admins) || {}), [DEMO_TEACHER_UID]: true },
+    };
     storage.setItem(DEMO_DB_KEY, JSON.stringify(initial));
   }
 
@@ -143,12 +155,14 @@ export function createDemoBackend({ storage, sessionStorage, BroadcastChannel, n
     if (channel) channel.postMessage({ type: 'clear' });
   };
 
-  // 先生: どんなメールアドレスとパスワードでも入れる。状態は localStorage に残す
+  // 先生: メールアドレスごとに別の人。パスワードは使わず、状態だけ localStorage に残す
   const teacherAuth = {
     async signInTeacher(email) {
-      storage.setItem(TEACHER_KEY, JSON.stringify({ uid: DEMO_TEACHER_UID, email: String(email || '') }));
+      const mail = String(email || '').trim().toLowerCase();
+      storage.setItem(TEACHER_KEY, JSON.stringify({ uid: teacherUid(mail), email: mail }));
       return { ...this.user };
     },
+    async signUpTeacher(email, password) { return this.signInTeacher(email); },
     async signInAnonymous() { throw new NetError('unknown', '先生の auth では使えません'); },
     async restore() { return this.user; },
     async getToken() {
@@ -168,6 +182,7 @@ export function createDemoBackend({ storage, sessionStorage, BroadcastChannel, n
   // 生徒: uid は sessionStorage（タブごとに別。同じタブの読み直しでは同じ）
   const newUid = () => `demo-s-${Math.random().toString(36).slice(2, 10)}${Math.random().toString(36).slice(2, 6)}`;
   const studentAuth = {
+    async signUpTeacher() { throw new NetError('unknown', '生徒の auth では使えません'); },
     async signInTeacher() { throw new NetError('unknown', '生徒の auth では使えません'); },
     async signInAnonymous() {
       let uid = sessionStorage.getItem(STUDENT_KEY);

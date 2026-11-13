@@ -140,3 +140,17 @@
 .trash-item-actions { display: flex; flex-wrap: wrap; gap: var(--s-1); }
 .trash-danger { color: var(--c-danger-text); border-color: var(--c-danger-text); }
 .trash-empty { margin: 0; }
+
+/* 先生の登録・承認待ち・管理 */
+.signup h1 { font-size: 28px; }
+.pending-card, .teacher-email { overflow-wrap: anywhere; }
+.teacher-admin { max-width: 960px; margin: 0 auto; }
+.teacher-section { margin-top: var(--s-3); }
+.teacher-section h2 { font-size: 24px; }
+.teacher-message:empty { display: none; }
+.teacher-message { margin-bottom: var(--s-2); }
+.teacher-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--s-2); }
+.teacher-item { padding: var(--s-2) var(--s-3); }
+.teacher-email { font-size: 20px; margin-bottom: var(--s-1); }
+.teacher-actions { display: flex; flex-wrap: wrap; gap: var(--s-1); }
+.teacher-danger { color: var(--c-danger-text); border-color: var(--c-danger-text); }

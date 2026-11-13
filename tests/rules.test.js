@@ -5,6 +5,115 @@ import { readFileSync } from 'node:fs';
 const read = (p) => readFileSync(new URL('../' + p, import.meta.url), 'utf8');
 const rules = () => JSON.parse(read('docs/firebase/rules.json')).rules;
 
+const ADMIN = "auth != null && root.child('admins').child(auth.uid).val() === true";
+
+test('admins は本人だけが読め、どの階層にも書きこみの許可がない', () => {
+  const admin = rules().admins;
+  assert.deepEqual(admin, { $uid: { '.read': 'auth != null && auth.uid === $uid' } });
+});
+
+test('teacherList は管理者だけが一覧を読み、自分以外の利用状態だけを書ける', () => {
+  const list = rules().teacherList;
+  assert.equal(list['.read'], ADMIN);
+  assert.equal(list.$uid['.read'], 'auth != null && auth.uid === $uid');
+  assert.equal(list.$uid['.write'], "auth != null && auth.uid !== $uid && root.child('admins').child(auth.uid).val() === true");
+  assert.equal(list.$uid['.validate'], 'newData.isBoolean()');
+  assert.equal(list['.write'], undefined);
+});
+
+test('申しこみは未登録の本人の password 認証だけ。管理者は削除だけできる', () => {
+  const requests = rules().teacherRequests;
+  assert.equal(requests['.read'], ADMIN);
+  assert.equal(requests.$uid['.read'], 'auth != null && auth.uid === $uid');
+  assert.equal(requests.$uid['.write'], "auth != null && ((auth.uid === $uid && auth.provider === 'password' && newData.exists() && !root.child('teacherList').child($uid).exists()) || (root.child('admins').child(auth.uid).val() === true && !newData.exists()))");
+  assert.equal(requests.$uid['.validate'], "newData.hasChildren(['email', 'at']) && newData.child('email').isString() && newData.child('email').val().length <= 254 && newData.child('email').val() === auth.token.email && newData.child('at').val() === now");
+  assert.equal(requests.$uid.$other['.validate'], "$other === 'email' || $other === 'at'");
+});
+
+test('名簿を読める・書けるのは管理者だけ。メールと承認日時以外を拒む', () => {
+  const directory = rules().teacherDirectory;
+  assert.equal(directory['.read'], ADMIN);
+  assert.equal(directory.$uid['.read'], undefined);
+  assert.equal(directory.$uid['.write'], ADMIN);
+  assert.equal(directory.$uid['.validate'], "newData.hasChildren(['email', 'approvedAt']) && newData.child('email').isString() && newData.child('email').val().length <= 254 && newData.child('approvedAt').isNumber()");
+  assert.equal(directory.$uid.$other['.validate'], "$other === 'email' || $other === 'approvedAt'");
+});
+
+// 先生の管理を足す前の規則。既存の読み書きの条件をそのまま保つ
+const unchangedRules = {
+  "teachers": {
+    "$uid": {
+      ".read": "auth != null && auth.uid === $uid && root.child('teacherList').child($uid).val() === true",
+      ".write": "auth != null && auth.uid === $uid && root.child('teacherList').child($uid).val() === true"
+    }
+  },
+  "sessions": {
+    "$sid": {
+      ".read": "auth != null && root.child('teacherList').child(auth.uid).val() === true && data.child('owner').val() === auth.uid",
+      ".write": "auth != null && root.child('teacherList').child(auth.uid).val() === true && (data.exists() ? data.child('owner').val() === auth.uid : newData.child('owner').val() === auth.uid)",
+      "pub": {
+        ".read": "auth != null",
+        "polls": {
+          "$slideId": {
+            "status": {
+              ".validate": "data.val() !== 'closed' || newData.val() === 'closed'"
+            }
+          }
+        },
+        "results": {
+          "$slideId": {
+            ".validate": "newData.parent().parent().child('polls').child($slideId).child('resultsVisible').val() === true"
+          }
+        }
+      },
+      "deck": {
+        ".read": "auth != null"
+      },
+      "inbox": {
+        "participants": {
+          "$uid": {
+            ".write": "auth != null && auth.uid === $uid && root.child('sessions').child($sid).child('pub').child('state').val() === 'live'",
+            ".validate": "newData.isNumber()"
+          }
+        },
+        "answers": {
+          "$slideId": {
+            "$uid": {
+              ".read": "auth != null && auth.uid === $uid",
+              ".write": "auth != null && auth.uid === $uid && newData.exists() && root.child('sessions').child($sid).child('pub').child('state').val() === 'live' && root.child('sessions').child($sid).child('pub').child('polls').child($slideId).child('status').val() === 'open' && root.child('sessions').child($sid).child('pub').child('current').child('slideId').val() === $slideId",
+              ".validate": "(root.child('sessions').child($sid).child('deck').child('slides').child($slideId).child('type').val() === 'free' && !(root.child('sessions').child($sid).child('deck').child('slides').child($slideId).child('type').val() === 'cloud') && newData.hasChildren(['text', 'at']) && newData.child('text').isString() && newData.child('text').val().length >= 1 && newData.child('text').val().length <= 200 && newData.child('text').val().matches(/\\S/) && newData.child('at').val() === now) || (!(root.child('sessions').child($sid).child('deck').child('slides').child($slideId).child('type').val() === 'free') && !(root.child('sessions').child($sid).child('deck').child('slides').child($slideId).child('type').val() === 'cloud') && newData.hasChildren(['choice', 'at']) && newData.child('choice').isNumber() && newData.child('choice').val() >= 0 && newData.child('choice').val() < 6 && newData.child('choice').val() % 1 === 0 && root.child('sessions').child($sid).child('deck').child('slides').child($slideId).child('options').child(newData.child('choice').val() + '').exists() && newData.child('at').val() === now) || (root.child('sessions').child($sid).child('deck').child('slides').child($slideId).child('type').val() === 'cloud' && newData.hasChildren(['words', 'at']) && newData.child('at').val() === now)",
+              "words": {
+                ".validate": "root.child('sessions').child($sid).child('deck').child('slides').child($slideId).child('type').val() === 'cloud' && newData.hasChild('0')",
+                "$i": {
+                  ".validate": "($i === '0' || $i === '1' || $i === '2') && newData.isString() && newData.val().length >= 1 && newData.val().length <= 20 && newData.val().matches(/\\S/)"
+                }
+              },
+              "$other": {
+                ".validate": "$other === 'at' || ($other === 'choice' && !(root.child('sessions').child($sid).child('deck').child('slides').child($slideId).child('type').val() === 'free') && !(root.child('sessions').child($sid).child('deck').child('slides').child($slideId).child('type').val() === 'cloud')) || ($other === 'text' && root.child('sessions').child($sid).child('deck').child('slides').child($slideId).child('type').val() === 'free')"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "check": {
+    "ping": {
+      ".read": true
+    },
+    "$uid": {
+      ".read": "auth != null && auth.uid === $uid",
+      ".write": "auth != null && auth.uid === $uid",
+      ".validate": "newData.isNumber()"
+    }
+  }
+};
+
+test('teachers・sessions・check の規則は変更前の文字列のまま', () => {
+  const r = rules();
+  for (const key of Object.keys(unchangedRules)) assert.deepEqual(r[key], unchangedRules[key], key);
+});
+
 test('規則が JSON として読める', () => {
   assert.doesNotThrow(() => JSON.parse(read('docs/firebase/rules.json')));
 });

@@ -43,8 +43,8 @@ test('routeHash との往復', () => {
 });
 
 test('先生のログインが要る画面', () => {
-  for (const n of ['login', 'join', 'not-found']) assert.equal(needsTeacher(n), false, n);
-  for (const n of ['dashboard', 'editor', 'present', 'history', 'result']) assert.equal(needsTeacher(n), true, n);
+  for (const n of ['login', 'signup', 'join', 'not-found']) assert.equal(needsTeacher(n), false, n);
+  for (const n of ['dashboard', 'editor', 'present', 'history', 'result', 'pending', 'teachers']) assert.equal(needsTeacher(n), true, n);
 });
 
 test('履歴と結果は同じ画面ファイル（history）を使う', () => {
@@ -60,4 +60,13 @@ test('ゴミ箱の道順', () => {
   assert.equal(parseRoute('#/trash/x').name, 'not-found');
   assert.equal(needsTeacher('trash'), true);
   assert.equal(viewFile('trash'), 'trash');
+});
+
+test('登録・承認待ち・管理の道順と画面ファイル', () => {
+  for (const name of ['signup', 'pending', 'teachers']) {
+    assert.equal(routeHash(name), `#/${name}`);
+    assert.deepEqual(parseRoute(routeHash(name)), { name, params: {} });
+    assert.equal(viewFile(name), name);
+    assert.equal(parseRoute(`#/${name}/extra`).name, 'not-found');
+  }
 });

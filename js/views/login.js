@@ -84,7 +84,8 @@ export function mount(root, ctx) {
   root.replaceChildren(el('main', { class: 'center-page' },
     el('h1', { text: 'ClassPulse' }),
     ctx.notice ? el('p', { class: 'notice', role: 'alert', text: ctx.notice }) : null,
-    el('div', { class: 'card' }, form)));
+    el('div', { class: 'card' }, form,
+      el('p', {}, el('a', { href: '#/signup', text: 'はじめて使う先生はこちら' })))));
   email.focus();
   return () => { alive = false; };
 }

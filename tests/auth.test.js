@@ -5,6 +5,76 @@ import { NetError } from '../js/errors.js';
 import { fakeStorage, fakeFetch, fakeClock } from './helpers/fakes.js';
 
 const MIN = 60 * 1000;
+
+test('先生の登録: signUp に本文を送り、ログイン状態と更新用トークンだけを保存する', async () => {
+  const { auth, fetch, storage } = make(() => ({ status: 200, body: {
+    localId: 'NEW', email: 'new@example.com', idToken: 'new-token', refreshToken: 'new-refresh', expiresIn: '3600',
+  } }));
+  const user = await auth.signUpTeacher('new@example.com', 'fake-signup-pass');
+  assert.deepEqual(user, { uid: 'NEW', email: 'new@example.com' });
+  assert.deepEqual(auth.user, user);
+  assert.ok(isSignUp(fetch.calls[0].url));
+  assert.equal(fetch.calls[0].init.method, 'POST');
+  assert.deepEqual(JSON.parse(fetch.calls[0].init.body), { email: 'new@example.com', password: 'fake-signup-pass', returnSecureToken: true });
+  const saved = storage.getItem('classpulse:auth:teacher');
+  assert.doesNotMatch(saved, /password|fake-signup-pass|new-token/);
+  assert.deepEqual(JSON.parse(saved), { uid: 'NEW', email: 'new@example.com', refreshToken: 'new-refresh' });
+  assert.equal(await auth.getToken(), 'new-token');
+});
+
+for (const [message, code] of [
+  ['EMAIL_EXISTS', 'email-exists'], ['INVALID_EMAIL', 'invalid-email'], ['MISSING_EMAIL', 'invalid-email'],
+  ['WEAK_PASSWORD', 'weak-password'], ['WEAK_PASSWORD : Password should be stronger', 'weak-password'],
+  ['OPERATION_NOT_ALLOWED', 'signup-disabled'], ['ADMIN_ONLY_OPERATION', 'signup-disabled'], ['OTHER', 'unknown'],
+]) {
+  test(`先生の登録: ${message} は ${code}`, async () => {
+    const { auth, storage } = make(() => ({ status: 400, body: { error: { message } } }));
+    await assert.rejects(auth.signUpTeacher('new@example.com', 'fake-signup-pass'), (e) => e instanceof NetError && e.code === code);
+    assert.equal(auth.user, null);
+    assert.equal(storage.getItem('classpulse:auth:teacher'), null);
+  });
+}
+
+test('先生の登録: 通信できないと network。サーバーの生のエラー文は残さない', async () => {
+  const offline = make(() => new Error('offline'));
+  await assert.rejects(offline.auth.signUpTeacher('new@example.com', 'fake-signup-pass'), { code: 'network' });
+  const failed = make(() => ({ status: 400, body: { error: { message: 'fake-signup-pass' } } }));
+  await assert.rejects(failed.auth.signUpTeacher('new@example.com', 'fake-signup-pass'), (e) => {
+    assert.equal(e.code, 'unknown');
+    assert.doesNotMatch(e.message + JSON.stringify(e), /fake-signup-pass/);
+    return true;
+  });
+});
+
+test('生徒の auth では先生を登録できず、通信も保存もしない', async () => {
+  const { auth, fetch, storage } = make(() => ({ status: 200, body: {} }), 'student');
+  await assert.rejects(auth.signUpTeacher('new@example.com', 'fake-signup-pass'), { code: 'unknown' });
+  assert.equal(fetch.calls.length, 0);
+  assert.equal(auth.user, null);
+  assert.equal(storage.getItem('classpulse:auth:student'), null);
+});
+
+test('登録中にログアウトしたら、古い応答でログインしない', async () => {
+  const fetch = deferredFetch();
+  const auth = createAuth({ apiKey: 'FAKE_KEY', fetch, storage: fakeStorage(), now: () => 1000, role: 'teacher' });
+  const rejected = assert.rejects(auth.signUpTeacher('new@example.com', 'fake-signup-pass'), { code: 'auth' });
+  auth.signOut();
+  fetch.respond(0, 200, { localId: 'NEW', idToken: 'tok', refreshToken: 'ref', expiresIn: '3600' });
+  await rejected;
+  assert.equal(auth.user, null);
+});
+
+test('登録中に別の人がログインしたら、古い登録の応答で上書きしない', async () => {
+  const fetch = deferredFetch();
+  const auth = createAuth({ apiKey: 'FAKE_KEY', fetch, storage: fakeStorage(), now: () => 1000, role: 'teacher' });
+  const rejected = assert.rejects(auth.signUpTeacher('new@example.com', 'fake-signup-pass'), { code: 'auth' });
+  const login = auth.signInTeacher('b@example.com', 'fake-login-pass');
+  fetch.respond(1, 200, { localId: 'B', idToken: 'tokB', refreshToken: 'refB', expiresIn: '3600' });
+  await login;
+  fetch.respond(0, 200, { localId: 'NEW', idToken: 'tok', refreshToken: 'ref', expiresIn: '3600' });
+  await rejected;
+  assert.deepEqual(auth.user, { uid: 'B', email: 'b@example.com' });
+});
 const isSignIn = (u) => u.includes('accounts:signInWithPassword');
 const isSignUp = (u) => u.includes('accounts:signUp');
 const isToken = (u) => u.includes('securetoken.googleapis.com/v1/token');
