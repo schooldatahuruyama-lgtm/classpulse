@@ -1,6 +1,7 @@
 // 教材（デッキ）のデータ。DOM・通信・グローバルに触れない純粋なモジュール。
 // どの関数も引数を書きかえず、新しい値を返す。
 import { CONFIG } from './config.js';
+import { VIDEO_ID_PATTERN, normalizeVideoStart } from './video.js';
 
 const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
 
@@ -36,6 +37,7 @@ export function createSlide(type) {
   if (type === 'rating') return { type: 'rating', question: '', lowLabel: '', highLabel: '', resultMode: 'manual' };
   if (type === 'free') return { type: 'free', question: '' };
   if (type === 'cloud') return { type: 'cloud', question: '' };
+  if (type === 'video') return { type: 'video', videoId: '', start: 0, caption: '' };
   return { type: 'content', items: [] };
 }
 
@@ -373,6 +375,14 @@ function cutText(v, max) {
 
 function normalizeSlide(raw) {
   const s = plainObject(raw);
+  if (s.type === 'video') {
+    return {
+      type: 'video',
+      videoId: typeof s.videoId === 'string' && s.videoId.length === 11 && VIDEO_ID_PATTERN.test(s.videoId) ? s.videoId : '',
+      start: normalizeVideoStart(s.start),
+      caption: cutText(s.caption, CONFIG.video.captionMaxLength),
+    };
+  }
   if (s.type === 'poll') {
     return {
       ...s,
@@ -440,6 +450,10 @@ export function validateDeck(deck) {
   const problems = [];
   deck.order.forEach((id, i) => {
     const s = deck.slides[id];
+    if (s && s.type === 'video') {
+      if (!normalizeSlide(s).videoId) problems.push(`${i + 1} 枚目: 動画の URL を入れてください。`);
+      return;
+    }
     if (!s || (!isChoiceSlide(s) && s.type !== 'free' && s.type !== 'cloud')) return;
     const n = `${i + 1} 枚目`;
     // 自由記述・ワードクラウド・評価は質問文だけを確かめる（評価の選択肢は 1〜5 で決まっている）

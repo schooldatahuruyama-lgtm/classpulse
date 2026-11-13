@@ -3,6 +3,7 @@ import { el } from '../../ui.js';
 import { TEXT_COLORS, OPTION_MARKS, SHAPE_NAMES } from '../../slide-render.js';
 import { CONFIG } from '../../config.js';
 import { removeOption as withoutOption, quizCorrect, normalizeShapeItem } from '../../model.js';
+import { parseYouTubeUrl, youTubeWatchUrl, formatVideoStart } from '../../video.js';
 
 const SIZES = [
   { value: 's', label: '小' },
@@ -228,6 +229,37 @@ export function renderFreeSettings(host, ed) {
 // ワードクラウドの右の列（質問文だけ）
 export function renderCloudSettings(host, ed) {
   renderQuestionSettings(host, ed, 'ワードクラウドの設定', CLOUD_NOTE);
+}
+
+// 入力した URL は欄の中だけに持つ。保存するのは読み取れた ID と開始秒だけ。
+export function renderVideoSettings(host, ed) {
+  const slide = ed.currentSlide();
+  const status = el('p', { id: 'ed-video-status', class: 'small', role: 'status' });
+  const updateStatus = (parsed) => {
+    const invalid = url.value.trim() !== '' && !parsed;
+    status.setAttribute('role', invalid ? 'alert' : 'status');
+    status.textContent = invalid ? 'YouTube の動画の URL を入れてください。'
+      : parsed ? `動画を読み取りました。${parsed.start > 0 ? `${formatVideoStart(parsed.start)}から始めます。` : ''}` : '';
+  };
+  const url = el('input', {
+    id: 'ed-video-url', type: 'text', inputmode: 'url', value: youTubeWatchUrl(slide),
+    'aria-describedby': 'ed-video-status',
+    oninput: () => {
+      const parsed = parseYouTubeUrl(url.value);
+      ed.patchSlide(parsed || { videoId: '', start: 0 });
+      updateStatus(parsed);
+    },
+  });
+  const caption = el('input', {
+    id: 'ed-video-caption', type: 'text', maxlength: String(CONFIG.video.captionMaxLength), value: slide.caption || '',
+    oninput: () => ed.patchSlide({ caption: caption.value }),
+  });
+  updateStatus(parseYouTubeUrl(url.value));
+  host.replaceChildren(
+    el('h2', { class: 'ed-col-title', text: '動画の設定' }),
+    el('div', { class: 'field' }, el('label', { class: 'label', for: 'ed-video-url', text: 'YouTube の URL' }), url, status),
+    el('div', { class: 'field' }, el('label', { class: 'label', for: 'ed-video-caption', text: '題（生徒の画面に出ます。省略できます）' }), caption),
+    el('p', { class: 'ed-note', text: '動画は、発表の画面（教室の画面）で再生します。生徒の端末では再生しません。学校のネットワークで YouTube が見られないときは、使えません。' }));
 }
 
 // アンケート・クイズの中央（質問文と選択肢。クイズは選択肢ごとに「正解」を選ぶ所も）
