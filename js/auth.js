@@ -176,6 +176,30 @@ export function createAuth({ apiKey, fetch, storage, now, role }) {
   }
 
   return {
+    async signUpTeacher(email, password) {
+      if (role !== 'teacher') throw new NetError('unknown', '生徒の auth では使えません');
+      const g = gen;
+      let body;
+      try {
+        body = await postJson('accounts:signUp', { email, password, returnSecureToken: true });
+      } catch (e) {
+        const m = String(e && e.firebaseMessage || '');
+        let code = 'unknown';
+        if (m === 'EMAIL_EXISTS') code = 'email-exists';
+        else if (m === 'INVALID_EMAIL' || m === 'MISSING_EMAIL') code = 'invalid-email';
+        else if (m.startsWith('WEAK_PASSWORD')) code = 'weak-password';
+        else if (m === 'OPERATION_NOT_ALLOWED' || m === 'ADMIN_ONLY_OPERATION') code = 'signup-disabled';
+        else if (e && e.code === 'network') code = 'network';
+        // サーバーの生のエラー文は残さない（入力の内容が含まれる場合がある）
+        throw new NetError(code, '登録できませんでした');
+      }
+      assertCurrent(g);
+      parseBody(body);
+      bumpGen();
+      adopt(body, body.email ?? email);
+      return { ...user };
+    },
+
     async signInTeacher(email, password) {
       const g = gen;
       const body = await postJson('accounts:signInWithPassword', { email, password, returnSecureToken: true });

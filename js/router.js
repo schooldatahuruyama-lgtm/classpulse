@@ -1,7 +1,7 @@
 // ハッシュ（#/...）と画面名の対応。ブラウザの物は使わない
-const SIMPLE = { login: '#/login', history: '#/history', trash: '#/trash', dashboard: '#/' };
+const SIMPLE = { login: '#/login', signup: '#/signup', pending: '#/pending', teachers: '#/teachers', history: '#/history', trash: '#/trash', dashboard: '#/' };
 const WITH_ID = { editor: ['edit', 'deckId'], present: ['present', 'sid'], join: ['join', 'sid'], result: ['history', 'sid'] };
-const PUBLIC = ['login', 'join', 'not-found'];
+const PUBLIC = ['login', 'signup', 'join', 'not-found'];
 
 const NOT_FOUND = () => ({ name: 'not-found', params: {} });
 
@@ -20,9 +20,7 @@ export function parseRoute(hash) {
   const [head, id, ...rest] = parts;
   if (rest.length > 0) return NOT_FOUND();
   if (id === undefined) {
-    if (head === 'login') return { name: 'login', params: {} };
-    if (head === 'history') return { name: 'history', params: {} };
-    if (head === 'trash') return { name: 'trash', params: {} };
+    if (Object.hasOwn(SIMPLE, head) && head !== 'dashboard') return { name: head, params: {} };
     return NOT_FOUND();
   }
   const found = Object.entries(WITH_ID).find(([, [seg]]) => seg === head);
@@ -44,6 +42,7 @@ export function routeHash(name, params = {}) {
 const VIEW_FILES = {
   login: 'login', dashboard: 'dashboard', editor: 'editor', present: 'present',
   history: 'history', result: 'history', join: 'student', trash: 'trash',
+  signup: 'signup', pending: 'pending', teachers: 'teachers',
 };
 
 export function viewFile(name) {

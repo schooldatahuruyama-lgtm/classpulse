@@ -69,7 +69,14 @@ async function start() {
   let restored = false;
   let shownHash = null; // 今の画面のハッシュ（まだ何も出していなければ null）
   const teardown = () => { if (cleanup) { try { cleanup(); } catch (e) { console.error(e); } cleanup = null; } };
-  let notice = '';
+  let adminUid = null;
+  let adminCheck = null; // 同じ人の確認は、通信中も含めて 1 回にまとめる
+
+  function adminFor(uid, repo) {
+    if (adminUid !== uid) { adminUid = uid; adminCheck = null; }
+    if (!adminCheck) adminCheck = repo.isAdmin();
+    return adminCheck;
+  }
 
   // 画面を移して、その描き直しが終わったら結果（'offline' など）を返す
   function navigate(name, params = {}) {
@@ -106,8 +113,9 @@ async function start() {
   }
 
   // 先生用の骨組み（左のナビゲーションと本体。幅が狭いときは上のメニュー）
-  function buildShell(current) {
-    const links = NAV.map((n) => el('a', {
+  function buildShell(current, isAdmin) {
+    const navItems = isAdmin ? [...NAV, { name: 'teachers', label: '先生の管理' }] : NAV;
+    const links = navItems.map((n) => el('a', {
       class: 'shell-link', href: routeHash(n.name), text: n.label, 'aria-current': n.name === current ? 'page' : false,
     }));
     const main = el('main', { class: 'shell-main' });
@@ -117,7 +125,7 @@ async function start() {
       el('div', { class: 'shell-spacer' }),
       el('button', {
         type: 'button', class: 'btn shell-logout', text: 'ログアウト',
-        onclick: () => { teacherAuth.signOut(); navigate('login'); },
+        onclick: () => { teacherAuth.signOut(); adminUid = null; adminCheck = null; navigate('login'); },
       }));
     appRoot.replaceChildren(el('div', { class: 'shell' }, nav, main));
     return main;
@@ -164,7 +172,9 @@ async function start() {
 
     // 先生の画面へ移るたびに、先生として登録されているかを確かめ直す
     const checkUser = teacherAuth.user;
-    const { verdict: access, uid: checkedUid } = await checkTeacherAccess({ auth: teacherAuth, repo: checkUser ? createRepo(backend.net, checkUser.uid) : null });
+    if (adminUid !== (checkUser ? checkUser.uid : null)) { adminUid = null; adminCheck = null; }
+    const repo = checkUser ? createRepo(backend.net, checkUser.uid) : undefined;
+    const { verdict: access, uid: checkedUid } = await checkTeacherAccess({ auth: teacherAuth, repo });
     if (stale()) return;
     // 確認している間に別の人に替わっていたら、その古い結果は使わない（ログアウトもしない）
     if (!isStillUser(teacherAuth, checkedUid)) { render(); return; }
@@ -177,28 +187,38 @@ async function start() {
       }
       return 'offline';
     }
-    if (access === 'not-teacher') {
-      teacherAuth.signOut();
-      notice = 'このアカウントは ClassPulse の先生として登録されていません。';
-    }
-    const user = access === 'ok' ? teacherAuth.user : null;
+    // 使えないことが確定したら、先に古い画面を片づける。ログイン状態は保つ
     teardown();
+    let destination = route.name;
+    if (access === 'pending' || access === 'suspended') destination = 'pending';
+    else if (access === 'signed-out' && needsTeacher(route.name)) destination = 'login';
+    else if (access === 'ok' && ['login', 'signup', 'pending'].includes(route.name)) destination = 'dashboard';
+    if (destination !== route.name) {
+      route.name = destination;
+      route.params = {};
+      history.replaceState(null, '', routeHash(destination));
+    }
     shownHash = location.hash;
-
-    if (!user && needsTeacher(route.name)) { location.hash = routeHash('login'); return; } // hashchange で描き直す
-    if (user && route.name === 'login') { navigate('dashboard'); return; }
-
-    showLoading(route.name !== 'login');
+    const standalone = ['login', 'signup', 'pending'].includes(route.name);
+    showLoading(!standalone);
+    const isAdmin = access === 'ok' ? await adminFor(checkedUid, repo) : false;
+    if (stale()) return;
+    if (!isStillUser(teacherAuth, checkedUid)) { render(); return; }
     const view = await loadView(route.name);
     if (stale()) return;
-    const repo = user ? createRepo(backend.net, user.uid) : undefined;
+    if (!isStillUser(teacherAuth, checkedUid)) { render(); return; }
     const ctx = { net: backend.net, auth: teacherAuth, repo, navigate, params: route.params, storage: window.localStorage };
-    if (route.name === 'login') {
-      ctx.notice = notice;
-      notice = '';
+    if (route.name === 'signup') {
+      ctx.requestAccess = async (email, uid) => {
+        if (!isStillUser(teacherAuth, uid)) return;
+        await createRepo(backend.net, uid).requestAccess(email);
+      };
+    }
+    if (route.name === 'pending') ctx.status = access;
+    if (standalone) {
       cleanup = view ? view.mount(appRoot, ctx) : placeholder(appRoot);
     } else {
-      const main = buildShell(route.name);
+      const main = buildShell(route.name, isAdmin);
       cleanup = view ? view.mount(main, ctx) : placeholder(main);
     }
   }
