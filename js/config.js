@@ -38,5 +38,6 @@ export const CONFIG = {
   sessionIdLength: 22,
   tokenRefreshMarginMs: 300000,
   googleLogin: { maxAgeMs: 600000, storageKey: 'classpulse:google-login' },
+  driveExport: { maxAgeMs: 600000, storageKey: 'classpulse:drive-export', scope: 'https://www.googleapis.com/auth/drive.file', tokenMarginMs: 60000 },
   reconnectDelayMs: 3000,
 };

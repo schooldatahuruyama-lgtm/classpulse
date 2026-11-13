@@ -11,6 +11,7 @@ import { createRepo } from '../js/repo.js';
 import { checkTeacherAccess, isStillUser } from '../js/guard.js';
 import { parseRoute, routeHash, needsTeacher, viewFile } from '../js/router.js';
 import { fakeStorage, fakeFetch } from './helpers/fakes.js';
+import { createDriveExport } from '../js/drive-export.js';
 import {
   randomToken, buildGoogleAuthUrl, redirectUriFrom, parseGoogleCallback, jwtPayload,
   checkGoogleCallback, handleGoogleCallback, createGoogleLogin,
@@ -310,13 +311,18 @@ test('ログイン画面は戻りの notice を表示する', () => {
 });
 
 // main.js から認証・入口の確認まで動かす。通信・DOM・画面の読みこみだけを代役にする。
-async function mainHarness({ hash = HASH, clientId = 'fake-client', demo = false, approved, response } = {}) {
+async function mainHarness({ hash = HASH, clientId = 'fake-client', demo = false, approved, response, driveSaved, loginSaved = SAVED, signedIn = false } = {}) {
   const events = [];
   const storage = fakeStorage();
   const sessionStorage = fakeStorage();
-  sessionStorage.setItem(KEY, JSON.stringify(SAVED));
+  if (loginSaved) sessionStorage.setItem(KEY, JSON.stringify(loginSaved));
+  if (driveSaved) sessionStorage.setItem(CONFIG.driveExport.storageKey, JSON.stringify(driveSaved));
+  if (signedIn) storage.setItem('classpulse:auth:teacher', JSON.stringify({ uid: 'GOOGLE', email: 'teacher@example.test', refreshToken: 'fake-refresh' }));
   const fetch = fakeFetch((url) => {
     events.push('fetch');
+    if (signedIn && url.includes('securetoken.googleapis.com')) return { status: 200, body: {
+      user_id: 'GOOGLE', id_token: 'fake-firebase-token', refresh_token: 'fake-refresh', expires_in: '3600',
+    } };
     assert.ok(url.includes('accounts:signInWithIdp'), 'ログイン直後は restore の通信をしない');
     return response || { status: 200, body: {
       localId: 'GOOGLE', email: 'google@example.com', idToken: 'fake-firebase-token', refreshToken: 'fake-refresh', expiresIn: '3600',
@@ -335,7 +341,10 @@ async function mainHarness({ hash = HASH, clientId = 'fake-client', demo = false
   const mounted = [];
   const sandbox = {
     document: { getElementById: (id) => id === 'app' ? app : banner }, location,
-    history: { replaceState: (_, __, next) => { events.push('replace'); location.hash = next; } },
+    history: {
+      replaceState: (_, __, next) => { events.push('replace'); location.hash = next; },
+      pushState: (_, __, next) => { location.hash = next; },
+    },
     window: { localStorage: storage, sessionStorage, fetch, addEventListener: () => {} },
     FIREBASE: { apiKey: 'FAKE_KEY', databaseURL: 'https://db.example.test', googleClientId: clientId },
     Date: { now: () => 1001 }, console,
@@ -343,7 +352,7 @@ async function mainHarness({ hash = HASH, clientId = 'fake-client', demo = false
     createDemoBackend: () => ({ net, teacherAuth, studentAuth }),
     createAuth: ({ role }) => role === 'teacher' ? teacherAuth : studentAuth,
     createNet: () => net, createRepo, checkTeacherAccess, isStillUser,
-    handleGoogleCallback, createGoogleLogin,
+    handleGoogleCallback, createGoogleLogin, parseGoogleCallback, createDriveExport,
     parseRoute: (value) => { events.push('route'); return parseRoute(value); }, routeHash, needsTeacher, viewFile,
     el, toast: () => {}, confirmDialog: async () => false,
     loadTestView: async (name) => ({ mount: (_, ctx) => { mounted.push({ name, ctx }); return () => {}; } }),
@@ -405,4 +414,70 @@ test('起動: Google が有効でも生徒の参加 URL はそのまま開き、
   assert.equal(h.location.hash, '#/join/xyz');
   assert.equal(h.fetch.calls.length, 0);
   assert.deepEqual(JSON.parse(h.sessionStorage.getItem(KEY)), SAVED);
+});
+
+const DRIVE_SAVED = { state: 'drive-state', sid: 'lesson-1', at: 1000 };
+const DRIVE_HASH = '#access_token=fake-drive-token&token_type=Bearer&expires_in=3600&state=drive-state';
+
+test('起動: Drive の成功は Google ログインに渡さず、先生のログインを戻して該当の結果を開く', async () => {
+  const h = await mainHarness({ hash: DRIVE_HASH, driveSaved: DRIVE_SAVED, signedIn: true, approved: true });
+  assert.equal(h.location.hash, '#/history/lesson-1');
+  assert.equal(h.mounted[0].name, 'result');
+  assert.equal(h.mounted[0].ctx.driveExport.hasToken(), true);
+  assert.equal(h.mounted[0].ctx.driveExport.takePending('other'), false);
+  assert.equal(h.mounted[0].ctx.driveExport.takePending('lesson-1'), true);
+  assert.equal(h.mounted[0].ctx.driveExport.takePending('lesson-1'), false);
+  assert.deepEqual(JSON.parse(h.sessionStorage.getItem(KEY)), SAVED);
+  assert.equal(h.sessionStorage.getItem(CONFIG.driveExport.storageKey), null);
+  assert.equal(h.fetch.calls.length, 1);
+  assert.ok(h.fetch.calls[0].url.includes('securetoken.googleapis.com'));
+});
+
+test('起動: Drive の保存があっても ID トークンは Google ログインが処理する', async () => {
+  const h = await mainHarness({ driveSaved: DRIVE_SAVED, approved: true });
+  assert.equal(h.mounted[0].name, 'dashboard');
+  assert.equal(h.mounted[0].ctx.driveExport.hasToken(), false);
+  assert.deepEqual(JSON.parse(h.sessionStorage.getItem(CONFIG.driveExport.storageKey)), DRIVE_SAVED);
+  assert.equal(h.sessionStorage.getItem(KEY), null);
+});
+
+test('起動: Drive の取り消しの知らせは、結果・履歴の画面に 1 回だけ渡す', async () => {
+  const h = await mainHarness({ hash: '#error=access_denied&state=drive-state', driveSaved: DRIVE_SAVED, signedIn: true, approved: true });
+  const ctx = h.mounted[0].ctx;
+  assert.equal(h.mounted[0].name, 'result');
+  assert.equal(ctx.driveNotice, 'Google ドライブへの保存をやめました。');
+  assert.equal(ctx.notice, undefined);
+  assert.equal(ctx.driveExport.hasToken(), false);
+  await ctx.navigate('history');
+  assert.equal(h.mounted.at(-1).ctx.driveNotice, undefined);
+});
+
+test('起動: 保存がない Drive の戻りは履歴の画面で知らせ、ログインの失敗と混同しない', async () => {
+  const h = await mainHarness({ hash: DRIVE_HASH, signedIn: true, approved: true });
+  assert.equal(h.mounted[0].name, 'history');
+  assert.equal(h.mounted[0].ctx.driveNotice, 'Google ドライブへの保存を確かめられませんでした。もう一度ためしてください。');
+  assert.equal(h.mounted[0].ctx.driveExport.hasToken(), false);
+  assert.ok(h.sessionStorage.getItem(KEY));
+});
+
+test('起動: error がログインの state と合う・どちらにも合わないときは従来のログインの失敗にする', async () => {
+  for (const [state, loginSaved] of [[SAVED.state, SAVED], ['unknown', SAVED], ['unknown', null]]) {
+    const h = await mainHarness({ hash: `#error=invalid_request&state=${state}`, driveSaved: DRIVE_SAVED, loginSaved });
+    assert.equal(h.mounted[0].name, 'login');
+    assert.equal(h.mounted[0].ctx.notice, MISMATCH);
+    assert.equal(h.mounted[0].ctx.driveNotice, undefined);
+    assert.deepEqual(JSON.parse(h.sessionStorage.getItem(CONFIG.driveExport.storageKey)), DRIVE_SAVED);
+    assert.equal(h.location.hash, '#/login');
+  }
+});
+
+test('起動: 設定なし・練習モードは Drive のトークンの戻りも処理しない', async () => {
+  for (const options of [{ clientId: '' }, { demo: true }]) {
+    const h = await mainHarness({ ...options, hash: DRIVE_HASH, driveSaved: DRIVE_SAVED });
+    assert.equal(h.location.hash, DRIVE_HASH);
+    assert.equal(h.fetch.calls.length, 0);
+    assert.deepEqual(JSON.parse(h.sessionStorage.getItem(CONFIG.driveExport.storageKey)), DRIVE_SAVED);
+    const screen = await mainHarness({ ...options, hash: '#/login' });
+    assert.equal(screen.mounted[0].ctx.driveExport, null);
+  }
 });

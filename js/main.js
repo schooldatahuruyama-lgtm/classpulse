@@ -7,7 +7,8 @@ import { parseRoute, routeHash, needsTeacher, viewFile } from './router.js';
 import { isDemoAllowed, createDemoBackend } from './dev/demo.js';
 import { el, confirmDialog, toast } from './ui.js';
 import { checkTeacherAccess, isStillUser } from './guard.js';
-import { handleGoogleCallback, createGoogleLogin } from './google-login.js';
+import { handleGoogleCallback, createGoogleLogin, parseGoogleCallback } from './google-login.js';
+import { createDriveExport } from './drive-export.js';
 
 const appRoot = document.getElementById('app');
 const bannerRoot = document.getElementById('banner');
@@ -72,11 +73,26 @@ async function start() {
     auth: teacherAuth, now: () => Date.now(),
     getRandomValues: (bytes) => window.crypto.getRandomValues(bytes),
     assign: (url) => location.assign(url),
+    fetch: (...args) => window.fetch(...args),
+    getLoginHint: () => teacherAuth.user?.email,
   };
   const googleEnabled = !!FIREBASE.googleClientId && !backend.demo;
-  const callback = googleEnabled ? await handleGoogleCallback(googleDeps) : { handled: false };
+  // error は両方の認可で使う。先に URL を消す Drive の判定後も、ログインへ渡せる形で読む。
+  // access_token のハッシュは控えず、ログイン用の error・state だけを引き継ぐ。
+  const loginCallback = googleEnabled ? parseGoogleCallback(location.hash) : null;
+  const driveExport = googleEnabled ? createDriveExport(googleDeps) : null;
+  const driveCallback = driveExport ? driveExport.handleCallback() : { handled: false };
+  const loginDeps = Object.create(googleDeps);
+  if (loginCallback && 'error' in loginCallback) {
+    loginDeps.location = {
+      origin: location.origin, pathname: location.pathname,
+      hash: `#error=${encodeURIComponent(loginCallback.error)}${loginCallback.state === null ? '' : '&state=' + encodeURIComponent(loginCallback.state)}`,
+    };
+  }
+  const callback = googleEnabled && !driveCallback.handled ? await handleGoogleCallback(loginDeps) : { handled: false };
   const googleLogin = googleEnabled ? createGoogleLogin(googleDeps) : null;
   let notice = callback.notice;
+  let driveNotice = driveCallback.notice;
   let cleanup = null;
   let renderId = 0;
   let restored = callback.handled && !callback.notice; // Google で入った直後は更新用トークンで戻し直さない
@@ -220,8 +236,9 @@ async function start() {
     const view = await loadView(route.name);
     if (stale()) return;
     if (!isStillUser(teacherAuth, checkedUid)) { render(); return; }
-    const ctx = { net: backend.net, auth: teacherAuth, repo, navigate, params: route.params, storage: window.localStorage, googleLogin };
+    const ctx = { net: backend.net, auth: teacherAuth, repo, navigate, params: route.params, storage: window.localStorage, googleLogin, driveExport };
     if (route.name === 'login') ctx.notice = notice;
+    if (route.name === 'history' || route.name === 'result') ctx.driveNotice = driveNotice;
     if (route.name === 'signup') {
       ctx.requestAccess = async (email, uid) => {
         if (!isStillUser(teacherAuth, uid)) return;
@@ -235,6 +252,7 @@ async function start() {
     } else {
       const main = buildShell(route.name, isAdmin);
       cleanup = view ? view.mount(main, ctx) : placeholder(main);
+      if (view && (route.name === 'history' || route.name === 'result')) driveNotice = undefined;
     }
   }
 
