@@ -15,7 +15,7 @@ function toArray(v) {
   return [];
 }
 
-export function createSessionClient({ net, auth, storage, sid, onChange }) {
+export function createSessionClient({ net, auth, storage, sid, onChange, setTimeout: setTimer = globalThis.setTimeout, clearTimeout: clearTimer = globalThis.clearTimeout, random = Math.random }) {
   const pubPath = `sessions/${sid}/pub`;
   // 一時保存の鍵は授業と生徒の ID の組（同じ保存先を共有する別の ID の回答が見えないように）。画面には出さない
   const okey = () => `${sid}:${uid}`;
@@ -30,6 +30,10 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
   let selected = null;
   let phase = 'loading';
   let connection = 'connected';
+  let retrying = 0;
+  let retryTimer = null;
+  let finishWait = null;
+  let starting = null;
 
   // 拒否されたあとの再送は、受付中のまま拒否され続けても無限に繰り返さない
   const openRetried = new Set();
@@ -219,6 +223,7 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
       // この授業で、届いたか確かめられなかった回答の数（今のスライドや、教材を読めたかによらない）
       unconfirmedCount: uid ? outbox.unconfirmedCount(okey()) : 0,
     };
+    if (retrying) base.retrying = retrying;
     if (!pub || !deck) return base;
     const cur = pub.current || {};
     const index = Number.isInteger(cur.index) ? cur.index : -1;
@@ -304,10 +309,8 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
 
   async function join() {
     if (joined || stopped) return;
-    try {
-      await net.set(`sessions/${sid}/inbox/participants/${uid}`, net.serverTimestamp());
-      joined = true;
-    } catch { /* つながったときにもう一度試す */ }
+    await net.set(`sessions/${sid}/inbox/participants/${uid}`, net.serverTimestamp());
+    if (!stopped) joined = true;
   }
 
   function onStatus(status) {
@@ -315,7 +318,7 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
     connection = status === 'connected' ? 'connected' : 'disconnected';
     emit();
     if (connection === 'connected') {
-      join();
+      join().catch(() => {}); // 参加の書きこみに失敗していたら、接続時に試す
       reconcile();
       flush();
     }
@@ -338,29 +341,68 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
     emit();
   }
 
-  return {
-    async start() {
-      phase = 'loading';
-      emit();
+  // 待ちを取り消したときも start() を完了させる。離れた画面の処理を残さない
+  function waitRetry(ms) {
+    return new Promise((resolve) => {
+      finishWait = resolve;
+      retryTimer = setTimer(() => {
+        retryTimer = null;
+        finishWait = null;
+        resolve();
+      }, ms);
+    });
+  }
+
+  async function start() {
+    retrying = 0;
+    phase = 'loading';
+    emit();
+    while (!stopped) {
       try {
-        uid = (await auth.signInAnonymous()).uid;
+        // 書きこみの応答だけが失われても、同じ ID に参加を書いて二重に数えない
+        if (!uid) uid = (await auth.signInAnonymous()).uid;
+        if (stopped) return;
         const first = await net.get(pubPath);
         if (stopped) return;
-        if (first === null || typeof first !== 'object') { phase = 'not-found'; emit(); return; }
-        if (first.state === 'ended') { pub = first; phase = 'ended'; markEnded(); emit(); return; }
-        const rawDeck = await net.get(`sessions/${sid}/deck`);
+        if (first === null || typeof first !== 'object') { retrying = 0; phase = 'not-found'; emit(); return; }
+        if (first.state === 'ended') { retrying = 0; pub = first; phase = 'ended'; markEnded(); emit(); return; }
+        if (!deck) {
+          const rawDeck = await net.get(`sessions/${sid}/deck`);
+          if (stopped) return;
+          if (rawDeck === null) throw new NetError('unknown', '教材が見つかりません');
+          // クイズの写しに正解は無いが、正したときに足される既定の correct も外す（画面に正解らしい値を渡さない）
+          deck = withoutCorrect(normalizeDeck(rawDeck));
+        }
+        await join().catch(() => {}); // 失敗しても受信を始め、つながったときにもう一度試す
         if (stopped) return;
-        if (rawDeck === null) throw new NetError('unknown', '教材が見つかりません');
-        // クイズの写しに正解は無いが、正したときに足される既定の correct も外す（画面に正解らしい値を渡さない）
-        deck = withoutCorrect(normalizeDeck(rawDeck));
-        await join();
+      } catch (e) {
         if (stopped) return;
-      } catch {
-        if (!stopped) { phase = 'error'; emit(); }
-        return;
+        const retryable = e instanceof NetError && (e.code === 'network' || e.code === 'unknown');
+        if (!retryable || retrying >= CONFIG.joinRetry.delaysMs.length) {
+          retrying = 0;
+          phase = 'error';
+          emit();
+          return;
+        }
+        const delay = CONFIG.joinRetry.delaysMs[retrying] + random() * CONFIG.joinRetry.jitterMs;
+        retrying += 1;
+        emit();
+        if (stopped) return;
+        await waitRetry(delay);
+        continue;
       }
+      retrying = 0;
       unsubscribe = net.subscribe(pubPath, onPub, onStatus);
       if (stopped && unsubscribe) { unsubscribe(); unsubscribe = null; }
+      return;
+    }
+  }
+
+  return {
+    start() {
+      if (stopped || unsubscribe) return Promise.resolve();
+      if (!starting) starting = start().finally(() => { starting = null; });
+      return starting;
     },
 
     select(choice) {
@@ -439,6 +481,8 @@ export function createSessionClient({ net, auth, storage, sid, onChange }) {
 
     stop() {
       stopped = true;
+      if (retryTimer !== null) { clearTimer(retryTimer); retryTimer = null; }
+      if (finishWait) { finishWait(); finishWait = null; }
       if (unsubscribe) { unsubscribe(); unsubscribe = null; }
     },
   };

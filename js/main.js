@@ -9,6 +9,7 @@ import { el, confirmDialog, toast } from './ui.js';
 import { checkTeacherAccess, isStillUser } from './guard.js';
 import { handleGoogleCallback, createGoogleLogin, parseGoogleCallback } from './google-login.js';
 import { createDriveExport } from './drive-export.js';
+import { shouldRegister, shouldWake, warmupUrls } from './sw-logic.js';
 
 const appRoot = document.getElementById('app');
 const bannerRoot = document.getElementById('banner');
@@ -65,6 +66,53 @@ async function start() {
   const backend = await createBackend();
   if (!backend) { showMessage('Firebase の設定がまだ入っていません。'); return; }
   if (backend.demo) showDemoBanner(backend);
+
+  // 読みこみが済んでから、復帰の監視とオフライン用の部品の保存を始める
+  const onLoad = () => {
+    const wake = (event) => {
+      if (!shouldWake({ type: event.type, persisted: event.persisted, visibilityState: document.visibilityState })) return;
+      for (const net of new Set([backend.net, backend.studentNet])) {
+        if (typeof net.wake === 'function') net.wake();
+      }
+    };
+    window.addEventListener('online', wake);
+    window.addEventListener('pageshow', wake);
+    document.addEventListener('visibilitychange', wake);
+    if (shouldRegister({ protocol: location.protocol, hostname: location.hostname, demo: !!backend.demo, hasServiceWorker: 'serviceWorker' in navigator })) {
+      const serviceWorker = navigator.serviceWorker;
+      const needsWarmup = !serviceWorker.controller;
+      serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(async () => {
+        if (!needsWarmup) return;
+        await serviceWorker.ready;
+        if (!serviceWorker.controller) {
+          const controlled = await new Promise((resolve) => {
+            const finish = (value) => {
+              clearTimeout(timer);
+              serviceWorker.removeEventListener('controllerchange', onControllerChange);
+              resolve(value);
+            };
+            const onControllerChange = () => { if (serviceWorker.controller) finish(true); };
+            const timer = setTimeout(() => finish(false), 10000);
+            serviceWorker.addEventListener('controllerchange', onControllerChange);
+            onControllerChange();
+          });
+          if (!controlled) return;
+        }
+        const urls = warmupUrls({ href: location.href, origin: location.origin, entries: performance.getEntriesByType('resource') });
+        // 最初の読みこみは worker を通っていないので、受け持たれてから 4 個ずつ取り直す
+        for (let i = 0; i < urls.length; i += 4) {
+          await Promise.all(urls.slice(i, i + 4).map(async (url) => {
+            try {
+              const response = await fetch(url);
+              await response.arrayBuffer();
+            } catch { /* 保存できなかった部品は、次の読みこみで試す */ }
+          }));
+        }
+      }).catch(() => {});
+    }
+  };
+  if (document.readyState === 'complete') onLoad();
+  else window.addEventListener('load', onLoad, { once: true });
 
   const { teacherAuth, studentAuth } = backend;
   const googleDeps = {
