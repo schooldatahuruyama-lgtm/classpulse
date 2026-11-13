@@ -11,14 +11,24 @@ import { formatDateTime } from '../format.js';
 import { routeHash } from '../router.js';
 import { correctRate } from '../session-logic.js';
 import { ratingOptions } from '../model.js';
+import { historyToCsv, exportFileName } from '../results-csv.js';
 
 const UNTITLED = '無題の教材';
 const MSG_LOAD_FAILED = '読みこめませんでした。';
+const DRIVE_ERRORS = {
+  'drive-auth': 'Google の確認が切れました。もう一度「Google ドライブに保存」を押してください。',
+  'drive-denied': 'Google ドライブに保存できませんでした。Drive の設定（Google Drive API）が有効になっているか、管理者の先生に確かめてください。',
+  network: '通信できませんでした。接続を確かめて、もう一度押してください。',
+  'drive-failed': 'Google ドライブに保存できませんでした。',
+};
 
 export function mount(root, ctx) {
   let alive = true;
   let busy = false;
   const sid = ctx.params && ctx.params.sid;
+  const driveNotice = ctx.driveNotice ? el('p', {
+    class: 'notice', role: ctx.driveNotice === 'Google ドライブへの保存をやめました。' ? 'status' : 'alert', text: ctx.driveNotice,
+  }) : null;
 
   const page = el('div', { class: 'hist' });
   root.replaceChildren(page);
@@ -28,7 +38,7 @@ export function mount(root, ctx) {
   }
 
   function failure(retry) {
-    page.replaceChildren(el('div', { class: 'notice', role: 'alert' },
+    page.replaceChildren(...(driveNotice ? [driveNotice] : []), el('div', { class: 'notice', role: 'alert' },
       el('p', { text: MSG_LOAD_FAILED }),
       el('button', { type: 'button', class: 'btn btn-primary', text: 'もう一度', onclick: () => { if (!alive) return; loading(); retry(); } })));
   }
@@ -39,6 +49,7 @@ export function mount(root, ctx) {
   function renderList(items) {
     page.replaceChildren(
       el('h1', { class: 'hist-h1', text: '授業履歴' }),
+      ...(driveNotice ? [driveNotice] : []),
       items.length
         ? el('ul', { class: 'hist-list' }, items.map((h) => el('li', {},
           el('a', { class: 'hist-item card', href: routeHash('result', { sid: h.sid }) },
@@ -57,6 +68,54 @@ export function mount(root, ctx) {
   }
 
   // ---- 結果 ----
+  function exportControls(h) {
+    let saving = false;
+    const message = el('div', { class: 'hist-export-message' }, driveNotice);
+    const show = (text, error = false, link = null) => {
+      message.replaceChildren(el('div', { class: 'notice', role: error ? 'alert' : 'status' },
+        el('p', { text }), link ? el('a', { href: link, target: '_blank', rel: 'noopener', text: 'スプレッドシートを開く' }) : null));
+    };
+    const download = el('button', { type: 'button', class: 'btn', text: 'CSV をダウンロード', onclick: () => {
+      if (!alive || saving) return;
+      let url;
+      let anchor;
+      try {
+        url = URL.createObjectURL(new Blob([historyToCsv(h, { bom: true })], { type: 'text/csv;charset=utf-8' }));
+        anchor = el('a', { href: url, download: exportFileName(h) + '.csv', hidden: true });
+        page.append(anchor);
+        anchor.click();
+      } catch {
+        show('CSV をダウンロードできませんでした。もう一度ためしてください。', true);
+      } finally {
+        if (anchor) anchor.remove();
+        if (url) URL.revokeObjectURL(url);
+      }
+    } });
+    const drive = ctx.driveExport ? el('button', { type: 'button', class: 'btn', text: 'Google ドライブに保存', onclick: () => save() }) : null;
+    const disable = (value) => { saving = value; download.disabled = value; if (drive) drive.disabled = value; };
+    async function save(automatic = false) {
+      if (!alive || saving || !ctx.driveExport) return;
+      disable(true);
+      show('保存しています…');
+      try {
+        if (!automatic && !ctx.driveExport.hasToken()) {
+          ctx.driveExport.begin(sid);
+          return; // ページが移るまで、連打を受けつけない
+        }
+        const result = await ctx.driveExport.upload({ name: exportFileName(h), csv: historyToCsv(h) });
+        if (alive) show('Google ドライブに保存しました。', false, result.webViewLink);
+      } catch (e) {
+        const code = typeof e?.code === 'string' && Object.hasOwn(DRIVE_ERRORS, e.code) ? e.code : 'drive-failed';
+        if (alive) show(DRIVE_ERRORS[code], true);
+      }
+      if (alive) disable(false);
+    }
+    return {
+      buttons: el('div', { class: 'hist-export-actions' }, download, drive), message,
+      autoSave: () => { if (ctx.driveExport && ctx.driveExport.takePending(sid)) save(true); },
+    };
+  }
+
   // 自由記述の文章の一覧（文は textContent で入れる）
   const textList = (texts) => el('ul', { class: 'hist-free-list' },
     texts.map((t) => el('li', { class: 'hist-free-item', text: t })));
@@ -177,19 +236,23 @@ export function mount(root, ctx) {
 
   function renderResult(h) {
     if (!h) {
-      page.replaceChildren(backLink(), el('p', { class: 'notice', role: 'alert', text: 'この記録は見つかりません。' }));
+      page.replaceChildren(backLink(), ...(driveNotice ? [driveNotice] : []), el('p', { class: 'notice', role: 'alert', text: 'この記録は見つかりません。' }));
       return;
     }
     const span = h.startedAt ? `${formatDateTime(h.startedAt)} 〜 ${formatDateTime(h.endedAt)}` : formatDateTime(h.endedAt);
     const message = el('div', { class: 'hist-message' });
+    const exports = exportControls(h);
     page.replaceChildren(
       backLink(),
       el('h1', { class: 'hist-h1', text: h.title || UNTITLED }),
       el('p', { class: 'muted', text: `${span} ・ 参加 ${h.participants} 人` }),
+      exports.buttons,
+      exports.message,
       el('ul', { class: 'hist-qs' }, h.questions.map(questionCard)),
       message,
       el('div', { class: 'hist-foot' },
         el('button', { type: 'button', class: 'btn hist-delete', text: 'この記録を削除', onclick: () => remove(message) })));
+    exports.autoSave();
   }
 
   async function loadResult() {

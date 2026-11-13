@@ -97,6 +97,9 @@
 /* 授業履歴と結果 */
 .hist-h1 { overflow-wrap: anywhere; }
 .hist-back { margin-bottom: var(--s-2); }
+.hist-export-actions { display: flex; flex-wrap: wrap; gap: var(--s-1); margin: var(--s-2) 0; }
+.hist-export-message:empty { display: none; }
+.hist-export-message { margin-bottom: var(--s-2); overflow-wrap: anywhere; }
 .hist-list, .hist-qs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--s-2); }
 .hist-item { display: flex; flex-direction: column; gap: 4px; min-height: 44px; padding: var(--s-2) var(--s-3); color: var(--c-navy); text-decoration: none; }
 .hist-item:hover { background: var(--c-bg); }
