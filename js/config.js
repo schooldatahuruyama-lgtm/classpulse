@@ -37,5 +37,6 @@ export const CONFIG = {
   idLength: 12,
   sessionIdLength: 22,
   tokenRefreshMarginMs: 300000,
+  googleLogin: { maxAgeMs: 600000, storageKey: 'classpulse:google-login' },
   reconnectDelayMs: 3000,
 };

@@ -210,6 +210,35 @@ export function createAuth({ apiKey, fetch, storage, now, role }) {
       return { ...user };
     },
 
+    async signInWithGoogleIdToken(googleIdToken, requestUri) {
+      if (role !== 'teacher') throw new NetError('google-failed', '生徒の auth では使えません');
+      const g = gen;
+      let body;
+      try {
+        body = await postJson('accounts:signInWithIdp', {
+          postBody: new URLSearchParams({ id_token: googleIdToken, providerId: 'google.com' }).toString(),
+          requestUri, returnSecureToken: true, returnIdpCredential: true,
+        });
+        if (body && (body.needConfirmation === true
+          || body.errorMessage === 'EMAIL_EXISTS' || body.errorMessage === 'FEDERATED_USER_ID_ALREADY_LINKED')) {
+          throw new NetError('account-exists');
+        }
+        if (body && body.errorMessage) throw new NetError('google-failed');
+        parseBody(body);
+      } catch (e) {
+        const m = String(e && e.firebaseMessage || '');
+        let code = 'google-failed';
+        if ((e && e.code === 'account-exists') || m === 'EMAIL_EXISTS' || m === 'FEDERATED_USER_ID_ALREADY_LINKED') code = 'account-exists';
+        else if (e && e.code === 'network') code = 'network';
+        // ID トークンなどが含まれうる、サーバーの生のエラー文は残さない。
+        throw new NetError(code, 'Google でログインできませんでした');
+      }
+      assertCurrent(g);
+      bumpGen();
+      adopt(body, body.email);
+      return { ...user };
+    },
+
     async signInAnonymous() {
       const r = await restoreImpl();
       if (r.user) return { uid: r.user.uid };

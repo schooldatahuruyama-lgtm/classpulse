@@ -7,6 +7,7 @@ import { parseRoute, routeHash, needsTeacher, viewFile } from './router.js';
 import { isDemoAllowed, createDemoBackend } from './dev/demo.js';
 import { el, confirmDialog, toast } from './ui.js';
 import { checkTeacherAccess, isStillUser } from './guard.js';
+import { handleGoogleCallback, createGoogleLogin } from './google-login.js';
 
 const appRoot = document.getElementById('app');
 const bannerRoot = document.getElementById('banner');
@@ -64,9 +65,21 @@ async function start() {
   if (backend.demo) showDemoBanner(backend);
 
   const { teacherAuth, studentAuth } = backend;
+  const googleDeps = {
+    clientId: FIREBASE.googleClientId, demo: backend.demo, location,
+    replaceState: (...args) => history.replaceState(...args),
+    get sessionStorage() { return window.sessionStorage; },
+    auth: teacherAuth, now: () => Date.now(),
+    getRandomValues: (bytes) => window.crypto.getRandomValues(bytes),
+    assign: (url) => location.assign(url),
+  };
+  const googleEnabled = !!FIREBASE.googleClientId && !backend.demo;
+  const callback = googleEnabled ? await handleGoogleCallback(googleDeps) : { handled: false };
+  const googleLogin = googleEnabled ? createGoogleLogin(googleDeps) : null;
+  let notice = callback.notice;
   let cleanup = null;
   let renderId = 0;
-  let restored = false;
+  let restored = callback.handled && !callback.notice; // Google で入った直後は更新用トークンで戻し直さない
   let shownHash = null; // 今の画面のハッシュ（まだ何も出していなければ null）
   const teardown = () => { if (cleanup) { try { cleanup(); } catch (e) { console.error(e); } cleanup = null; } };
   let adminUid = null;
@@ -207,7 +220,8 @@ async function start() {
     const view = await loadView(route.name);
     if (stale()) return;
     if (!isStillUser(teacherAuth, checkedUid)) { render(); return; }
-    const ctx = { net: backend.net, auth: teacherAuth, repo, navigate, params: route.params, storage: window.localStorage };
+    const ctx = { net: backend.net, auth: teacherAuth, repo, navigate, params: route.params, storage: window.localStorage, googleLogin };
+    if (route.name === 'login') ctx.notice = notice;
     if (route.name === 'signup') {
       ctx.requestAccess = async (email, uid) => {
         if (!isStillUser(teacherAuth, uid)) return;
@@ -217,6 +231,7 @@ async function start() {
     if (route.name === 'pending') ctx.status = access;
     if (standalone) {
       cleanup = view ? view.mount(appRoot, ctx) : placeholder(appRoot);
+      if (view && route.name === 'login') notice = undefined;
     } else {
       const main = buildShell(route.name, isAdmin);
       cleanup = view ? view.mount(main, ctx) : placeholder(main);
