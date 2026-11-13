@@ -15,6 +15,7 @@
 // adopt(uid, deckId) … 持ち主がログイン中なら、引きついだ内容を返して引きつぎをやめる（無ければ null）
 // guardedSave(uid, deckId, deck, write) … write(deck) で書く。書いたら true。断ったら書かずに false（write の失敗は投げる）
 // isDeleted(uid, deckId) … このタブで削除に成功した教材なら true
+// undelete(uid, deckId) … ゴミ箱から戻した教材の、削除済みの印を外す
 // deleting(uid, deckId, doDelete) … 教材の削除を 1 つの手続きで行う（下の説明）
 // whenNotDeleting(uid, deckId) … 削除の手続き中なら、終わるまで待つ
 // whenIdle(uid, deckId) … 進行中の処理と保存の試みが済むまで待つ。保存待ちが残っていなければ true。
@@ -207,6 +208,8 @@ export function createBackgroundSaver({ setTimeout, clearTimeout, retryMs, onGua
 
     guardedSave(uid, deckId, deck, write) { return guarded(keyOf(uid, deckId), deck, write); },
     isDeleted(uid, deckId) { return deleted.has(keyOf(uid, deckId)); },
+    // ゴミ箱から戻した教材: 削除済みの印を外す（また開ける・保存できる）
+    undelete(uid, deckId) { deleted.delete(keyOf(uid, deckId)); },
 
     async whenNotDeleting(uid, deckId) {
       const key = keyOf(uid, deckId);
