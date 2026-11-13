@@ -6,12 +6,26 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { sendButtonState, answerMessage, pollDecision, endedDecision, freeDecision, freeShownText, cloudDecision, cloudShownWords, quizVerdict } from '../js/views/student.js';
 import { mount as mountStudent } from '../js/views/student.js';
+import { loadingDecision } from '../js/views/student.js';
 import { buildSession } from '../js/session-logic.js';
 import { createFakeNet } from './helpers/fake-net.js';
 import { fakeStorage } from './helpers/fakes.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (p) => readFileSync(join(root, p), 'utf8');
+
+test('参加中の文: 再試行 1〜3 回目は回数を表示し、描き直す鍵も変える', () => {
+  assert.equal(loadingDecision().message, '授業に参加しています…');
+  const keys = new Set([loadingDecision().key]);
+  for (let n = 1; n <= 3; n++) {
+    const decision = loadingDecision({ retrying: n });
+    assert.equal(decision.message, `つなぎ直しています…（${n} 回目）`);
+    keys.add(decision.key);
+  }
+  assert.equal(keys.size, 4);
+  for (const retrying of [0, -1, 4, '1', null]) assert.equal(loadingDecision({ retrying }).message, '授業に参加しています…');
+  assert.match(read('js/views/student.js'), /loadingDecision\(state\)/);
+});
 
 // 動画の画面を実際に mount するための小さな DOM。作られた要素も記録する。
 test('生徒 DOM: 動画は案内と題だけ。状態更新・移動後も iframe・画像・リンクを作らない', async (t) => {

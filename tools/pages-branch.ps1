@@ -5,7 +5,7 @@
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
-$paths = @("index.html", "check.html", "css", "js", "assets")
+$paths = @("index.html", "check.html", "sw.js", "css", "js", "assets")
 $tmpIndex = Join-Path $env:TEMP ("classpulse-pages-index-" + [guid]::NewGuid().ToString("N"))
 $env:GIT_INDEX_FILE = $tmpIndex
 try {

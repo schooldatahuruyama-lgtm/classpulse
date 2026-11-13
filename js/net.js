@@ -35,9 +35,10 @@ function isEmpty(v) {
   return v === null || v === undefined || (typeof v === 'object' && Object.keys(v).length === 0);
 }
 
-export function createNet({ databaseURL, auth, fetch, EventSource, setTimeout: setTimer = globalThis.setTimeout, clearTimeout: clearTimer = globalThis.clearTimeout }) {
+export function createNet({ databaseURL, auth, fetch, EventSource, now = Date.now, setTimeout: setTimer = globalThis.setTimeout, clearTimeout: clearTimer = globalThis.clearTimeout }) {
   const base = String(databaseURL).replace(/\/+$/, '');
   const urlFor = (path, token) => `${base}/${path}.json?auth=${encodeURIComponent(token)}`;
+  const wakeups = new Set();
 
   async function send(method, path, body, token) {
     const init = { method };
@@ -99,17 +100,23 @@ export function createNet({ databaseURL, auth, fetch, EventSource, setTimeout: s
     async update(path, patch) { await request('PATCH', path, patch); },
     async remove(path) { await request('DELETE', path); },
     serverTimestamp() { return { '.sv': 'timestamp' }; },
+    wake() { for (const wake of wakeups) wake(); },
 
     subscribe(path, onValue, onStatus) {
       let stopped = false;
       let es = null;
       let value = null;
       let timer = null; // つなぎ直しの待ち
+      let watchTimer = null;
+      let lastEvent = now();
+      let connected = false;
+      let connecting = false; // トークンの取得から open・失敗まで、wake を重ねない
       let generation = 0; // 開き直すたびに増やし、古い接続のイベントを無視する
       const status = (s) => { if (!stopped && onStatus) onStatus(s); };
 
       function handle(gen, type, e) {
         if (stopped || gen !== generation) return;
+        touch(gen);
         let msg;
         try { msg = JSON.parse(e.data); } catch { return; }
         if (!msg || typeof msg.path !== 'string') return;
@@ -125,45 +132,89 @@ export function createNet({ databaseURL, auth, fetch, EventSource, setTimeout: s
       }
 
       function close() {
+        generation += 1;
+        connected = false;
+        connecting = false;
+        if (watchTimer !== null) { clearTimer(watchTimer); watchTimer = null; }
         if (es) { es.close(); es = null; }
       }
+
+      function touch(gen) {
+        lastEvent = now();
+        if (watchTimer !== null) clearTimer(watchTimer);
+        const id = setTimer(() => {
+          if (stopped || gen !== generation || watchTimer !== id) return;
+          watchTimer = null;
+          reconnect();
+        }, CONFIG.streamStallMs);
+        watchTimer = id;
+      }
+
+      function reconnect() {
+        connect(false);
+        status('disconnected');
+      }
+
+      function wake() {
+        if (stopped || connecting) return;
+        if (!connected || now() - lastEvent >= CONFIG.streamWakeMs) reconnect();
+      }
+      wakeups.add(wake);
 
       // 待ってからつなぎ直す（トークンも取り直す）。解除されるまで、開くまで繰り返す
       function scheduleRetry() {
         if (stopped || timer !== null) return;
-        timer = setTimer(() => {
+        const id = setTimer(() => {
+          if (stopped || timer !== id) return;
           timer = null;
           connect(true);
         }, CONFIG.reconnectDelayMs);
+        timer = id;
       }
 
       async function connect(refresh) {
+        if (stopped) return;
+        if (timer !== null) { clearTimer(timer); timer = null; }
+        close();
+        connecting = true;
         const gen = ++generation;
-        let token;
+        let source;
         try {
-          token = refresh ? await auth.forceRefresh() : await auth.getToken();
+          const token = refresh ? await auth.forceRefresh() : await auth.getToken();
+          if (stopped || gen !== generation) return;
+          source = new EventSource(urlFor(path, token));
         } catch {
           if (stopped || gen !== generation) return;
-          status('disconnected');
+          connecting = false;
           scheduleRetry();
+          status('disconnected');
           return;
         }
-        if (stopped || gen !== generation) return;
-        const source = new EventSource(urlFor(path, token));
         es = source;
-        source.addEventListener('open', () => { if (!stopped && gen === generation) status('connected'); });
+        touch(gen);
+        source.addEventListener('open', () => {
+          if (stopped || gen !== generation) return;
+          connecting = false;
+          connected = true;
+          touch(gen);
+          status('connected');
+        });
         source.addEventListener('error', () => {
           if (stopped || gen !== generation) return;
-          status('disconnected');
+          connecting = false;
+          connected = false;
           // 完全に閉じた（CLOSED = 2）なら自動では戻らないので、こちらでつなぎ直す
           if (source.readyState === 2) {
             close();
             scheduleRetry();
           }
+          status('disconnected');
         });
         source.addEventListener('put', (e) => handle(gen, 'put', e));
         source.addEventListener('patch', (e) => handle(gen, 'patch', e));
-        source.addEventListener('keep-alive', () => {});
+        source.addEventListener('keep-alive', () => {
+          if (!stopped && gen === generation) touch(gen);
+        });
         source.addEventListener('cancel', () => {
           if (stopped || gen !== generation) return;
           close();
@@ -171,15 +222,15 @@ export function createNet({ databaseURL, auth, fetch, EventSource, setTimeout: s
         });
         source.addEventListener('auth_revoked', () => {
           if (stopped || gen !== generation) return;
-          close();
-          status('disconnected');
           connect(true);
+          status('disconnected');
         });
       }
 
       connect(false);
       return () => {
         stopped = true;
+        wakeups.delete(wake);
         if (timer !== null) { clearTimer(timer); timer = null; }
         close();
       };

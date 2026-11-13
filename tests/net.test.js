@@ -3,9 +3,190 @@ import assert from 'node:assert/strict';
 import { createNet } from '../js/net.js';
 import { NetError } from '../js/errors.js';
 import { fakeFetch, fakeEventSource } from './helpers/fakes.js';
+import { fakeScheduler } from './helpers/resilience.js';
+import { CONFIG } from '../js/config.js';
 
 const flush = () => new Promise((r) => setImmediate(r));
 const DB = 'https://example-db.firebaseio.com';
+
+async function watched() {
+  const clock = fakeScheduler();
+  const auth = stubAuth();
+  const ES = fakeEventSource();
+  const values = [];
+  const statuses = [];
+  const net = createNet({ databaseURL: DB, auth, EventSource: ES, ...clock });
+  const stop = net.subscribe('sessions/test/pub', (v) => values.push(v), (s) => statuses.push(s));
+  await flush();
+  ES.last.open();
+  return { clock, auth, ES, net, stop, values, statuses };
+}
+
+test('見張り: 75 秒無通信で直ちにつなぎ直し、トークンは更新しない', async () => {
+  const m = await watched();
+  const old = m.ES.last;
+  await m.clock.advance(74999);
+  assert.equal(m.ES.instances.length, 1);
+  await m.clock.advance(1);
+  assert.equal(old.closed, true);
+  assert.equal(m.ES.instances.length, 2);
+  assert.equal(m.auth.refreshes, 0);
+  assert.deepEqual(m.statuses, ['connected', 'disconnected']);
+  m.ES.last.open();
+  assert.equal(m.statuses.at(-1), 'connected');
+  m.stop();
+  assert.equal(m.clock.count, 0);
+});
+
+for (const type of ['open', 'keep-alive', 'put', 'patch']) {
+  test(`見張り: ${type} が届く接続は 10 分たっても切らない`, async () => {
+    const m = await watched();
+    for (let i = 0; i < 20; i++) {
+      await m.clock.advance(30000);
+      if (type === 'open') m.ES.last.open();
+      else m.ES.last.emit(type, type === 'keep-alive' ? 'null' : { path: '/', data: { n: i } });
+    }
+    assert.equal(m.ES.instances.length, 1);
+    assert.equal(m.clock.count, 1);
+    m.stop();
+    m.net.wake();
+    await m.clock.advance(150000);
+    assert.equal(m.clock.count, 0);
+    assert.equal(m.ES.instances.length, 1);
+  });
+}
+
+test('wake: 10 秒未満は保ち、境界で開き直す。open まで連打しても 1 接続', async () => {
+  const m = await watched();
+  await m.clock.advance(9999);
+  m.net.wake();
+  await flush();
+  assert.equal(m.ES.instances.length, 1);
+  await m.clock.advance(1);
+  m.net.wake(); m.net.wake();
+  await flush();
+  m.net.wake();
+  await flush();
+  assert.equal(m.ES.instances.length, 2);
+  assert.equal(m.ES.instances.filter((es) => !es.closed).length, 1);
+  m.ES.last.open();
+  m.net.wake();
+  await flush();
+  assert.equal(m.ES.instances.length, 2);
+  m.stop();
+});
+
+for (const closed of [false, true]) {
+  test(`wake: 切断した購読は直ちに再接続し、再試行の待ちは消す（完全切断=${closed}）`, async () => {
+    const m = await watched();
+    if (closed) m.ES.last.failClosed(); else m.ES.last.fail();
+    m.net.wake();
+    await flush();
+    m.ES.last.open();
+    await m.clock.advance(3000);
+    assert.equal(m.ES.instances.length, 2);
+    assert.equal(m.clock.count, 1); // 見張りだけ
+    m.stop();
+  });
+}
+
+test('見張り・error・wake が重なっても接続は 1 つ。古い接続の全イベントは無視', async () => {
+  const m = await watched();
+  const old = m.ES.last;
+  old.emit('put', { path: '/', data: { kept: 1, removed: 2 } });
+  await m.clock.advance(75000);
+  m.net.wake();
+  const statuses = [...m.statuses];
+  // close 後でも、すでにイベントキューに入っていたものが届く場合
+  for (const type of ['open', 'put', 'patch', 'keep-alive', 'error', 'auth_revoked', 'cancel']) {
+    for (const listener of old.listeners.get(type)) listener({ data: JSON.stringify({ path: '/', data: { stale: true } }) });
+  }
+  await flush();
+  assert.equal(m.ES.instances.length, 2);
+  assert.deepEqual(m.statuses, statuses);
+  m.ES.last.open();
+  m.ES.last.emit('put', { path: '/', data: { kept: 3 } });
+  assert.deepEqual(m.values.at(-1), { kept: 3 });
+  assert.equal(m.values.length, 2);
+  m.ES.last.emit('put', { path: '/', data: null });
+  assert.equal(m.values.at(-1), null);
+  m.stop();
+});
+
+test('wake は購読ごとに判断し、新しいイベントが届いた購読と解除済みには触れない', async () => {
+  const m = await watched();
+  const stop2 = m.net.subscribe('other', () => {});
+  await flush();
+  const second = m.ES.last;
+  second.open();
+  await m.clock.advance(10000);
+  second.emit('keep-alive', 'null');
+  m.net.wake();
+  await flush();
+  assert.equal(second.closed, false);
+  assert.equal(m.ES.instances.length, 3);
+  m.stop(); stop2();
+  m.net.wake();
+  await m.clock.advance(150000);
+  assert.equal(m.ES.instances.length, 3);
+  assert.equal(m.clock.count, 0);
+});
+
+test('つなぎ直しのトークン待ちに解除すると、遅い成功から接続を作らない', async () => {
+  const m = await watched();
+  let resolve;
+  m.auth.getToken = () => new Promise((r) => { resolve = r; });
+  await m.clock.advance(10000);
+  m.net.wake(); m.net.wake();
+  m.stop();
+  resolve('late');
+  await flush();
+  assert.equal(m.ES.instances.length, 1);
+  assert.equal(m.clock.count, 0);
+});
+
+test('見張りによる再接続が失敗すると、従来のトークン更新付き再試行に入る', async () => {
+  const m = await watched();
+  m.auth.getToken = async () => { throw new NetError('network'); };
+  await m.clock.advance(75000);
+  assert.deepEqual(m.clock.delays(), [3000]);
+  await m.clock.advance(3000);
+  assert.equal(m.auth.refreshes, 1);
+  assert.equal(m.ES.instances.length, 2);
+  m.stop();
+});
+
+test('解除した古いタイマーが遅れて届いても、新しい接続や見張りを壊さない', async () => {
+  const clock = fakeScheduler();
+  const callbacks = [];
+  const ES = fakeEventSource();
+  const net = createNet({ databaseURL: DB, auth: stubAuth(), EventSource: ES, ...clock,
+    setTimeout(fn, ms) { callbacks.push(fn); return clock.setTimeout(fn, ms); },
+  });
+  const stop = net.subscribe('test', () => {});
+  await flush();
+  ES.last.open();
+  const oldWatch = callbacks.at(-1);
+  ES.last.emit('keep-alive', 'null');
+  oldWatch();
+  await flush();
+  assert.equal(ES.instances.length, 1);
+  assert.equal(clock.count, 1);
+  ES.last.failClosed();
+  const oldRetry = callbacks.at(-1);
+  net.wake();
+  await flush();
+  ES.last.open();
+  oldRetry(); oldWatch();
+  await flush();
+  assert.equal(ES.instances.length, 2);
+  assert.equal(clock.count, 1);
+  stop();
+  for (const callback of callbacks) callback();
+  await flush();
+  assert.equal(clock.count, 0);
+  assert.equal(ES.instances.length, 2);
+});
 
 // 数えられるログインの代役
 function stubAuth() {
@@ -18,20 +199,19 @@ function stubAuth() {
   return auth;
 }
 
-// 手で進める時計（待ち時間を実際には待たない）
+// 従来のテストは再試行の待ちだけを数え、実行する。見張りは下の fakeScheduler で別に検証する
 function fakeTimers() {
   let seq = 0;
   const pending = new Map();
   return {
     setTimeout: (fn, ms) => { seq += 1; pending.set(seq, { fn, ms }); return seq; },
     clearTimeout: (id) => { pending.delete(id); },
-    get count() { return pending.size; },
-    delays: () => [...pending.values()].map((t) => t.ms),
-    // 待っているものを全部実行する
+    get count() { return [...pending.values()].filter((t) => t.ms === CONFIG.reconnectDelayMs).length; },
+    delays: () => [...pending.values()].filter((t) => t.ms === CONFIG.reconnectDelayMs).map((t) => t.ms),
+    // 再試行を待っているものだけ実行する
     async fire() {
-      const list = [...pending.entries()];
-      pending.clear();
-      for (const [, t] of list) t.fn();
+      const list = [...pending.entries()].filter(([, t]) => t.ms === CONFIG.reconnectDelayMs);
+      for (const [id, t] of list) { pending.delete(id); t.fn(); }
       await flush();
     },
   };

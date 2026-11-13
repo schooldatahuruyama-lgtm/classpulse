@@ -6,9 +6,210 @@ import { createSessionClient } from '../js/session-client.js';
 import { createFakeNet } from './helpers/fake-net.js';
 import { NetError } from '../js/errors.js';
 import { fakeStorage } from './helpers/fakes.js';
+import { fakeScheduler, flush } from './helpers/resilience.js';
 
 const SID = 'sess1';
 const PUB = `sessions/${SID}/pub`;
+
+async function retrySetup({ stage = 'pub', failures = 1, code = 'network', committed = false, autoConnect = true } = {}) {
+  const net = createFakeNet();
+  await net.set(`sessions/${SID}`, buildSession(makeDeck(), 'deck1', 'teacher-test', 1));
+  const clock = fakeScheduler();
+  const states = [];
+  const calls = [];
+  let remaining = failures;
+  const hit = (step) => {
+    calls.push(step);
+    if (step === stage && remaining-- > 0) throw new NetError(code);
+  };
+  const get = net.get;
+  const set = net.set;
+  const subscribe = net.subscribe;
+  let status;
+  net.get = async (path) => { hit(path === PUB ? 'pub' : 'deck'); return get(path); };
+  net.set = async (path, value) => {
+    if (committed) await set(path, value);
+    hit('join');
+    if (!committed) await set(path, value);
+  };
+  net.subscribe = (path, onValue, onStatus) => {
+    calls.push('subscribe');
+    status = onStatus;
+    return subscribe(path, onValue, autoConnect ? onStatus : () => {});
+  };
+  const client = createSessionClient({
+    net, auth: { signInAnonymous: async () => { hit('auth'); return { uid: 'retry-test' }; } },
+    storage: fakeStorage(), sid: SID, onChange: (s) => states.push(s), ...clock, random: () => 0.5,
+  });
+  return { net, clock, client, states, calls, last: () => states.at(-1), status: (value) => status(value) };
+}
+
+for (const stage of ['auth', 'pub', 'deck']) {
+  for (const failures of [1, 3]) {
+    test(`参加の再試行: ${stage} が ${failures} 回失敗しても loading のまま待って成功`, async () => {
+      const m = await retrySetup({ stage, failures, code: failures === 1 ? 'network' : 'unknown' });
+      const started = m.client.start();
+      for (let i = 0; i < failures; i++) {
+        await flush();
+        assert.equal(m.last().phase, 'loading');
+        assert.equal(m.last().retrying, i + 1);
+        const delay = [2500, 4500, 8500][i];
+        assert.deepEqual(m.clock.delays(), [delay]);
+        const count = m.calls.length;
+        await m.clock.advance(delay - 1);
+        assert.equal(m.calls.length, count);
+        await m.clock.advance(1);
+      }
+      await started;
+      assert.equal(m.last().phase, 'live');
+      assert.equal(m.last().retrying, undefined);
+      assert.equal(m.calls.filter((x) => x === stage).length, failures + 1);
+      assert.equal(m.clock.count, 0);
+      m.client.stop();
+    });
+  }
+}
+
+test('参加は初回と再試行 3 回まで。もう一度 start すると回数を最初から数える', async () => {
+  const m = await retrySetup({ failures: 5 });
+  const started = m.client.start();
+  for (const ms of [2500, 4500, 8500]) await m.clock.advance(ms);
+  await started;
+  assert.equal(m.last().phase, 'error');
+  assert.equal(m.calls.filter((x) => x === 'pub').length, 4);
+  assert.equal(m.clock.count, 0);
+  const again = m.client.start();
+  await flush();
+  assert.equal(m.last().retrying, 1);
+  await m.clock.advance(2500);
+  await again;
+  assert.equal(m.last().phase, 'live');
+  m.client.stop();
+});
+
+test('参加書きこみの応答だけが失われても、同じ ID に書き直すので参加人数は 1 人', async () => {
+  const m = await retrySetup({ stage: 'join', committed: true });
+  await m.client.start();
+  await flush();
+  assert.equal(m.calls.filter((x) => x === 'join').length, 2);
+  assert.equal(m.calls.filter((x) => x === 'auth').length, 1);
+  assert.equal(m.calls.filter((x) => x === 'deck').length, 1);
+  assert.equal(m.clock.count, 0);
+  assert.deepEqual(Object.keys(m.net.dump().sessions[SID].inbox.participants), ['retry-test']);
+  m.client.stop();
+});
+
+for (const code of ['network', 'unknown', 'denied', 'auth']) {
+  test(`参加書きこみの ${code} は受信を妨げず、接続時に再試行する`, async () => {
+    const m = await retrySetup({ stage: 'join', code, failures: 2, autoConnect: false });
+    await m.client.start();
+    assert.equal(m.last().phase, 'live');
+    assert.equal(m.calls.filter((x) => x === 'subscribe').length, 1);
+    assert.equal(m.calls.filter((x) => x === 'join').length, 1);
+    m.status('disconnected');
+    assert.equal(m.calls.filter((x) => x === 'join').length, 1);
+    m.status('connected');
+    await flush();
+    assert.equal(m.calls.filter((x) => x === 'join').length, 2);
+    m.status('disconnected');
+    m.status('connected');
+    await flush();
+    assert.equal(m.calls.filter((x) => x === 'join').length, 3);
+    m.status('connected'); // 書きこめたあとは重ねて参加しない
+    await flush();
+    assert.equal(m.calls.filter((x) => x === 'join').length, 3);
+    for (const stage of ['auth', 'pub', 'deck', 'subscribe']) assert.equal(m.calls.filter((x) => x === stage).length, 1);
+    assert.ok(m.states.every((s) => s.phase !== 'error' && !s.retrying));
+    assert.equal(m.clock.count, 0);
+    assert.deepEqual(Object.keys(m.net.dump().sessions[SID].inbox.participants), ['retry-test']);
+    m.client.stop();
+  });
+}
+
+for (const stage of ['pub', 'deck']) {
+  test(`参加: ${stage} の失敗後もログインは 1 回、教材は読みこめなかったときだけ再取得する`, async () => {
+    const m = await retrySetup({ stage });
+    const started = m.client.start();
+    await m.clock.advance(2500);
+    await started;
+    assert.equal(m.last().phase, 'live');
+    assert.equal(m.calls.filter((x) => x === 'auth').length, 1);
+    assert.equal(m.calls.filter((x) => x === 'pub').length, 2);
+    assert.equal(m.calls.filter((x) => x === 'deck').length, stage === 'deck' ? 2 : 1);
+    assert.equal(m.calls.filter((x) => x === 'subscribe').length, 1);
+    m.client.stop();
+  });
+}
+
+for (const stage of ['auth', 'pub', 'deck']) {
+  for (const code of ['denied', 'auth']) {
+    test(`参加: ${stage} の ${code} はやり直さず従来の error`, async () => {
+      const m = await retrySetup({ stage, code });
+      await m.client.start();
+      assert.equal(m.last().phase, 'error');
+      assert.equal(m.clock.count, 0);
+      assert.ok(m.states.every((s) => !s.retrying));
+      m.client.stop();
+    });
+  }
+}
+
+for (const phase of ['not-found', 'ended']) {
+  test(`参加の再試行中に ${phase} と分かったら、以後はやり直さない`, async () => {
+    const m = await retrySetup();
+    const started = m.client.start();
+    await flush();
+    if (phase === 'ended') await m.net.set(PUB, { state: 'ended' });
+    else await m.net.remove(PUB);
+    await m.clock.advance(2500);
+    await started;
+    assert.equal(m.last().phase, phase);
+    assert.equal(m.last().retrying, undefined);
+    assert.equal(m.clock.count, 0);
+    m.client.stop();
+  });
+}
+
+test('参加の待ちの途中で stop したら、待ちも start も終わり、通信も通知もしない', async () => {
+  const m = await retrySetup({ failures: 10 });
+  const started = m.client.start();
+  assert.equal(m.client.start(), started); // 同時 start も重ねない
+  await flush();
+  const calls = m.calls.length;
+  const states = m.states.length;
+  m.client.stop();
+  await started;
+  await m.clock.advance(60000);
+  await m.client.start();
+  assert.equal(m.clock.count, 0);
+  assert.equal(m.calls.length, calls);
+  assert.equal(m.states.length, states);
+});
+
+for (const stage of ['auth', 'pub', 'deck', 'join']) {
+  test(`参加: ${stage} の応答待ちで stop した後は、遅い成功から次の通信をしない`, async () => {
+    const m = await retrySetup({ failures: 0 });
+    let resolve;
+    const pending = new Promise((r) => { resolve = r; });
+    const get = m.net.get;
+    if (stage === 'auth') {
+      // 匿名ログインの待ちには専用の client を使う
+      m.client.stop();
+      m.client = createSessionClient({ net: m.net, auth: { signInAnonymous: () => pending }, storage: fakeStorage(), sid: SID, onChange: (s) => m.states.push(s), ...m.clock });
+    } else if (stage === 'join') m.net.set = () => pending;
+    else m.net.get = (path) => (path === (stage === 'pub' ? PUB : `sessions/${SID}/deck`) ? pending : get(path));
+    const started = m.client.start();
+    await flush();
+    const calls = m.calls.length;
+    const states = m.states.length;
+    m.client.stop();
+    resolve(stage === 'auth' ? { uid: 'late-test' } : stage === 'pub' ? { state: 'live' } : makeDeck());
+    await started;
+    assert.equal(m.calls.length, calls);
+    assert.equal(m.states.length, states);
+    assert.equal(m.clock.count, 0);
+  });
+}
 
 // 3 枚の教材: s1 資料、s2 アンケート(2択・manual)、s3 アンケート(3択・live)
 function makeDeck() {

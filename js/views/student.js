@@ -176,6 +176,11 @@ export function endedDecision({ unconfirmedCount = 0 } = {}) {
   return { key: `ended:unconfirmed:${n}`, message: `授業が終わったため、送信できたか確認できなかった回答が ${n} 件あります。` };
 }
 
+export function loadingDecision({ retrying = 0 } = {}) {
+  const n = Number.isInteger(retrying) && retrying >= 1 && retrying <= 3 ? retrying : 0;
+  return { key: `loading:${n}`, message: n ? `つなぎ直しています…（${n} 回目）` : '授業に参加しています…' };
+}
+
 export function mount(root, ctx) {
   const sid = ctx.params.sid;
   let alive = true;
@@ -564,7 +569,8 @@ export function mount(root, ctx) {
 
     if (state.phase === 'loading') {
       renderConn(null);
-      show('loading', el('p', { class: 'st-message', role: 'status', text: '授業に参加しています…' }));
+      const loading = loadingDecision(state);
+      show(loading.key, el('p', { class: 'st-message', role: 'status', text: loading.message }));
       return;
     }
     if (state.phase === 'not-found') {

@@ -47,4 +47,7 @@ export const CONFIG = {
   googleLogin: { maxAgeMs: 600000, storageKey: 'classpulse:google-login' },
   driveExport: { maxAgeMs: 600000, storageKey: 'classpulse:drive-export', scope: 'https://www.googleapis.com/auth/drive.file', tokenMarginMs: 60000 },
   reconnectDelayMs: 3000,
+  streamStallMs: 75000,
+  streamWakeMs: 10000,
+  joinRetry: { delaysMs: [2000, 4000, 8000], jitterMs: 1000 },
 };

@@ -7,6 +7,13 @@ import { dirname, join } from 'node:path';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (p) => readFileSync(join(root, p), 'utf8');
 
+test('sw.js はルートに置き、index.html の script にせず、外部 URL を持たない', () => {
+  assert.ok(existsSync(join(root, 'sw.js')));
+  assert.doesNotMatch(read('index.html'), /<script\b[^>]*\bsrc\s*=\s*["'][^"']*\bsw\.js/i);
+  assert.doesNotMatch(read('sw.js'), /https?:\/\//i);
+  assert.doesNotMatch(read('sw.js'), /\bimport\b|importScripts/);
+});
+
 test('index.html が base.css と main.js（module）を読みこむ', () => {
   const html = read('index.html');
   assert.match(html, /<link[^>]+href="css\/base\.css"/);
