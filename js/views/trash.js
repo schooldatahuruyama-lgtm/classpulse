@@ -66,6 +66,8 @@ export function mount(root, ctx) {
 
   function restore(d) {
     return run(async () => {
+      // このタブの「ゴミ箱に移す」がまだ終わっていなければ、終わるのを待つ（あとから削除済みの印が付かないように）
+      await bg.whenNotDeleting(uid, d.id);
       await ctx.repo.restoreDeck(d.id);
       bg.undelete(uid, d.id); // このタブでゴミ箱に移した教材を、また開けるようにする
     }, '元に戻しました。', '元に戻せませんでした。');
@@ -79,8 +81,19 @@ export function mount(root, ctx) {
       okLabel: '完全に削除', danger: true,
     });
     if (!ok || !alive) return;
+    // 消す直前に確かめ直す。別のタブで元に戻されていたら消さない
+    let state;
+    try { state = await ctx.repo.deckState(d.id); } catch { state = null; }
+    if (!alive) return;
+    if (state === 'live') {
+      toast('この教材は、もう元に戻されています。削除しませんでした。');
+      await load();
+      return;
+    }
     // 編集画面を離れたあとの保存と、1 つの手続きで削除する
-    await run(() => bg.deleting(uid, d.id, () => ctx.repo.deleteDeck(d.id)), '完全に削除しました。', '削除できませんでした。');
+    await run(() => bg.deleting(uid, d.id, async () => {
+      if (!(await ctx.repo.purgeDeck(d.id))) throw new Error('元に戻されていた');
+    }), '完全に削除しました。', '削除できませんでした。');
   }
 
   async function emptyAll() {

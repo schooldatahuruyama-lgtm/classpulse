@@ -151,6 +151,20 @@ export function createRepo(net, uid) {
       await net.update(base, { [`decks/${id}`]: null, [`deckIndex/${id}`]: null });
     },
 
+    // 教材が今どこにあるか: 'live'（一覧）・'trashed'（ゴミ箱）・'missing'（無い）
+    async deckState(id) {
+      const e = await net.get(`${base}/deckIndex/${id}`);
+      if (e === null || typeof e !== 'object') return 'missing';
+      return isTrashed(e) ? 'trashed' : 'live';
+    },
+
+    // ゴミ箱の教材を完全に削除する。消す直前に確かめ直し、（別のタブで）元に戻されていたら消さずに false
+    async purgeDeck(id) {
+      if ((await this.deckState(id)) === 'live') return false;
+      await this.deleteDeck(id);
+      return true;
+    },
+
     // ゴミ箱に移す・戻す。一覧の項目の印だけを書く（教材の中身は読み書きしない）
     async trashDeck(id, now) {
       await net.set(`${base}/deckIndex/${id}/deletedAt`, now);

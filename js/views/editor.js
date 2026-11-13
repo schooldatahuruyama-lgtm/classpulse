@@ -95,8 +95,16 @@ export function mount(root, ctx) {
     if (!alive) return;
     await bg.settle(uid, deckId);
     if (!alive) return;
-    // このタブで削除した教材は開かない（読みこみもしない）
-    if (bg.isDeleted(uid, deckId)) { notFoundPage(root, ctx); return; }
+    // この教材が今どこにあるかを確かめる（ゴミ箱の中なら開かない）。確かめられないときは null
+    let where = null;
+    try { where = await ctx.repo.deckState(deckId); } catch { /* 通信できない。下の読みこみで分かる */ }
+    if (!alive) return;
+    if (where === 'trashed') { notFoundPage(root, ctx); return; }
+    // このタブで削除した（ゴミ箱に移した）教材は開かない。ただし、別のタブで元に戻されていたら、印を外して開く
+    if (bg.isDeleted(uid, deckId)) {
+      if (where !== 'live') { notFoundPage(root, ctx); return; }
+      bg.undelete(uid, deckId);
+    }
     const adopted = bg.adopt(uid, deckId);
     if (adopted) {
       stopEditor = startEditor(root, ctx, deckId, adopted, { adopted: true });
@@ -528,6 +536,14 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
       // 読みこみ中の画像が入った教材で始める（starting の間は新しい画像を受けつけない）
       await waitImage();
       if (!alive) return;
+      // 開いている間に（別のタブで）ゴミ箱に移された教材では、授業を始めない
+      let where = null;
+      try { where = await ctx.repo.deckState(deckId); } catch { /* 通信できない。下の開始が失敗として出す */ }
+      if (!alive) return;
+      if (where === 'trashed') {
+        showMessage(el('p', { text: 'この教材はゴミ箱にあります。ゴミ箱から元に戻すと、発表できます。' }));
+        return;
+      }
       const r = await runStartPresenting({
         ...sessionDeps(ctx), deckId, getDeck: () => state.deck, beforeStart: readyToLeave, isAlive: () => alive,
         startSession: (id, deck) => sessionDeps(ctx).startSession(id, forSave(deck)),

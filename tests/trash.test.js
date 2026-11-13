@@ -29,6 +29,8 @@ test('isTrashed: 印があればゴミ箱の中', () => {
   assert.equal(isTrashed({ title: 'a' }), false);
   assert.equal(isTrashed({ title: 'a', deletedAt: T0 }), true);
   assert.equal(isTrashed({ deletedAt: 'こわれた値' }), true);
+  assert.equal(isTrashed({ deletedAt: false }), true);
+  assert.equal(isTrashed({ deletedAt: 0 }), true);
   assert.equal(isTrashed({ deletedAt: null }), false);
   assert.equal(isTrashed(null), false);
   assert.equal(isTrashed('x'), false);
@@ -159,4 +161,50 @@ test('undelete: 削除済みの印を外すと、また保存できる', async (
   assert.equal(bg.isDeleted('A', 'a'), false);
   assert.equal(await bg.guardedSave('A', 'a', {}, async () => {}), true);
   bg.undelete('A', 'zzz'); // 印の無いものは何もしない
+});
+
+test('deckState: 一覧・ゴミ箱・無い', async () => {
+  const { repo } = setup();
+  await repo.saveDeck('d1', sampleDeck(), 100);
+  assert.equal(await repo.deckState('d1'), 'live');
+  await repo.trashDeck('d1', T0);
+  assert.equal(await repo.deckState('d1'), 'trashed');
+  assert.equal(await repo.deckState('nothing'), 'missing');
+});
+
+test('purgeDeck: 元に戻されていた教材は消さない（false）。ゴミ箱の教材は消す（true）', async () => {
+  const { repo } = setup();
+  await repo.saveDeck('d1', sampleDeck('A'), 100);
+  await repo.trashDeck('d1', T0);
+  await repo.restoreDeck('d1'); // 別のタブで元に戻された
+  assert.equal(await repo.purgeDeck('d1'), false);
+  assert.equal((await repo.loadDeck('d1')).title, 'A');
+  await repo.trashDeck('d1', T0);
+  assert.equal(await repo.purgeDeck('d1'), true);
+  assert.deepEqual(await repo.listTrash(), []);
+  assert.equal(await repo.deckState('d1'), 'missing');
+});
+
+test('deletedAt が false の項目もゴミ箱に出し、開かず、自動では消さない', async () => {
+  const { net, repo } = setup();
+  await repo.saveDeck('d1', sampleDeck(), 100);
+  await net.set('teachers/u1/deckIndex/d1/deletedAt', false);
+  assert.deepEqual(await repo.listDecks(), []);
+  assert.deepEqual((await repo.listTrash()).map((d) => [d.id, d.deletedAt]), [['d1', null]]);
+  assert.equal(await repo.loadDeck('d1'), null);
+  assert.equal(await repo.purgeExpiredTrash(T0 + 999 * DAY), 0);
+});
+
+test('ゴミ箱に移す手続きの途中で whenNotDeleting を待てば、undelete のあとに削除済みの印が付かない', async () => {
+  const bg = createBackgroundSaver({
+    setTimeout: () => 1, clearTimeout: () => {}, retryMs: 5000, getCurrentUid: () => 'A',
+  });
+  let finish;
+  const moving = bg.deleting('A', 'a', () => new Promise((r) => { finish = r; }));
+  await new Promise((r) => setTimeout(r, 0));
+  const restoring = (async () => { await bg.whenNotDeleting('A', 'a'); bg.undelete('A', 'a'); })();
+  finish();
+  await moving;
+  await restoring;
+  assert.equal(bg.isDeleted('A', 'a'), false);
 });

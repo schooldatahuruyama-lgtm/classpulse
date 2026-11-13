@@ -7,9 +7,9 @@ const keepMs = () => CONFIG.trash.keepDays * DAY_MS;
 
 const validTime = (t) => typeof t === 'number' && Number.isFinite(t) && t > 0;
 
-// 印があればゴミ箱の中（値がこわれていても、一覧には出さない）
+// 印があればゴミ箱の中（値がこわれていても — false や文字列でも — 一覧には出さない）
 export function isTrashed(entry) {
-  return Boolean(entry && typeof entry === 'object' && entry.deletedAt != null && entry.deletedAt !== false);
+  return Boolean(entry && typeof entry === 'object' && entry.deletedAt !== undefined && entry.deletedAt !== null);
 }
 
 // 自動で完全に消してよいか。時刻が数でない・未来のものは消さない
