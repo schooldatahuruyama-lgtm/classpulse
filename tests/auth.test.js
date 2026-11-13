@@ -6,6 +6,137 @@ import { fakeStorage, fakeFetch, fakeClock } from './helpers/fakes.js';
 
 const MIN = 60 * 1000;
 
+const GOOGLE_TOKEN = 'fake-google-id-token+with&reserved=characters';
+const GOOGLE_URI = 'https://app.example.test/classpulse/';
+const googleBody = () => ({
+  localId: 'GOOGLE', email: 'google@example.com', idToken: 'fake-firebase-id-token',
+  refreshToken: 'fake-google-refresh', expiresIn: '3600', oauthIdToken: GOOGLE_TOKEN,
+});
+
+test('Google: signInWithIdp に URL エンコードした本文を送り、ID トークンを保存しない', async () => {
+  const { auth, fetch, storage } = make(() => ({ status: 200, body: googleBody() }));
+  const user = await auth.signInWithGoogleIdToken(GOOGLE_TOKEN, GOOGLE_URI);
+  assert.deepEqual(user, { uid: 'GOOGLE', email: 'google@example.com' });
+  assert.deepEqual(auth.user, user);
+  const call = fetch.calls[0];
+  assert.equal(call.url, 'https://identitytoolkit.googleapis.com/v1/accounts:signInWithIdp?key=FAKE_KEY');
+  assert.equal(call.init.method, 'POST');
+  assert.equal(call.init.headers['Content-Type'], 'application/json');
+  const payload = JSON.parse(call.init.body);
+  assert.deepEqual(payload, {
+    postBody: 'id_token=fake-google-id-token%2Bwith%26reserved%3Dcharacters&providerId=google.com',
+    requestUri: GOOGLE_URI, returnSecureToken: true, returnIdpCredential: true,
+  });
+  assert.equal(new URLSearchParams(payload.postBody).get('id_token'), GOOGLE_TOKEN);
+  const saved = storage.getItem('classpulse:auth:teacher');
+  assert.deepEqual(JSON.parse(saved), { uid: 'GOOGLE', email: 'google@example.com', refreshToken: 'fake-google-refresh' });
+  assert.ok(!saved.includes(GOOGLE_TOKEN));
+  assert.ok(!saved.includes('fake-firebase-id-token'));
+  assert.equal(await auth.getToken(), 'fake-firebase-id-token');
+});
+
+for (const body of [{ needConfirmation: true }, { ...googleBody(), needConfirmation: true }]) {
+  test(`Google: needConfirmation は保存も採用もしない（資格情報${body.idToken ? 'あり' : 'なし'}）`, async () => {
+    const { auth, storage } = make(() => ({ status: 200, body }));
+    await assert.rejects(auth.signInWithGoogleIdToken(GOOGLE_TOKEN, GOOGLE_URI), { code: 'account-exists' });
+    assert.equal(auth.user, null);
+    assert.equal(storage.getItem('classpulse:auth:teacher'), null);
+  });
+}
+
+for (const [message, code] of [
+  ['EMAIL_EXISTS', 'account-exists'], ['FEDERATED_USER_ID_ALREADY_LINKED', 'account-exists'],
+  ['OPERATION_NOT_ALLOWED', 'google-failed'], ['INVALID_IDP_RESPONSE', 'google-failed'],
+  ['INVALID_ID_TOKEN', 'google-failed'], [GOOGLE_TOKEN, 'google-failed'],
+]) {
+  test(`Google: Firebase の失敗を ${code} に直す（${message === GOOGLE_TOKEN ? '生の入力' : message}）`, async () => {
+    const { auth, storage } = make(() => ({ status: 400, body: { error: { message }, oauthIdToken: GOOGLE_TOKEN } }));
+    await assert.rejects(auth.signInWithGoogleIdToken(GOOGLE_TOKEN, GOOGLE_URI), (e) => {
+      assert.ok(e instanceof NetError);
+      assert.equal(e.code, code);
+      assert.ok(!(e.message + e.stack + JSON.stringify(e)).includes(GOOGLE_TOKEN));
+      assert.equal(e.firebaseMessage, undefined);
+      return true;
+    });
+    assert.equal(auth.user, null);
+    assert.equal(storage.getItem('classpulse:auth:teacher'), null);
+  });
+}
+
+for (const errorMessage of ['EMAIL_EXISTS', 'FEDERATED_USER_ID_ALREADY_LINKED', GOOGLE_TOKEN]) {
+  test(`Google: 200 応答の errorMessage も拒否する（${errorMessage === GOOGLE_TOKEN ? '生の入力' : errorMessage}）`, async () => {
+    const { auth, storage } = make(() => ({ status: 200, body: { ...googleBody(), errorMessage } }));
+    await assert.rejects(auth.signInWithGoogleIdToken(GOOGLE_TOKEN, GOOGLE_URI), (e) => {
+      assert.equal(e.code, errorMessage === GOOGLE_TOKEN ? 'google-failed' : 'account-exists');
+      assert.ok(!(e.message + JSON.stringify(e)).includes(GOOGLE_TOKEN));
+      return true;
+    });
+    assert.equal(auth.user, null);
+    assert.equal(storage.getItem('classpulse:auth:teacher'), null);
+  });
+}
+
+test('Google: needConfirmation でも既存のログイン状態と保存を上書きしない', async () => {
+  const { auth, storage } = make((url) => isSignIn(url) ? teacherHandler(url) : { status: 200, body: { ...googleBody(), needConfirmation: true } });
+  await auth.signInTeacher('t@example.com', 'fake-pass');
+  const saved = storage.getItem('classpulse:auth:teacher');
+  await assert.rejects(auth.signInWithGoogleIdToken(GOOGLE_TOKEN, GOOGLE_URI), { code: 'account-exists' });
+  assert.deepEqual(auth.user, { uid: 'T1', email: 't@example.com' });
+  assert.equal(storage.getItem('classpulse:auth:teacher'), saved);
+  assert.equal(await auth.getToken(), 'tok1');
+});
+
+test('Google: 通信と応答の読み取りの失敗は network、生の例外を外へ出さない', async () => {
+  const offline = make(() => new Error(GOOGLE_TOKEN));
+  const unreadable = createAuth({ apiKey: 'FAKE_KEY', role: 'teacher', storage: fakeStorage(), now: () => 1000,
+    fetch: async () => ({ ok: true, json: async () => { throw new Error(GOOGLE_TOKEN); } }),
+  });
+  for (const auth of [offline.auth, unreadable]) {
+    await assert.rejects(auth.signInWithGoogleIdToken(GOOGLE_TOKEN, GOOGLE_URI), (e) => {
+      assert.equal(e.code, 'network');
+      assert.ok(!(e.message + e.stack + JSON.stringify(e)).includes(GOOGLE_TOKEN));
+      return true;
+    });
+    assert.equal(auth.user, null);
+  }
+});
+
+for (const body of [null, {}, { ...googleBody(), refreshToken: null }, { ...googleBody(), expiresIn: 'bad' }]) {
+  test('Google: 必須項目が壊れた成功応答は google-failed で採用しない', async () => {
+    const { auth, storage } = make(() => ({ status: 200, body }));
+    await assert.rejects(auth.signInWithGoogleIdToken(GOOGLE_TOKEN, GOOGLE_URI), { code: 'google-failed' });
+    assert.equal(auth.user, null);
+    assert.equal(storage.getItem('classpulse:auth:teacher'), null);
+  });
+}
+
+test('Google: 生徒の auth は通信も保存もしない', async () => {
+  const { auth, fetch, storage } = make(() => ({ status: 200, body: googleBody() }), 'student');
+  await assert.rejects(auth.signInWithGoogleIdToken(GOOGLE_TOKEN, GOOGLE_URI), { code: 'google-failed' });
+  assert.equal(fetch.calls.length, 0);
+  assert.equal(auth.user, null);
+  assert.equal(storage.getItem('classpulse:auth:student'), null);
+});
+
+for (const otherLogin of [false, true]) {
+  test(`Google: 待っている間の${otherLogin ? '別の人のログイン' : 'ログアウト'}を古い応答で上書きしない`, async () => {
+    const fetch = deferredFetch();
+    const storage = fakeStorage();
+    const auth = createAuth({ apiKey: 'FAKE_KEY', fetch, storage, now: () => 1000, role: 'teacher' });
+    const rejected = assert.rejects(auth.signInWithGoogleIdToken(GOOGLE_TOKEN, GOOGLE_URI), { code: 'auth' });
+    if (otherLogin) {
+      const login = auth.signInTeacher('other@example.com', 'fake-pass');
+      fetch.respond(1, 200, { localId: 'OTHER', idToken: 'other-token', refreshToken: 'other-refresh', expiresIn: '3600' });
+      await login;
+    } else auth.signOut();
+    fetch.respond(0, 200, googleBody());
+    await rejected;
+    assert.deepEqual(auth.user, otherLogin ? { uid: 'OTHER', email: 'other@example.com' } : null);
+    assert.deepEqual(JSON.parse(storage.getItem('classpulse:auth:teacher')), otherLogin
+      ? { uid: 'OTHER', email: 'other@example.com', refreshToken: 'other-refresh' } : null);
+  });
+}
+
 test('先生の登録: signUp に本文を送り、ログイン状態と更新用トークンだけを保存する', async () => {
   const { auth, fetch, storage } = make(() => ({ status: 200, body: {
     localId: 'NEW', email: 'new@example.com', idToken: 'new-token', refreshToken: 'new-refresh', expiresIn: '3600',

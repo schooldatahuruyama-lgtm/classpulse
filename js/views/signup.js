@@ -20,6 +20,24 @@ export function mount(root, ctx) {
   const confirm = el('input', { id: 'signup-confirm', type: 'password', autocomplete: 'new-password' });
   const error = el('div', { class: 'error', role: 'alert', hidden: true });
   const submit = el('button', { type: 'submit', class: 'btn btn-primary', text: '登録する' });
+  const google = ctx.googleLogin ? el('button', {
+    type: 'button', class: 'btn google-login-button', text: 'Google で登録・ログイン',
+    onclick: async () => {
+      if (busy || !alive) return;
+      error.hidden = true;
+      retryRow.hidden = true;
+      setBusy(true);
+      submit.textContent = '登録する';
+      try {
+        await ctx.googleLogin();
+      } catch {
+        if (alive) {
+          showError('Google でログインできませんでした。管理者の先生に知らせてください。');
+          setBusy(false);
+        }
+      }
+    },
+  }) : null;
   const retry = el('button', {
     type: 'button', class: 'btn', text: 'もう一度確かめる',
     onclick: () => { if (!busy && alive) ctx.navigate('pending'); },
@@ -33,6 +51,7 @@ export function mount(root, ctx) {
   const setBusy = (v) => {
     busy = v;
     for (const n of [email, password, confirm, submit, retry]) n.disabled = v;
+    if (google) google.disabled = v;
     submit.textContent = v ? '登録しています…' : '登録する';
   };
 
@@ -71,6 +90,9 @@ export function mount(root, ctx) {
     el('h1', { text: 'はじめて使う先生の登録' }),
     el('p', { text: '登録したあと、管理者の先生が承認すると使えるようになります。' }),
     el('div', { class: 'card' }, form,
+      google ? el('div', { class: 'google-login' },
+        el('p', { class: 'google-login-divider', text: 'または' }), google,
+        el('p', { text: 'Google アカウントを使うと、パスワードを決めなくても登録できます。' })) : null,
       el('p', {}, el('a', { href: '#/login', text: 'ログイン画面へ戻る' })))));
   email.focus();
   return () => { alive = false; password.value = ''; confirm.value = ''; };

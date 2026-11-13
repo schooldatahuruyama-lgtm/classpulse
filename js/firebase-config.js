@@ -1,6 +1,7 @@
-// Firebase の接続設定。ここに入れてよいのは、データベースの URL と Web API キーだけ。
+// Firebase の接続設定。データベースの URL、Web API キー、Google ログインのクライアント ID（公開してよい値）。
 // databaseURL の末尾には / を付けない。
 export const FIREBASE = {
+  googleClientId: '',
   databaseURL: 'https://classpulse-slide-default-rtdb.asia-southeast1.firebasedatabase.app',
   apiKey: 'AIzaSyB9NjA3kPd7STUJqn_cLiQ_PlmX5_W1_bE',
 };

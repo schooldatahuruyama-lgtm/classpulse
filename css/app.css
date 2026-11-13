@@ -10,6 +10,10 @@
 .loading { padding: var(--s-3); }
 .center-page { max-width: 480px; margin: 0 auto; padding: var(--s-4) var(--s-2); }
 .center-page h1 { text-align: center; }
+.google-login { margin-top: var(--s-2); }
+.google-login-divider { display: flex; align-items: center; gap: var(--s-2); }
+.google-login-divider::before, .google-login-divider::after { content: ''; flex: 1; border-top: 1px solid var(--c-border); }
+.google-login-button { width: 100%; }
 .page-pad { max-width: 720px; margin: 0 auto; padding: var(--s-4) var(--s-2); }
 
 .shell { display: grid; grid-template-columns: 220px 1fr; min-height: 100vh; }

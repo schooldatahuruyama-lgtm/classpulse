@@ -21,11 +21,13 @@ test('teacherList は管理者だけが一覧を読み、自分以外の利用�
   assert.equal(list['.write'], undefined);
 });
 
-test('申しこみは未登録の本人の password 認証だけ。管理者は削除だけできる', () => {
+test('申しこみは未登録の本人の匿名でない認証だけ。管理者は削除だけできる', () => {
   const requests = rules().teacherRequests;
   assert.equal(requests['.read'], ADMIN);
   assert.equal(requests.$uid['.read'], 'auth != null && auth.uid === $uid');
-  assert.equal(requests.$uid['.write'], "auth != null && ((auth.uid === $uid && auth.provider === 'password' && newData.exists() && !root.child('teacherList').child($uid).exists()) || (root.child('admins').child(auth.uid).val() === true && !newData.exists()))");
+  assert.equal(requests.$uid['.write'], "auth != null && ((auth.uid === $uid && auth.provider !== 'anonymous' && newData.exists() && !root.child('teacherList').child($uid).exists()) || (root.child('admins').child(auth.uid).val() === true && !newData.exists()))");
+  assert.ok(requests.$uid['.write'].includes("auth.provider !== 'anonymous'"));
+  assert.ok(!requests.$uid['.write'].includes("'password'"));
   assert.equal(requests.$uid['.validate'], "newData.hasChildren(['email', 'at']) && newData.child('email').isString() && newData.child('email').val().length <= 254 && newData.child('email').val() === auth.token.email && newData.child('at').val() === now");
   assert.equal(requests.$uid.$other['.validate'], "$other === 'email' || $other === 'at'");
 });

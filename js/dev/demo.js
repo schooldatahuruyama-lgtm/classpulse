@@ -163,6 +163,7 @@ export function createDemoBackend({ storage, sessionStorage, BroadcastChannel, n
       return { ...this.user };
     },
     async signUpTeacher(email, password) { return this.signInTeacher(email); },
+    async signInWithGoogleIdToken() { throw new NetError('google-failed', '練習モードでは使えません'); },
     async signInAnonymous() { throw new NetError('unknown', '先生の auth では使えません'); },
     async restore() { return this.user; },
     async getToken() {
@@ -184,6 +185,7 @@ export function createDemoBackend({ storage, sessionStorage, BroadcastChannel, n
   const studentAuth = {
     async signUpTeacher() { throw new NetError('unknown', '生徒の auth では使えません'); },
     async signInTeacher() { throw new NetError('unknown', '生徒の auth では使えません'); },
+    async signInWithGoogleIdToken() { throw new NetError('google-failed', '練習モードでは使えません'); },
     async signInAnonymous() {
       let uid = sessionStorage.getItem(STUDENT_KEY);
       if (!uid) { uid = newUid(); sessionStorage.setItem(STUDENT_KEY, uid); }
