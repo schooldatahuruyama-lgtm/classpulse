@@ -1,8 +1,8 @@
-// スライド編集: 資料スライドのキャンバス（文字・画像の選択、移動、大きさの変更、文字の入力）。
+// スライド編集: 資料スライドのキャンバス（文字・画像・図形の選択、移動、大きさの変更、文字の入力）。
 // 操作は Pointer Events（指でもマウスでも動く）。位置と大きさはキャンバスに対する割合（0〜1）。
 import { el } from '../../ui.js';
-import { renderSlide, placeItem, styleText } from '../../slide-render.js';
-import { clampItem, MIN_ITEM_SIZE as MIN_SIZE } from '../../model.js';
+import { renderSlide, placeItem, styleText, drawShape, SHAPE_NAMES } from '../../slide-render.js';
+import { clampItem, normalizeShapeItem, SHAPE_KINDS, MIN_ITEM_SIZE as MIN_SIZE } from '../../model.js';
 
 const DRAG_START_PX = 6;          // これより小さい動きはタップとみなす
 const KEY_STEP = 0.01;            // 矢印キー 1 回の移動量
@@ -12,18 +12,47 @@ const IMAGE_BUSY_LABEL = '画像を読みこんでいます…';
 
 const clamp = (v, lo, hi) => Math.min(Math.max(lo, hi), Math.max(lo, v));
 
+// 図形の種類の一覧に出す小さな印（読み上げない）
+const SHAPE_MARKS = { rect: '□', ellipse: '○', triangle: '△', line: '／', arrow: '→' };
+
 function itemLabel(item) {
   if (item.kind === 'image') return '画像';
+  if (item.kind === 'shape') return `図形（${SHAPE_NAMES[normalizeShapeItem(item).shape]}）`;
   const t = String(item.text || '').replace(/\s+/g, ' ').trim();
   return t ? `文字「${t.length > 20 ? `${t.slice(0, 20)}…` : t}」` : '文字（空）';
 }
 
-// 道具の帯（文字を追加・画像を追加）。画像の追加中かどうかは編集画面が持ち、setImageBusy で知らせる
+// 要素の位置と大きさを置く。図形は、箱の縦横比に合わせて SVG も描き直す（線と矢印の先がのびないように）
+function place(node, item) {
+  placeItem(node, item);
+  if (item.kind === 'shape') drawShape(node, item);
+}
+
+// 道具の帯（文字を追加・画像を追加・図形）。画像の追加中かどうかは編集画面が持ち、setImageBusy で知らせる
 function buildTools(ed) {
   const file = el('input', { type: 'file', accept: 'image/*', class: 'ed-file', tabindex: '-1', 'aria-hidden': 'true' });
   const error = el('div', { class: 'error', role: 'alert', hidden: true });
   const imgBtn = el('button', { type: 'button', class: 'btn', text: IMAGE_LABEL, onclick: () => file.click() });
   const textBtn = el('button', { type: 'button', class: 'btn', text: '文字を追加', onclick: () => { error.hidden = true; ed.addText(); } });
+
+  // 「図形」: 押すと種類の一覧を開く。選ぶと、その図形を置いて一覧を閉じる
+  const shapeMenu = el('div', { id: 'ed-shape-menu', class: 'ed-shape-menu', role: 'group', 'aria-label': '図形の種類', hidden: true },
+    SHAPE_KINDS.map((shape) => el('button', {
+      type: 'button', class: 'btn ed-shape-pick', dataset: { shape },
+      onclick: () => { error.hidden = true; setMenu(false); ed.addShape(shape); },
+    }, el('span', { class: 'ed-shape-mark', 'aria-hidden': 'true', text: SHAPE_MARKS[shape] }), el('span', { text: SHAPE_NAMES[shape] }))));
+  const shapeBtn = el('button', {
+    type: 'button', class: 'btn', text: '図形', 'aria-expanded': 'false', 'aria-controls': 'ed-shape-menu',
+    onclick: () => setMenu(shapeMenu.hidden),
+  });
+  function setMenu(open) {
+    shapeMenu.hidden = !open;
+    shapeBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open) shapeMenu.querySelector('button')?.focus();
+  }
+  shapeMenu.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape') { ev.preventDefault(); setMenu(false); shapeBtn.focus(); }
+  });
 
   file.addEventListener('change', () => {
     const f = file.files && file.files[0];
@@ -44,7 +73,8 @@ function buildTools(ed) {
   setImageBusy(ed.isImageBusy());
 
   const node = el('div', { class: 'ed-tools-wrap' },
-    el('div', { class: 'ed-tools', role: 'toolbar', 'aria-label': '要素を追加' }, textBtn, imgBtn, file),
+    el('div', { class: 'ed-tools', role: 'toolbar', 'aria-label': '要素を追加' }, textBtn, imgBtn, shapeBtn, file),
+    shapeMenu,
     error);
   return { node, setImageBusy, showError };
 }
@@ -168,7 +198,7 @@ export function mountCanvas(host, ed) {
       g.cur = { ...o, w: clamp(o.w + dx, MIN_SIZE, 1 - o.x), h: clamp(o.h + dy, MIN_SIZE, 1 - o.y) };
     }
     const node = nodeOf(g.id);
-    if (node) placeItem(node, g.cur);
+    if (node) place(node, g.cur);
     placeHandle(g.cur);
   }
 
@@ -190,7 +220,7 @@ export function mountCanvas(host, ed) {
     if (!g || ev.pointerId !== g.pointerId) return;
     gesture = null;
     const node = nodeOf(g.id);
-    if (node) placeItem(node, g.orig);
+    if (node) place(node, g.orig);
     placeHandle(g.orig);
   }
 
@@ -228,7 +258,7 @@ export function mountCanvas(host, ed) {
     ev.preventDefault();
     select(id);
     const next = clampItem({ ...item, x: item.x + d[0], y: item.y + d[1] });
-    nodeOf(id) && placeItem(nodeOf(id), next);
+    nodeOf(id) && place(nodeOf(id), next);
     placeHandle(next);
     ed.updateItem(next);
   }
@@ -244,7 +274,7 @@ export function mountCanvas(host, ed) {
     const o = clampItem(item);
     const next = { ...o, w: clamp(o.w + d[0], MIN_SIZE, 1 - o.x), h: clamp(o.h + d[1], MIN_SIZE, 1 - o.y) };
     const node = nodeOf(id);
-    if (node) placeItem(node, next);
+    if (node) place(node, next);
     placeHandle(next);
     ed.updateItem(next);
   }
@@ -305,7 +335,7 @@ export function mountCanvas(host, ed) {
     const node = nodeOf(id);
     const item = findItem(id);
     if (!node || !item) return;
-    placeItem(node, item);
+    place(node, item);
     if (item.kind === 'text') styleText(node, item);
     if (ed.state.itemId === id) placeHandle(item);
   }

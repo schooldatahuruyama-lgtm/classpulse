@@ -1,7 +1,8 @@
 // スライドを 16:9 の枠に描く。編集・発表・生徒の画面で共通に使う。
 // 文字は textContent で出す。画像の src は教材の images のデータ URL だけ。
+// 図形は createElementNS で組み立てた SVG（色・数は model.js で正した値だけを属性に入れる）。
 import { el } from './ui.js';
-import { clampItem, ratingOptions } from './model.js';
+import { clampItem, ratingOptions, normalizeShapeItem, shapeDrawing } from './model.js';
 
 // 文字の大きさ（枠の幅に対する %）
 export const TEXT_SIZE_PCT = { s: 2.5, m: 4, l: 6, xl: 9 };
@@ -17,6 +18,9 @@ export const TEXT_COLORS = [
 ];
 
 export const OPTION_MARKS = ['A', 'B', 'C', 'D', 'E', 'F'];
+
+// 図形の種類の名前（編集画面のボタン・読み上げに使う）
+export const SHAPE_NAMES = { rect: '四角形', ellipse: '円', triangle: '三角形', line: '線', arrow: '矢印' };
 
 const ALIGNS = ['left', 'center', 'right'];
 
@@ -56,8 +60,40 @@ function safeImageSrc(images, imageId) {
   return typeof src === 'string' && src.startsWith('data:image/') ? src : null;
 }
 
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+// 属性に入れる数（長い小数を短くする）
+const num = (v) => String(Math.round(v * 1000) / 1000);
+
+// 図形の SVG を node の中に描き直す（編集中に箱の大きさが変わったときにも使う）。
+// viewBox は「スライドの幅の 1%」を 1 とした箱の大きさなので、箱いっぱいに広げても縦横の比が変わらない
+export function drawShape(node, item) {
+  const d = shapeDrawing(item);
+  const svg = document.createElementNS(SVG_NS, 'svg');
+  svg.setAttribute('class', 'slide-shape-svg');
+  svg.setAttribute('viewBox', `0 0 ${num(d.width)} ${num(d.height)}`);
+  svg.setAttribute('preserveAspectRatio', 'none');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('focusable', 'false');
+  for (const part of d.parts) {
+    const shape = document.createElementNS(SVG_NS, part.tag);
+    for (const [k, v] of Object.entries(part.attrs)) shape.setAttribute(k, typeof v === 'number' ? num(v) : v);
+    if (part.points) shape.setAttribute('points', part.points.map(([x, y]) => `${num(x)},${num(y)}`).join(' '));
+    svg.append(shape);
+  }
+  node.querySelector('.slide-shape-svg')?.remove();
+  node.prepend(svg);
+}
+
 function renderItem(item, images) {
   if (!item || typeof item !== 'object') return null;
+  if (item.kind === 'shape') {
+    const shape = normalizeShapeItem(item);
+    const node = el('div', { class: 'slide-item slide-shape', dataset: { itemId: String(item.id ?? '') } });
+    placeItem(node, shape);
+    drawShape(node, shape);
+    return node;
+  }
   if (item.kind === 'image') {
     const node = el('div', { class: 'slide-item slide-image', dataset: { itemId: String(item.id ?? '') } });
     const src = safeImageSrc(images, item.imageId);

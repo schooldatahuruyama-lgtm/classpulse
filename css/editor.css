@@ -100,6 +100,36 @@ textarea.ed-textarea:focus-visible { outline: none; }
 .ed-check { font-weight: 700; }
 .ed-swatch { flex: none; width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--c-navy); }
 .ed-wide { width: 100%; }
+
+/* 図形の種類の一覧（「図形」を押すと開く） */
+.ed-shape-menu {
+  display: flex; flex-wrap: wrap; gap: var(--s-1); margin-bottom: var(--s-1); padding: var(--s-1);
+  background: var(--c-card); border: 2px solid var(--c-border); border-radius: var(--r-1);
+}
+.ed-shape-menu[hidden] { display: none; }
+.ed-shape-pick { gap: 6px; }
+.ed-shape-mark { font-size: 20px; line-height: 1; }
+
+/* 図形の色: 丸いボタン。選んでいる色は太い枠と「✓」（色だけに頼らない）。「なし」は、ななめの線の入った丸 */
+.ed-colors { display: grid; grid-template-columns: repeat(auto-fill, minmax(44px, 1fr)); gap: 4px; }
+.ed-color {
+  position: relative; display: flex; align-items: center; justify-content: center;
+  width: 44px; height: 44px; padding: 0; border: 3px solid transparent; border-radius: 50%;
+  background: transparent; cursor: pointer;
+}
+.ed-color.is-on { border-color: var(--c-navy); }
+.ed-color:focus-visible { outline: 3px solid var(--c-main); outline-offset: 1px; }
+.ed-color:disabled { cursor: not-allowed; opacity: 0.35; }
+.ed-color-dot { width: 30px; height: 30px; border-radius: 50%; border: 1px solid var(--c-border); }
+.ed-color-dot.is-none {
+  background: linear-gradient(to top right, #FFFFFF calc(50% - 1.5px), var(--c-danger-text) calc(50% - 1.5px), var(--c-danger-text) calc(50% + 1.5px), #FFFFFF calc(50% + 1.5px));
+}
+.ed-color-check {
+  position: absolute; right: -4px; top: -4px; display: flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; border-radius: 50%; background: var(--c-navy); color: #FFFFFF;
+  font-size: 13px; font-weight: 700; line-height: 1;
+}
+.ed-color-now { margin: 4px 0 0; }
 .ed-fieldset { border: 0; margin: 0 0 var(--s-2); padding: 0; min-width: 0; }
 .ed-radio {
   display: flex; align-items: center; gap: var(--s-1); min-height: 44px; padding: 4px var(--s-1); margin-bottom: var(--s-1);
