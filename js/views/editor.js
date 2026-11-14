@@ -22,6 +22,7 @@ import { renderSlide } from '../slide-render.js';
 import { youTubeEmbedUrl } from '../video.js';
 import { backgroundSaver, useAuth } from './editor/background.js';
 import { NARROW_QUERY, slideBarLabel, shouldCloseSlidePanel } from './editor/phone-logic.js';
+import { createHistory, historySelection } from './editor/history.js';
 
 const UNTITLED = '無題の教材';
 const LEAVE_TITLE = '保存できていない変更があります。このまま移動しますか？';
@@ -30,6 +31,11 @@ const IMAGE_TOO_BIG = '画像の合計が 5MB を超えるため、追加でき�
 const IMAGE_FAILED = '画像を読み込めませんでした。別の画像を選んでください。';
 const IMAGE_SLIDE_GONE = 'スライドが削除されたため、画像を追加できませんでした。';
 const THUMB_DELAY_MS = 250;
+
+// 入力し直した同じ値や、端で止まった操作は変更にしない。
+function sameValue(a, b) {
+  return a === b || (Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => v === b[i]));
+}
 
 // 保存する形（教材名が空なら「無題の教材」）
 function forSave(deck) {
@@ -150,6 +156,8 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
   const uid = ctx.auth.user.uid;     // この教材の持ち主。保存はいつも、この先生の repo で書く
   const bg = backgroundSaver();
 
+  const history = createHistory();
+
   const narrowMedia = window.matchMedia?.(NARROW_QUERY);
   const isNarrow = () => narrowMedia?.matches ?? false;
   let openPanel = null;
@@ -169,6 +177,7 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
   function markGone() {
     if (gone) return;
     gone = true;
+    updateHistoryButtons();
     if (!alive) return;
     closeAllDialogs();
     if (canvas) canvas.destroy();
@@ -207,8 +216,16 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
   // ---- 画面の骨組み ----
   const titleInput = el('input', {
     type: 'text', class: 'ed-title', 'aria-label': '教材名', placeholder: UNTITLED, value: state.deck.title,
-    oninput: () => change({ ...state.deck, title: titleInput.value }),
+    oninput: () => change(titleInput.value === state.deck.title ? state.deck : { ...state.deck, title: titleInput.value }, {}, { group: 'title' }),
   });
+  const historyButton = (action, mark, label) => el('button', {
+    type: 'button', class: 'btn ed-history-button', 'aria-label': label, disabled: true,
+    onclick: () => ed[action](),
+  }, el('span', { 'aria-hidden': 'true', text: mark }), el('span', { class: 'ed-history-label', text: ` ${label}` }));
+  const undoBtn = historyButton('undo', '↶', '元に戻す');
+  const redoBtn = historyButton('redo', '↷', 'やり直す');
+  const historyButtons = el('div', { class: 'ed-history' }, undoBtn, redoBtn);
+  const historyNotice = el('div', { class: 'ed-history-notice', 'aria-live': 'polite', 'aria-atomic': 'true' });
   const presentBtn = el('button', { type: 'button', class: 'btn btn-primary', text: '発表を開始', onclick: () => startPresent() });
   const messages = el('div', { class: 'ed-messages', role: 'alert' });
   const left = el('aside', { id: 'ed-left', class: 'ed-left', 'aria-label': 'スライド一覧' });
@@ -240,10 +257,11 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
       el('span', { class: 'ed-phone-only', 'aria-hidden': 'true', text: '←' }), el('span', { class: 'ed-back-label', text: '← 一覧へ' })),
     titleInput,
     saveBox,
+    historyButtons,
     el('div', { class: 'ed-top-actions' }, presentBtn));
 
   const body = el('div', { class: 'ed-body' }, left, center, right);
-  const editor = el('div', { class: 'editor' }, top, messages, body, bottom);
+  const editor = el('div', { class: 'editor' }, top, historyNotice, messages, body, bottom);
   root.replaceChildren(editor);
   renderSaveState();
 
@@ -394,14 +412,43 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
   }
 
   // 教材を新しい値にして自動保存へ渡す。parts で描き直す所を選ぶ
-  function change(next, parts = {}) {
+  function change(next, parts = {}, { group, beforeSelection, afterSelection } = {}) {
+    if (next === state.deck) return;
+    history.record({ ...state, ...beforeSelection }, { ...state, ...parts.selection, ...afterSelection, deck: next }, group);
     state.deck = next;
+    if (parts.selection) {
+      Object.assign(state, parts.selection);
+      history.breakGroup();
+    }
     if (canvas) canvas.validateEdit();
     autosaver.touch(next);
     if (parts.list) renderList();
     else if (parts.thumb && state.slideId) scheduleThumb(state.slideId);
     if (parts.center) renderCenter();
     if (parts.side) renderSide();
+    updateHistoryButtons();
+  }
+
+  function updateHistoryButtons() {
+    undoBtn.disabled = !alive || starting || gone || !history.canUndo();
+    redoBtn.disabled = !alive || starting || gone || !history.canRedo();
+  }
+
+  function restoreHistory(action) {
+    if (!alive || starting || gone || document.querySelector('dialog[open]')) return false;
+    if (!(action === 'undo' ? history.canUndo() : history.canRedo())) return false;
+    if (canvas) canvas.resetInteraction();
+    const snapshot = history[action]();
+    Object.assign(state, historySelection(snapshot, state), { deck: snapshot.deck, editingId: null });
+    titleInput.value = state.deck.title;
+    autosaver.touch(state.deck);
+    renderList();
+    renderCenter();
+    renderSide();
+    updateHistoryButtons();
+    // 同じ操作の連打でも、読み上げへ新しい結果を渡す。
+    historyNotice.replaceChildren(el('span', { text: action === 'undo' ? '元に戻しました。' : 'やり直しました。' }));
+    return true;
   }
 
   // ---- 編集の操作（左・中央・右の部品から呼ぶ） ----
@@ -409,6 +456,9 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
     state,
     currentSlide,
     isNarrow,
+    breakGroup: () => history.breakGroup(),
+    undo: () => restoreHistory('undo'),
+    redo: () => restoreHistory('redo'),
     openSettings(opener) {
       if (openPanel === right) {
         if (isNarrow() && !phoneEditing) renderSide();
@@ -426,6 +476,7 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
 
     selectSlide(id) {
       if (canvas) canvas.finishEdit();
+      history.breakGroup();
       state.slideId = id;
       state.itemId = null;
       state.editingId = null;
@@ -439,16 +490,16 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
       if (canvas) canvas.finishEdit();
       const id = newId();
       const after = state.slideId ?? undefined;
-      state.slideId = id;
-      state.itemId = null;
-      state.editingId = null;
-      change(addSlide(state.deck, createSlide(type), id, after), { list: true, center: true, side: true });
+      change(addSlide(state.deck, createSlide(type), id, after), {
+        list: true, center: true, side: true, selection: { slideId: id, itemId: null, editingId: null },
+      });
       afterSlideAction('add');
     },
 
     moveSlide(delta) {
       if (!state.slideId) return;
-      change(moveSlide(state.deck, state.slideId, delta), { list: true });
+      const next = moveSlide(state.deck, state.slideId, delta);
+      change(sameValue(next.order, state.deck.order) ? state.deck : next, { list: true });
       // 押したボタンにフォーカスを戻す（端まで来て押せなくなったら、スライドへ）
       const btn = left.querySelector(`[data-focus-key="${delta < 0 ? 'up' : 'down'}"]`);
       (btn && !btn.disabled ? btn : left.querySelector('[aria-current="true"]'))?.focus();
@@ -459,10 +510,7 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
       if (canvas) canvas.finishEdit();
       const id = newId();
       const next = duplicateSlide(state.deck, state.slideId, id, () => newId());
-      state.slideId = id;
-      state.itemId = null;
-      state.editingId = null;
-      change(next, { list: true, center: true, side: true });
+      change(next, { list: true, center: true, side: true, selection: { slideId: id, itemId: null, editingId: null } });
       afterSlideAction('duplicate');
     },
 
@@ -470,43 +518,47 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
       const id = state.slideId;
       if (!id) return;
       const ok = await confirmDialog({
-        title: 'このスライドを削除しますか？', body: '削除したスライドは元に戻せません。', okLabel: '削除', danger: true,
+        title: 'このスライドを削除しますか？', body: 'この画面を開いている間は、「元に戻す」で戻せます。', okLabel: '削除', danger: true,
       });
       if (!ok || !alive || !state.deck.slides[id]) return;
       if (canvas) canvas.finishEdit();
       const at = state.deck.order.indexOf(id);
       const next = removeSlide(state.deck, id);
-      state.slideId = next.order[Math.min(at, next.order.length - 1)] ?? null;
-      state.itemId = null;
-      state.editingId = null;
-      change(next, { list: true, center: true, side: true });
+      change(next, { list: true, center: true, side: true,
+        selection: { slideId: next.order[Math.min(at, next.order.length - 1)] ?? null, itemId: null, editingId: null },
+      });
     },
 
     selectItem(id) {
       if (state.itemId === id) return;
       if (canvas) canvas.finishEdit();
+      history.breakGroup();
       state.itemId = id;
       if (canvas) canvas.applySelection();
       renderSide();
     },
 
     // 今のスライドの要素を 1 つ置きかえる
-    updateItem(item, { refresh = false, side = false } = {}) {
+    updateItem(item, { refresh = false, side = false, group } = {}) {
       const slide = currentSlide();
       if (!slide || !Array.isArray(slide.items)) return;
+      const cur = slide.items.find((it) => it.id === item.id);
+      if (!cur) return;
+      const same = Object.keys(cur).length === Object.keys(item).length && Object.keys(item).every((key) => sameValue(cur[key], item[key]));
       const items = slide.items.map((it) => (it.id === item.id ? item : it));
-      change(updateSlide(state.deck, state.slideId, { ...slide, items }), { thumb: true, side });
+      change(same ? state.deck : updateSlide(state.deck, state.slideId, { ...slide, items }), { thumb: true, side }, {
+        group: typeof group === 'string' ? JSON.stringify(['item', state.slideId, item.id, group]) : undefined,
+      });
       if (refresh && canvas) canvas.refreshItem(item.id);
     },
 
     removeItem(id) {
       const slide = currentSlide();
       if (!slide || !Array.isArray(slide.items)) return;
+      if (!slide.items.some((it) => it.id === id)) return;
       if (canvas) canvas.finishEdit();
-      state.itemId = null;
-      state.editingId = null;
       const next = updateSlide(state.deck, state.slideId, { ...slide, items: slide.items.filter((it) => it.id !== id) });
-      change(pruneImages(next), { thumb: true, center: true, side: true });
+      change(pruneImages(next), { thumb: true, center: true, side: true, selection: { itemId: null, editingId: null } });
     },
 
     addText() {
@@ -514,9 +566,10 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
       if (!slide || slide.type !== 'content') return;
       if (canvas) canvas.finishEdit();
       const item = createTextItem(newId());
-      state.itemId = item.id;
-      state.editingId = item.id; // 足したらすぐ入力できるように
-      change(updateSlide(state.deck, state.slideId, { ...slide, items: [...slide.items, item] }), { thumb: true, center: true, side: true });
+      // 足したらすぐ入力できるようにする。履歴には足す前の選択を残す。
+      change(updateSlide(state.deck, state.slideId, { ...slide, items: [...slide.items, item] }), {
+        thumb: true, center: true, side: true, selection: { itemId: item.id, editingId: item.id },
+      });
     },
 
     // 図形を足して選ぶ（文字と違い、入力は始めない）
@@ -525,9 +578,9 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
       if (!slide || slide.type !== 'content') return;
       if (canvas) canvas.finishEdit();
       const item = createShapeItem(newId(), shape);
-      state.itemId = item.id;
-      state.editingId = null;
-      change(updateSlide(state.deck, state.slideId, { ...slide, items: [...slide.items, item] }), { thumb: true, center: true, side: true });
+      change(updateSlide(state.deck, state.slideId, { ...slide, items: [...slide.items, item] }), {
+        thumb: true, center: true, side: true, selection: { itemId: item.id, editingId: null },
+      });
       // 足した図形にフォーカスを置く（キーボードでもすぐ動かせるように）
       center.querySelector('.ed-item.is-selected')?.focus({ preventScroll: true });
     },
@@ -538,7 +591,7 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
       if (!slide || !Array.isArray(slide.items)) return;
       if (canvas) canvas.finishEdit();
       const next = front ? bringToFront(slide, id) : sendToBack(slide, id);
-      change(updateSlide(state.deck, state.slideId, next), { thumb: true, center: true, side: true });
+      change(sameValue(slide.items, next.items) ? state.deck : updateSlide(state.deck, state.slideId, next), { thumb: true, center: true, side: true });
     },
 
     isImageBusy: () => imageTask !== null,
@@ -575,10 +628,13 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
     },
 
     // アンケートの一部を変える（入力欄はそのまま。縮小表示だけ描き直す）
-    patchSlide(patch) {
+    patchSlide(patch, { group } = {}) {
       const slide = currentSlide();
       if (!slide) return;
-      change(updateSlide(state.deck, state.slideId, { ...slide, ...patch }), { thumb: true });
+      const same = Object.keys(patch).every((key) => sameValue(slide[key], patch[key]));
+      change(same ? state.deck : updateSlide(state.deck, state.slideId, { ...slide, ...patch }), { thumb: true }, {
+        group: typeof group === 'string' ? JSON.stringify(['slide', state.slideId, group]) : undefined,
+      });
       // 自由記述・ワードクラウド・5 段階評価は、中央の見本も描き直す（入力欄はそのまま）
       const cur = currentSlide();
       if (freePreview && cur && (cur.type === 'free' || cur.type === 'cloud' || cur.type === 'rating')) renderSlide(freePreview, cur, state.deck.images);
@@ -617,8 +673,12 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
     }
     if (canvas) canvas.finishEdit();
     const here = state.slideId === slideId;
-    if (here) { state.itemId = item.id; state.editingId = null; }
-    change(next, { list: !here, thumb: true, center: here, side: here });
+    change(next, { list: !here, thumb: true, center: here, side: here,
+      selection: here ? { itemId: item.id, editingId: null } : null,
+    }, {
+      // 表示中のスライドとは別に、履歴には画像を足した場所を残す。
+      beforeSelection: { slideId, itemId: null }, afterSelection: { slideId, itemId: item.id },
+    });
     return null;
   }
 
@@ -660,6 +720,7 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
   async function startPresent() {
     if (starting) return;
     starting = true;
+    updateHistoryButtons();
     presentBtn.disabled = true;
     presentBtn.textContent = '準備しています…';
     messages.replaceChildren();
@@ -693,6 +754,7 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
       } else if (r.status === 'started') await openCreated(r.sid);
     } finally {
       starting = false;
+      updateHistoryButtons();
       presentBtn.disabled = false;
       presentBtn.textContent = '発表を開始';
     }
@@ -743,9 +805,19 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
     if (document.visibilityState === 'hidden') autosaver.flush();
   }
 
+  function onHistoryKey(ev) {
+    if (ev.defaultPrevented || ev.isComposing || ev.altKey || !(ev.ctrlKey || ev.metaKey)) return;
+    if (document.querySelector('dialog[open]')) return;
+    if ([ev.target, document.activeElement].some((node) => node instanceof Element && (node.closest('input, textarea') || node.isContentEditable))) return;
+    const key = ev.key.toLowerCase();
+    const action = key === 'z' ? (ev.shiftKey ? 'redo' : 'undo') : key === 'y' ? 'redo' : null;
+    if (action && ed[action]()) ev.preventDefault();
+  }
+
   document.addEventListener('click', onLinkClick, true);
   window.addEventListener('beforeunload', onBeforeUnload);
   document.addEventListener('visibilitychange', onVisibility);
+  document.addEventListener('keydown', onHistoryKey);
 
   function onWidthChange() {
     closePanel();
@@ -758,6 +830,8 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
     // せまい画面では中央、下のパネル、帯の順で Tab が進む。
     // 幅をまたぐときだけ動かし、設定の描き直しでは外わくに触れない。
     body.append(...(isNarrow() ? [center, left, right] : [left, center, right]));
+    const actions = top.querySelector('.ed-top-actions');
+    top.append(...(isNarrow() ? [actions, saveBox, historyButtons] : [saveBox, historyButtons, actions]));
   }
   narrowMedia?.addEventListener('change', onWidthChange);
   window.addEventListener('resize', updatePhoneSpace);
@@ -785,9 +859,12 @@ function startEditor(root, ctx, deckId, initialDeck, { adopted = false } = {}) {
     if (videoPreview) videoPreview.box.replaceChildren();
     window.removeEventListener('beforeunload', onBeforeUnload);
     document.removeEventListener('visibilitychange', onVisibility);
+    document.removeEventListener('keydown', onHistoryKey);
     if (thumbTimer !== null) window.clearTimeout(thumbTimer);
     const unsaved = !gone && (autosaver.hasPending() || saveState === 'failed');
     alive = false; // これより後、この画面の自動保存は再試行しない（画面の外の保存が引きつぐ）
+    history.clear();
+    updateHistoryButtons();
     flushDone = autosaver.flush();
     if (unsaved) {
       // 最後の保存が済めばそれで終わり。失敗したら、画面の外の保存が再試行を続ける
