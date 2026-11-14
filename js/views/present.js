@@ -15,6 +15,7 @@ import {
 import { renderSlide } from '../slide-render.js';
 import { createSessionHost } from '../session-host.js';
 import { isChoiceSlide, ratingOptions } from '../model.js';
+import { clampStep, stepCount } from '../animation.js';
 
 const FAIL = '通信できなかったため、進められませんでした。';
 const ENDING = '授業を終了しています…';
@@ -443,6 +444,7 @@ export function mount(root, ctx) {
     l.prevBtn = btn('pr-prev', '← 前へ', () => go(-1));
     l.prevBtn.setAttribute('aria-label', '前へ'); // 矢印の記号は読み上げない
     l.pos = el('span', { class: 'pr-pos' });
+    l.step = el('span', { class: 'pr-step', hidden: true });
     l.nextBtn = btn('btn-primary pr-next', '次へ →', () => go(1));
     l.nextBtn.setAttribute('aria-label', '次へ');
     l.last = el('span', { class: 'pr-last', hidden: true, text: '最後のスライドです' });
@@ -453,7 +455,7 @@ export function mount(root, ctx) {
     l.qrBtn = btn('pr-qr-btn', 'QR コード', openQr);
     l.endBtn = btn('btn-danger pr-end', '授業を終了', endClass);
     l.bar = el('div', { class: 'pr-bar', role: 'toolbar', 'aria-label': '発表の操作' },
-      el('div', { class: 'pr-group pr-group-nav' }, l.prevBtn, l.pos, l.nextBtn, l.last),
+      el('div', { class: 'pr-group pr-group-nav' }, l.prevBtn, l.pos, l.step, l.nextBtn, l.last),
       l.pollGroup,
       el('div', { class: 'pr-group pr-group-side' }, l.count, l.qrBtn),
       el('div', { class: 'pr-group pr-group-end' }, l.endBtn));
@@ -737,6 +739,8 @@ export function mount(root, ctx) {
     const index = Number.isInteger(cur.index) ? cur.index : -1;
     const total = state.order.length;
     const slide = index >= 0 && cur.slideId ? state.slides[cur.slideId] || null : null;
+    const count = stepCount(slide);
+    const step = Number.isFinite(cur.step) ? clampStep(slide, cur.step) : count;
 
     // 中央: 参加の画面か、今のスライド。自由記述の結果を表示中なら回答の一覧、ワードクラウドなら雲
     // （freeItems・cloudItems が null の間は作らない。スライドが変わる・結果をかくすと、一覧・雲・確認も捨てる）
@@ -746,7 +750,7 @@ export function mount(root, ctx) {
     const pollNow = index >= 0 ? currentPoll() : null;
     const shownCorrect = !!slide && slide.type === 'quiz' && pollNow && pollNow.poll.resultsVisible === true
       && Number.isInteger(state.correct) ? state.correct : null;
-    const key = index < 0 ? 'join' : `${showBoard ? 'board' : showCloud ? 'cloud' : 'slide'}:${cur.slideId}${shownCorrect !== null ? `:correct:${shownCorrect}` : ''}`;
+    const key = index < 0 ? 'join' : `${showBoard ? 'board' : showCloud ? 'cloud' : 'slide'}:${cur.slideId}:${step}${shownCorrect !== null ? `:correct:${shownCorrect}` : ''}`;
     if (key !== shownKey) {
       shownKey = key;
       dropBoards();
@@ -757,7 +761,12 @@ export function mount(root, ctx) {
       } else if (showCloud) {
         cloud = buildCloud(cur.slideId, slide);
         l.stage.replaceChildren(cloud.root);
-      } else renderSlide(l.stage, slide, state.images, { sample: false, correct: shownCorrect, player: slide?.type === 'video' });
+      } else renderSlide(l.stage, slide, state.images, { sample: false, correct: shownCorrect, player: slide?.type === 'video', step, slideId: cur.slideId, animate: state.animate && !offline });
+      // 初回の読みこみと、結果を表示しただけの描き直しでは切り替え効果を付けない。
+      if (index >= 0 && l.slideId !== undefined && l.slideId !== cur.slideId && state.animate && !offline) {
+        l.stage.children[0]?.classList.add('slide-enter');
+      }
+      l.slideId = index >= 0 ? cur.slideId : '';
       l.stage.classList.toggle('is-join', index < 0);
       l.stage.classList.toggle('is-board', showBoard || showCloud);
     }
@@ -773,9 +782,11 @@ export function mount(root, ctx) {
 
     // 下の帯
     l.pos.textContent = index >= 0 ? `${index + 1} / ${total}` : `開始前 / ${total}`;
+    l.step.hidden = count === 0;
+    l.step.textContent = count ? `出す ${step}／${count}` : '';
     l.count.textContent = participantsText();
-    setOff(l.prevBtn, off || index <= 0);
-    const atLast = index >= total - 1;
+    setOff(l.prevBtn, off || (index <= 0 && step === 0));
+    const atLast = index >= total - 1 && step >= count;
     l.nextBtn.hidden = atLast;
     l.last.hidden = !atLast;
     setOff(l.nextBtn, off);

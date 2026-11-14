@@ -8,6 +8,7 @@
 // - 結果をかくすときは、公開済みの集計（results/<slideId>）も消す
 
 import { CONFIG } from './config.js';
+import { advance, clampStep, stepCount } from './animation.js';
 import { isChoiceSlide, choiceCount, ratingOptions, quizCorrect, withoutCorrect } from './model.js';
 
 function toArray(v) {
@@ -49,7 +50,7 @@ export function buildSession(deck, deckId, ownerUid, startedAt) {
     pub: {
       title: deck.title,
       state: 'live',
-      current: { slideId: '', index: -1 },
+      current: { slideId: '', index: -1, step: 0 },
       polls,
     },
     deck: {
@@ -77,18 +78,29 @@ export function goToPatch(pub, order, targetIndex) {
   const to = polls[targetId];
   // 行き先の質問は、待機中のときだけ受付を始める（締切済みは開けない）
   if (to && to.status === 'waiting') patch[`polls/${targetId}/status`] = 'open';
-  patch.current = { slideId: targetId, index: targetIndex };
+  patch.current = { slideId: targetId, index: targetIndex, step: 0 };
   return patch;
 }
 
-export function nextPatch(pub, order) {
-  return goToPatch(pub, order, pub.current.index + 1);
+function advancePatch(pub, order, slides, dir) {
+  const cur = pub.current || { slideId: '', index: -1 };
+  const next = advance({ order, slides, slideId: cur.slideId, step: cur.step }, dir);
+  if (next.moved) {
+    const patch = goToPatch(pub, order, order.indexOf(next.slideId));
+    if (patch) patch.current.step = next.step;
+    return patch;
+  }
+  const step = Number.isFinite(cur.step) ? clampStep(slides[cur.slideId], cur.step) : stepCount(slides[cur.slideId]);
+  // 同じ資料の中で出すだけなら、質問の受付・締切には触れない。
+  return next.step === step ? null : { current: { ...cur, step: next.step } };
 }
 
-export function prevPatch(pub, order) {
-  // 参加の画面（index -1）からは戻らない
-  if (pub.current.index < 0) return null;
-  return goToPatch(pub, order, pub.current.index - 1);
+export function nextPatch(pub, order, slides = {}) {
+  return advancePatch(pub, order, slides, 1);
+}
+
+export function prevPatch(pub, order, slides = {}) {
+  return advancePatch(pub, order, slides, -1);
 }
 
 export function pausePatch(pub, slideId, paused) {

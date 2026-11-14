@@ -162,7 +162,7 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
   // 文章・言葉は「結果を表示」中の freeItems・cloudItems にだけ入れる。
   // クイズの正解と内訳（tallies の counts）は、「正解を表示」中にだけ入れる（state.tallies は手元の集計。渡すのは publicTallies()）
   const state = {
-    phase: 'loading', connection: 'connected', title: '',
+    phase: 'loading', connection: 'connected', title: '', animate: false,
     order: [], slides: {}, images: {},
     pub: null, participants: 0, tallies: {},
   };
@@ -171,6 +171,7 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
   let unsubscribe = null;      // inbox の購読
   let unsubscribePub = null;   // pub の購読（別のタブの変更を知る）
   const online = { inbox: true, pub: true };
+  let freshPub = true;         // 初回・再接続の現在位置は動かさずに見せる
   let stopped = false;
   let ending = false;          // end の途中は結果を書かない
   const pendingResults = new Set(); // 結果の書きこみが順番待ち・実行中の質問
@@ -465,6 +466,7 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
   function onStatus(which, status) {
     if (stopped) return;
     online[which] = status === 'connected';
+    if (which === 'pub' && !online.pub) { freshPub = true; state.animate = false; }
     state.connection = online.inbox && online.pub ? 'connected' : 'disconnected';
     emit();
   }
@@ -495,7 +497,10 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
   // pub の購読。自分の書きこみも、別のタブの書きこみも届く
   function onPub(value) {
     if (stopped || state.phase !== 'live') return;
+    const animate = !freshPub && online.pub;
+    if (online.pub) freshPub = false;
     if (!adoptPub(value)) return;
+    state.animate = animate;
     emit();
     syncResults();
   }
@@ -505,7 +510,10 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
     const latest = await net.get(pubPath);
     if (stopped) return;
     if (latest === null || typeof latest !== 'object') throw new Error('授業が見つかりません');
-    if (adoptPub(latest)) emit();
+    if (adoptPub(latest)) {
+      state.animate = !freshPub && online.pub;
+      emit();
+    }
   }
 
   // パッチを書き、成功してから state.pub を変える
@@ -517,6 +525,7 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
     }
     await net.update(pubPath, patch);
     state.pub = applyPatch(state.pub, patch);
+    state.animate = online.pub;
     emit();
     syncResults();
   }
@@ -675,8 +684,8 @@ export function createSessionHost({ net, repo, sid, onChange, now, setTimeout: s
       return write;
     },
 
-    next() { return operate((pub) => nextPatch(pub, state.order)); },
-    prev() { return operate((pub) => prevPatch(pub, state.order)); },
+    next() { return operate((pub) => nextPatch(pub, state.order, state.slides)); },
+    prev() { return operate((pub) => prevPatch(pub, state.order, state.slides)); },
     // slideId を渡すと、順番が来た時点でそのスライドが今のスライドでなければ何も書かない
     // （「次へ」の通信待ちの間に押された操作が、移動先の質問に効かないように）
     setPaused(paused, slideId) {

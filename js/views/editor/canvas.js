@@ -4,6 +4,7 @@ import { el } from '../../ui.js';
 import { renderSlide, placeItem, styleText, drawShape, SHAPE_NAMES } from '../../slide-render.js';
 import { clampItem, normalizeShapeItem, SHAPE_KINDS, MIN_ITEM_SIZE as MIN_SIZE } from '../../model.js';
 import { quickActions, shouldMoveOnDown } from './phone-logic.js';
+import { itemRank } from '../../animation.js';
 
 const DRAG_START_PX = 6;          // これより小さい動きはタップとみなす
 const KEY_STEP = 0.01;            // 矢印キー 1 回の移動量
@@ -395,6 +396,16 @@ export function mountCanvas(host, ed) {
     ed.updateItem(next, { group: `handle:${ev.key}:${ev.shiftKey ? 'big' : 'small'}` });
   }
 
+  // 番号は要素の中身を変えない印。文字の入力・図形の描き直しにも残る。
+  function refreshStepRanks() {
+    const slide = ed.currentSlide();
+    for (const node of stage.querySelectorAll('[data-item-id]')) {
+      const rank = itemRank(slide, findItem(node.dataset.itemId));
+      if (rank) node.dataset.stepRank = String(rank);
+      else delete node.dataset.stepRank;
+    }
+  }
+
   // キャンバスを作り直す
   function render() {
     gesture = null;
@@ -415,6 +426,7 @@ export function mountCanvas(host, ed) {
       node.addEventListener('keydown', (ev) => onItemKey(ev, id));
       listenGesture(node);
     }
+    refreshStepRanks();
 
     handle = el('div', { class: 'ed-handle', role: 'button', tabindex: '0', 'aria-label': '大きさを変える（矢印キーでも変えられます）', hidden: true },
       el('span', { class: 'ed-handle-dot', 'aria-hidden': 'true' }));
@@ -453,6 +465,7 @@ export function mountCanvas(host, ed) {
     if (!node || !item) return;
     place(node, item);
     if (item.kind === 'text') styleText(node, item);
+    refreshStepRanks();
     if (ed.state.itemId === id) placeHandle(item);
   }
 

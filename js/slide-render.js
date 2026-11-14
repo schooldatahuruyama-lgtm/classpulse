@@ -4,6 +4,10 @@
 import { el } from './ui.js';
 import { clampItem, ratingOptions, normalizeShapeItem, shapeDrawing } from './model.js';
 import { youTubeEmbedUrl } from './video.js';
+import { clampStep, isItemVisible } from './animation.js';
+
+// 同じ描画先の直前の回数。初回・同じ回数・戻るときには要素をフェードしない。
+const renderedSteps = new WeakMap();
 
 // 文字の大きさ（枠の幅に対する %）
 export const TEXT_SIZE_PCT = { s: 2.5, m: 4, l: 6, xl: 9 };
@@ -166,7 +170,12 @@ const CLOUD_BOXES = () => el('div', { class: 'slide-cloud-boxes' },
 // correct: クイズの正解の番号。渡したときだけ正解の印を描く（既定は描かない。
 // 発表・生徒の画面は「正解を表示」のあとだけ渡す。編集の画面は先生の準備の画面なので渡してよい）
 // player: 明示したときだけ動画を読みこむ。縮小表示には常に見本を出す。
-export function renderSlide(container, slide, images, { mode = 'view', sample = true, correct = null, player = false } = {}) {
+// step: 省略・数でないときは全部を見せる。animate: 途中参加・再接続では false。
+export function renderSlide(container, slide, images, { mode = 'view', sample = true, correct = null, player = false, step, slideId = slide, animate = true } = {}) {
+  const current = mode !== 'thumb' && Number.isFinite(step) ? clampStep(slide, step) : null;
+  const previous = renderedSteps.get(container);
+  const fade = animate && previous && previous.slideId === slideId
+    && Number.isFinite(previous.step) && current !== null && current > previous.step;
   const stage = el('div', { class: 'slide-stage' });
   const frame = el('div', { class: mode === 'thumb' ? 'slide-frame slide-thumb' : 'slide-frame' }, stage);
   if (mode === 'thumb') frame.setAttribute('aria-hidden', 'true');
@@ -199,10 +208,15 @@ export function renderSlide(container, slide, images, { mode = 'view', sample = 
   } else if (slide && Array.isArray(slide.items)) {
     for (const item of slide.items) {
       const node = renderItem(item, images);
-      if (node) stage.append(node);
+      if (node) {
+        node.hidden = !isItemVisible(slide, item, current);
+        if (!node.hidden && fade && !isItemVisible(slide, item, previous.step)) node.classList.add('slide-item-enter');
+        stage.append(node);
+      }
     }
   }
   container.replaceChildren(frame);
+  renderedSteps.set(container, { slideId, step: current });
   watchWidth(frame);
 }
 
