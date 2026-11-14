@@ -250,6 +250,57 @@ test('読む: 無ければ null を返す', async () => {
   assert.equal(await net.get('a/none'), null);
 });
 
+test('getKeys は shallow=true と認証を付けて GET し、子の鍵だけを返す', async () => {
+  const { net, auth, fetch } = make(() => ({ body: { 'session-1': true, session_2: true } }));
+  auth.token = 'test+/=& token';
+  assert.deepEqual(await net.getKeys('teachers/t/history'), ['session-1', 'session_2']);
+  assert.equal(fetch.calls.length, 1);
+  assert.equal(fetch.calls[0].url, `${DB}/teachers/t/history.json?shallow=true&auth=${encodeURIComponent(auth.token)}`);
+  assert.deepEqual(fetch.calls[0].init, { method: 'GET' });
+});
+
+test('getKeys は null・オブジェクトでない応答・空のオブジェクトなら空の配列', async () => {
+  for (const body of [null, undefined, false, true, 42, 'broken', {}]) {
+    const { net } = make(() => ({ body }));
+    assert.deepEqual(await net.getKeys('teachers/t/history'), []);
+  }
+});
+
+test('getKeys の 401 は 1 回取り直し、shallow=true を保って再試行する', async () => {
+  let calls = 0;
+  const { net, auth, fetch } = make(() => (++calls === 1 ? { status: 401, body: {} } : { body: { s1: true } }));
+  assert.deepEqual(await net.getKeys('teachers/t/history'), ['s1']);
+  assert.equal(auth.refreshes, 1);
+  assert.deepEqual(fetch.calls.map((c) => c.url), [
+    `${DB}/teachers/t/history.json?shallow=true&auth=tok`,
+    `${DB}/teachers/t/history.json?shallow=true&auth=tok2`,
+  ]);
+});
+
+test('getKeys も規則の拒否・認証失敗・通信失敗を例外として返す', async () => {
+  for (const [response, code, calls, refreshes] of [
+    [{ status: 401, body: { error: 'Permission denied' } }, 'denied', 1, 0],
+    [{ status: 403 }, 'denied', 1, 0],
+    [{ status: 401, body: {} }, 'auth', 2, 1],
+    [new Error('offline'), 'network', 1, 0],
+    [{ status: 500 }, 'unknown', 1, 0],
+  ]) {
+    const { net, auth, fetch } = make(() => response);
+    await assert.rejects(net.getKeys('teachers/t/history'), { name: 'NetError', code });
+    assert.equal(fetch.calls.length, calls);
+    assert.equal(auth.refreshes, refreshes);
+  }
+});
+
+test('getKeys は本文の受信失敗や不正な JSON を空の配列にしない', async () => {
+  for (const [error, code] of [[new TypeError('offline'), 'network'], [new SyntaxError('broken'), 'unknown']]) {
+    const net = createNet({ databaseURL: DB, auth: stubAuth(), fetch: async () => ({
+      status: 200, ok: true, json: async () => { throw error; },
+    }) });
+    await assert.rejects(net.getKeys('teachers/t/history'), { name: 'NetError', code });
+  }
+});
+
 test('書く: set は PUT、update は PATCH、remove は DELETE', async () => {
   const { net, fetch } = make();
   await net.set('a/b', { n: 1 });

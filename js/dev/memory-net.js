@@ -110,6 +110,11 @@ export function createMemoryNet({ now = Date.now, deny = () => false, initial = 
       guard('get', path);
       return view(read(path));
     },
+    async getKeys(path) {
+      guard('get', path);
+      const value = read(path);
+      return isObj(value) ? Object.keys(value) : [];
+    },
     async set(path, value) {
       guard('set', path, value);
       const before = root;

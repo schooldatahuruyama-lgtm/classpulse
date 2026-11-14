@@ -25,6 +25,7 @@
 - `teachers/<uid>/history` は、鍵だけを読む（REST の `?shallow=true`。授業の記録の中身＝生徒の文章は読まない）。`js/net.js` に `getKeys(path): Promise<string[]>` を足す（無ければ空の配列）。練習用の通信（`js/dev/memory-net.js`）にも同じものを足す。
 - `teachers/<uid>/active` を読み、`sid` が文字列で、鍵に使える文字（英数字・`-`・`_`）だけなら、消す一覧に足す。
 - 消す前に `teacherList/<uid>` を読み、`false` でなければ（再開されていた・もう無い）、消さずに失敗にする。
+- （レビューのあとで追加）集めた授業の ID のそれぞれについて、`sessions/<sid>/owner` を読み、**持ち主が消す先生本人のものだけ**を消す一覧に入れる。持ち主がちがう・授業がもう無い（`null`）ものは入れない。読みこみは 6 個ずつ。1 つでも読みこみに失敗したら、全体を失敗にする（消さない）。停止される前の先生は、自分の `history` に好きな ID を書けるので、ほかの先生の授業の ID がまざっていても消さないため。
 
 ## 4. 規則（`docs/firebase/rules.json`。先生に貼り直してもらう）
 
@@ -43,10 +44,11 @@
 }
 ```
 
-`sessions/$sid` の `.write`（持ち主の書きこみはそのまま。管理者は、持ち主が停止中の授業・もう無い授業を、消すことだけできる）:
+`sessions/$sid`（持ち主の読み書きはそのまま。管理者は、(1) 持ち主の uid（`owner`）だけを読める。(2) 「持ち主が停止中で、同じ書きこみでその持ち主の `teachers/<uid>` も消える」授業と、もう無い授業を、消すことだけできる）:
 
 ```
-"auth != null && ((root.child('teacherList').child(auth.uid).val() === true && (data.exists() ? data.child('owner').val() === auth.uid : newData.child('owner').val() === auth.uid)) || (root.child('admins').child(auth.uid).val() === true && !newData.exists() && (!data.exists() || root.child('teacherList').child(data.child('owner').val()).val() === false)))"
+".write": "auth != null && ((root.child('teacherList').child(auth.uid).val() === true && (data.exists() ? data.child('owner').val() === auth.uid : newData.child('owner').val() === auth.uid)) || (root.child('admins').child(auth.uid).val() === true && !newData.exists() && (!data.exists() || (root.child('teacherList').child(data.child('owner').val()).val() === false && !newData.parent().parent().child('teachers').child(data.child('owner').val()).exists()))))"
+"owner": { ".read": "auth != null && root.child('admins').child(auth.uid).val() === true" }
 ```
 
 - 1 回の `update` の中では、規則は「書く前のデータ」で確かめられるので、`teacherList/<uid>` を同じ書きこみで消しても、ほかの場所の「停止中であること」の確かめは通る（Firebase の決まり。本物では Claude Code は確かめられない）。
@@ -73,9 +75,22 @@
 - ログインのためのアカウント（メールアドレスとパスワード・Google）は、アプリからは消せない（サーバーが無いため）。Firebase の画面（Authentication → Users）で、手で消す。
 - 規則のうえでは、管理者は、停止中の先生の授業の記録（`history`）の中身も読める（アプリは鍵しか読まない。鍵だけに限ることは、規則ではできない）。
 - 規則の変更は、本物の Firebase で先生が貼って試すまで、確かめられていない。
+- 授業の索引（下の 8 章）を足す前に作られた授業のうち、授業の記録（`history`）にも発表中の印（`active`）にも載っていないもの（印の保存だけ失敗した・2 つのタブで同時に始めた、でできる）は、削除で消えずに残る。
+- 管理者は、ID を知っている授業の持ち主の uid を読める。
 
 ## 7. 確かめ方
 
 - 自動テスト: `getKeys`（URL に `shallow=true`、`null` は空）、`deleteTeacher`（1 回の `update` の中身、停止中でない・自分は消さない、おかしい `sid`、記録なし）、規則の文字列（上の 2 か所が設計書のとおり。ほかは変わっていない）、画面（停止中だけにボタン、確認、成功と失敗の文）。
 - ブラウザ（練習モード）: 先生を登録 → 承認 → 停止 → 削除 → 一覧から消える。利用中の先生と自分にボタンが無い。
 - 本物: 先生が規則を貼り直してから試す。
+
+## 8. 授業の索引（レビュー round 2 のあとで追加）
+
+- 理由: 授業を作る書きこみと、発表中の印（`active`）の書きこみは別で、印は 1 つしか持てない。2 つのタブで同時に授業を始めると、通信がすべて成功しても、記録にも印にも載らない授業ができうる。そのままだと、先生を削除しても、その授業（教材の写し・回答・公開した集計）が残る。
+- データ: `teachers/<uid>/sessions/<sid>: true`（その先生が作った授業の ID の一覧）。
+- 授業を作るとき（`startSession`）: `sessions/<sid>` と `teachers/<uid>/sessions/<sid>` を、ルートへの **1 回の `update`** で書く（片方だけ書けた状態を作らない）。そのあとの `active` の保存は今までどおり。
+- 授業の記録を消すとき（`repo.deleteHistory`）: 同じ `update` で、索引の項目も消す。
+- 先生の削除（`repo.deleteTeacher`）: `history` の鍵・`active.sid` に加えて、`teachers/<uid>/sessions` の鍵も集める（そのあとの持ち主の確かめは同じ）。
+- 規則: `teachers/$uid` に `"sessions": { ".read": （history・active と同じ文字列） }` を足す。書きこみは、今の `teachers/$uid` の規則（本人）で足りる。古い規則のままでも、授業の開始は今までどおり動く。
+- 索引に載るのは、この変更のあとに作った授業だけ。
+

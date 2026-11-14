@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createDemoBackend, isDemoAllowed } from '../js/dev/demo.js';
 import { createRepo } from '../js/repo.js';
+import { createMemoryNet } from '../js/dev/memory-net.js';
 import { fakeStorage } from './helpers/fakes.js';
 
 test('練習用の先生は管理者。既存のデータにも足され、消去後も残る', async () => {
@@ -71,6 +72,54 @@ function fakeBroadcastHub() {
 function make(shared, BC, session = fakeStorage()) {
   return createDemoBackend({ storage: shared, sessionStorage: session, BroadcastChannel: BC, now: () => 1000 });
 }
+
+test('練習用 getKeys はその場所の子の鍵だけを返し、空・値だけなら空の配列', async () => {
+  const { net } = make(fakeStorage(), null);
+  await net.set('teachers/t/history', { s1: { title: '授業 1' }, s2: { title: '授業 2' } });
+  assert.deepEqual(await net.getKeys('teachers/t/history'), ['s1', 's2']);
+  const keys = await net.getKeys('teachers/t/history');
+  keys.push('extra');
+  assert.deepEqual(await net.getKeys('teachers/t/history'), ['s1', 's2']);
+  for (const value of [null, false, true, 42, 'broken', {}, []]) {
+    await net.set('empty', value);
+    assert.deepEqual(await net.getKeys('empty'), []);
+  }
+  await net.set('sparse', { 0: true, 2: true });
+  assert.deepEqual(await net.getKeys('sparse'), ['0', '2']);
+  assert.deepEqual(await net.getKeys('missing'), []);
+});
+
+test('練習用 getKeys も読み取りの拒否・通信失敗を返す', async () => {
+  const denied = createMemoryNet({ deny: (op, path) => op === 'get' && path === 'teachers/t/history' });
+  await assert.rejects(denied.getKeys('teachers/t/history'), { code: 'denied' });
+  const offline = createMemoryNet();
+  offline.setOnline(false);
+  await assert.rejects(offline.getKeys('teachers/t/history'), { code: 'network' });
+});
+
+test('練習モードで登録・承認・停止・削除すると、授業と名簿が消え、同じアカウントで再申請できる', async () => {
+  const d = make(fakeStorage(), null);
+  const user = await d.teacherAuth.signUpTeacher('delete-test@example.com', 'fake-signup-pass');
+  const repo = createRepo(d.net, user.uid);
+  await repo.requestAccess(user.email);
+  const admin = await d.teacherAuth.signInTeacher('a@b.c');
+  const manage = createRepo(d.net, admin.uid);
+  await manage.approveTeacher(user.uid, user.email, 2000);
+  await d.net.set(`teachers/${user.uid}`, {
+    decks: { d1: { title: '削除用の教材' } }, history: { s1: { title: '授業' } }, active: { sid: 's2' },
+  });
+  for (const sid of ['s1', 's2']) await d.net.set(`sessions/${sid}`, { owner: user.uid });
+  await manage.setTeacherActive(user.uid, false);
+  await manage.deleteTeacher(user.uid);
+  assert.equal((await manage.listTeachers()).some((t) => t.uid === user.uid), false);
+  for (const path of [`teachers/${user.uid}`, `teacherDirectory/${user.uid}`, `teacherRequests/${user.uid}`, `teacherList/${user.uid}`, 'sessions/s1', 'sessions/s2']) {
+    assert.equal(await d.net.get(path), null, path);
+  }
+  assert.deepEqual(await d.teacherAuth.signInTeacher(user.email), user);
+  assert.equal(await repo.teacherStatus(), 'none');
+  await repo.requestAccess(user.email);
+  assert.deepEqual(await repo.getMyRequest(), { email: user.email, at: 1000 });
+});
 
 test('片方の書きこみが、もう片方の購読に届く', async () => {
   const shared = fakeStorage();

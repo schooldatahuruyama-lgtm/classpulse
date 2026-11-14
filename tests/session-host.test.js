@@ -265,12 +265,54 @@ test('検査に通らない教材は始められない', async () => {
   assert.equal(env.net.dump(), null);
 });
 
-test('始めると授業と、発表中の印ができる', async () => {
+test('始めると授業と索引を 1 回の update で書き、そのあと発表中の印を付ける', async () => {
   const env = setup();
+  const calls = [];
+  const update = env.net.update;
+  env.net.update = async (...args) => { calls.push(['update', ...args]); return update(...args); };
+  const set = env.net.set;
+  env.net.set = async (...args) => { calls.push(['set', ...args]); return set(...args); };
+  const setActive = env.repo.setActive;
+  env.repo.setActive = async (active) => {
+    assert.equal(sessionOf(env, active.sid).owner, UID);
+    assert.equal(await env.net.get(`teachers/${UID}/sessions/${active.sid}`), true);
+    calls.push(['setActive', active]);
+    return setActive(active);
+  };
   const sid = await begin(env);
+  assert.deepEqual(calls.map(([op, path]) => op === 'setActive' ? [op] : [op, path]), [
+    ['update', ''], ['setActive'], ['set', `teachers/${UID}/active`],
+  ]);
+  const patch = calls[0][2];
+  assert.deepEqual(Object.keys(patch).sort(), [`sessions/${sid}`, `teachers/${UID}/sessions/${sid}`]);
+  assert.equal(patch[`sessions/${sid}`].owner, UID);
+  assert.equal(patch[`teachers/${UID}/sessions/${sid}`], true);
   assert.equal(sessionOf(env, sid).owner, UID);
   assert.equal(sessionOf(env, sid).pub.state, 'live');
-  assert.equal(env.net.dump().teachers[UID].active.sid, sid);
+  assert.deepEqual(env.net.dump().teachers[UID].active, { sid, deckId: 'deck1', startedAt: 1000 });
+});
+
+test('開始の update に失敗したら同じ例外を返し、発表中の印を付けない', async () => {
+  const env = setup();
+  const error = new Error('開始の書きこみに失敗');
+  const calls = [];
+  env.net.update = async (path) => { calls.push(['update', path]); throw error; };
+  env.repo.setActive = async () => { calls.push(['setActive']); };
+  await assert.rejects(begin(env), (e) => e === error);
+  assert.deepEqual(calls, [['update', '']]);
+  assert.equal(env.net.dump(), null);
+});
+
+test('発表中の印の保存に失敗しても、作った授業と索引は残る', async () => {
+  const env = setup();
+  const error = new Error('印の書きこみに失敗');
+  env.repo.setActive = async () => { throw error; };
+  await assert.rejects(begin(env), (e) => e === error);
+  const [sid] = await env.net.getKeys('sessions');
+  assert.ok(sid);
+  assert.equal(sessionOf(env, sid).owner, UID);
+  assert.equal(await env.net.get(`teachers/${UID}/sessions/${sid}`), true);
+  assert.equal(await env.repo.getActive(), null);
 });
 
 test('次へ・前へで pub が変わる', async () => {

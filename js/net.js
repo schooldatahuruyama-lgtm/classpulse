@@ -37,17 +37,17 @@ function isEmpty(v) {
 
 export function createNet({ databaseURL, auth, fetch, EventSource, now = Date.now, setTimeout: setTimer = globalThis.setTimeout, clearTimeout: clearTimer = globalThis.clearTimeout }) {
   const base = String(databaseURL).replace(/\/+$/, '');
-  const urlFor = (path, token) => `${base}/${path}.json?auth=${encodeURIComponent(token)}`;
+  const urlFor = (path, token, shallow = false) => `${base}/${path}.json?${shallow ? 'shallow=true&' : ''}auth=${encodeURIComponent(token)}`;
   const wakeups = new Set();
 
-  async function send(method, path, body, token) {
+  async function send(method, path, body, token, shallow) {
     const init = { method };
     if (body !== undefined) {
       init.headers = { 'Content-Type': 'application/json' };
       init.body = JSON.stringify(body);
     }
     try {
-      return await fetch(urlFor(path, token), init);
+      return await fetch(urlFor(path, token, shallow), init);
     } catch {
       throw new NetError('network', 'ネットワークにつながりません');
     }
@@ -66,11 +66,11 @@ export function createNet({ databaseURL, auth, fetch, EventSource, now = Date.no
   const denied = () => new NetError('denied', '権限がありません');
 
   // 401 のとき: 規則による拒否ならすぐ denied。それ以外は 1 回だけトークンを取り直してやり直す
-  async function request(method, path, body) {
-    let res = await send(method, path, body, await auth.getToken());
+  async function request(method, path, body, shallow = false) {
+    let res = await send(method, path, body, await auth.getToken(), shallow);
     if (res.status === 401) {
       if (await isPermissionDenied(res)) throw denied();
-      res = await send(method, path, body, await auth.forceRefresh());
+      res = await send(method, path, body, await auth.forceRefresh(), shallow);
       if (res.status === 401) {
         if (await isPermissionDenied(res)) throw denied();
         throw new NetError('auth', 'ログインが無効です');
@@ -95,6 +95,11 @@ export function createNet({ databaseURL, auth, fetch, EventSource, now = Date.no
     async get(path) {
       const body = await readJson(await request('GET', path));
       return body === undefined ? null : body;
+    },
+    // 子の鍵だけを読む（授業の記録の中身は受け取らない）
+    async getKeys(path) {
+      const body = await readJson(await request('GET', path, undefined, true));
+      return body !== null && typeof body === 'object' ? Object.keys(body) : [];
     },
     async set(path, value) { await request('PUT', path, value); },
     async update(path, patch) { await request('PATCH', path, patch); },

@@ -133,20 +133,26 @@ test('履歴の保存・一覧・削除', async () => {
   assert.equal(await repo.getHistory('nope'), null);
 
   await net.set('sessions/S1', { state: 'ended' });
+  await net.set('teachers/u1/sessions', { S1: true, S2: true });
   await repo.deleteHistory('S1');
   assert.equal(await repo.getHistory('S1'), null);
   assert.equal(await net.get('sessions/S1'), null);
+  assert.deepEqual(await net.get('teachers/u1/sessions'), { S2: true });
   assert.deepEqual((await repo.listHistory()).map((x) => x.sid), ['S2']);
 });
 
-test('履歴の削除は 1 回の update で、失敗したら履歴も授業も残る', async () => {
+test('履歴の削除は 1 回の update で、失敗したら履歴も授業も索引も残る', async () => {
   const net = createFakeNet({ deny: (op) => op === 'update' });
   const repo = createRepo(net, 'u1');
   await repo.saveHistory('S1', { title: 'T', deckId: 'd1', startedAt: 1, endedAt: 2, participants: 1, questions: [] });
   await net.set('sessions/S1', { state: 'ended' });
+  await net.set('teachers/u1/sessions/S1', true);
+  await repo.setActive({ sid: 'S1', deckId: 'd1', startedAt: 1 });
   await assert.rejects(() => repo.deleteHistory('S1'));
   assert.notEqual(await repo.getHistory('S1'), null);
   assert.deepEqual(await net.get('sessions/S1'), { state: 'ended' });
+  assert.equal(await net.get('teachers/u1/sessions/S1'), true);
+  assert.deepEqual(await repo.getActive(), { sid: 'S1', deckId: 'd1', startedAt: 1 });
 });
 
 test('質問のない履歴は questions: [] で読み戻せる', async () => {
@@ -195,28 +201,35 @@ test('登録されていない uid は先生でない', async () => {
 
 // ---- 終了の後片づけが途中で止まった授業（履歴と「発表中」の印が両方ある） ----
 
-test('履歴を消すとき、その授業を指す「発表中」の印も同じ update で消す', async () => {
+test('履歴を消すとき、索引とその授業を指す「発表中」の印も同じ update で消す', async () => {
   const { net, repo } = setup();
   await repo.saveHistory('S1', { title: 'T', deckId: 'd1', startedAt: 1, endedAt: 2, participants: 1, questions: [] });
   await net.set('sessions/S1', { owner: 'u1', pub: { state: 'ended' } });
+  await net.set('teachers/u1/sessions/S1', true);
   await repo.setActive({ sid: 'S1', deckId: 'd1', startedAt: 1 });
   const calls = [];
   const orig = net.update.bind(net);
-  net.update = (path, patch) => { calls.push([path, Object.keys(patch).sort()]); return orig(path, patch); };
+  net.update = (path, patch) => { calls.push([path, patch]); return orig(path, patch); };
   net.remove = async () => { throw new Error('remove は使わない（1 回の update で消す）'); };
   await repo.deleteHistory('S1');
-  assert.deepEqual(calls, [['', ['sessions/S1', 'teachers/u1/active', 'teachers/u1/history/S1']]]);
+  assert.deepEqual(calls, [['', {
+    'sessions/S1': null, 'teachers/u1/active': null, 'teachers/u1/history/S1': null, 'teachers/u1/sessions/S1': null,
+  }]]);
   assert.equal(await repo.getActive(), null);
   assert.equal(await net.get('sessions/S1'), null);
+  assert.equal(await repo.getHistory('S1'), null);
+  assert.equal(await net.get('teachers/u1/sessions/S1'), null);
 });
 
 test('履歴を消しても、別の授業を指す「発表中」の印は残す', async () => {
   const { net, repo } = setup();
   await repo.saveHistory('S1', { title: 'T', deckId: 'd1', startedAt: 1, endedAt: 2, participants: 1, questions: [] });
   await net.set('sessions/S1', { owner: 'u1', pub: { state: 'ended' } });
+  await net.set('teachers/u1/sessions', { S1: true, S2: true });
   await repo.setActive({ sid: 'S2', deckId: 'd1', startedAt: 5 });
   await repo.deleteHistory('S1');
   assert.deepEqual(await repo.getActive(), { sid: 'S2', deckId: 'd1', startedAt: 5 });
+  assert.deepEqual(await net.get('teachers/u1/sessions'), { S2: true });
 });
 
 test('clearActiveIf: 印がその授業を指しているときだけ外す', async () => {

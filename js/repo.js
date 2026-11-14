@@ -177,6 +177,30 @@ export function createRepo(net, uid) {
       await net.set(`teacherList/${targetUid}`, active);
     },
 
+    // 停止中の先生と授業の残りを、ルートへの 1 回の update でまとめて消す
+    async deleteTeacher(targetUid) {
+      if (targetUid === uid) throw new Error('自分自身は削除できません');
+      if ((await net.get(`teacherList/${targetUid}`)) !== false) throw new Error('利用停止中の先生だけ削除できます');
+      const [history, active, sessions] = await Promise.all([
+        net.getKeys(`teachers/${targetUid}/history`),
+        net.get(`teachers/${targetUid}/active`),
+        net.getKeys(`teachers/${targetUid}/sessions`),
+      ]);
+      const ids = [...new Set([...history, active?.sid, ...sessions]
+        .filter((sid) => typeof sid === 'string' && /^[A-Za-z0-9_-]+$/.test(sid)))];
+      const patch = {};
+      // 履歴・active・索引の ID だけを信用せず、持ち主を 6 件ずつ確かめる
+      for (let i = 0; i < ids.length; i += 6) {
+        await Promise.all(ids.slice(i, i + 6).map(async (sid) => {
+          if ((await net.get(`sessions/${sid}/owner`)) === targetUid) patch[`sessions/${sid}`] = null;
+        }));
+      }
+      for (const path of ['teachers', 'teacherDirectory', 'teacherRequests', 'teacherList']) {
+        patch[`${path}/${targetUid}`] = null;
+      }
+      await net.update('', patch);
+    },
+
     // 一覧は deckIndex から（教材そのものは読まない）。新しい順。ゴミ箱の中の教材は出さない
     async listDecks() {
       return (await readIndex())
@@ -296,7 +320,7 @@ export function createRepo(net, uid) {
     // 終了の後片づけが途中で止まっていて「発表中」の印がこの授業を指したままなら、その印も一緒に消す
     // （消えた授業を指す印が残ると、次の授業を始められなくなる）
     async deleteHistory(sid) {
-      const patch = { [`${base}/history/${sid}`]: null, [`sessions/${sid}`]: null };
+      const patch = { [`${base}/history/${sid}`]: null, [`sessions/${sid}`]: null, [`${base}/sessions/${sid}`]: null };
       const active = await net.get(`${base}/active`);
       if (active && active.sid === sid) patch[`${base}/active`] = null;
       await net.update('', patch);

@@ -41,18 +41,22 @@ test('名簿を読める・書けるのは管理者だけ。メールと承認�
   assert.equal(directory.$uid.$other['.validate'], "$other === 'email' || $other === 'approvedAt'");
 });
 
-// 先生の管理を足す前の規則。既存の読み書きの条件をそのまま保つ
+// 削除の設計で指定された 2 か所以外は、先生の管理を足す前の規則をそのまま保つ
 const unchangedRules = {
   "teachers": {
     "$uid": {
       ".read": "auth != null && auth.uid === $uid && root.child('teacherList').child($uid).val() === true",
-      ".write": "auth != null && auth.uid === $uid && root.child('teacherList').child($uid).val() === true"
+      ".write": "auth != null && ((auth.uid === $uid && root.child('teacherList').child($uid).val() === true) || (auth.uid !== $uid && root.child('admins').child(auth.uid).val() === true && root.child('teacherList').child($uid).val() === false && !newData.exists()))",
+      "history": { ".read": "auth != null && auth.uid !== $uid && root.child('admins').child(auth.uid).val() === true && root.child('teacherList').child($uid).val() === false" },
+      "active": { ".read": "auth != null && auth.uid !== $uid && root.child('admins').child(auth.uid).val() === true && root.child('teacherList').child($uid).val() === false" },
+      "sessions": { ".read": "auth != null && auth.uid !== $uid && root.child('admins').child(auth.uid).val() === true && root.child('teacherList').child($uid).val() === false" }
     }
   },
   "sessions": {
     "$sid": {
       ".read": "auth != null && root.child('teacherList').child(auth.uid).val() === true && data.child('owner').val() === auth.uid",
-      ".write": "auth != null && root.child('teacherList').child(auth.uid).val() === true && (data.exists() ? data.child('owner').val() === auth.uid : newData.child('owner').val() === auth.uid)",
+      ".write": "auth != null && ((root.child('teacherList').child(auth.uid).val() === true && (data.exists() ? data.child('owner').val() === auth.uid : newData.child('owner').val() === auth.uid)) || (root.child('admins').child(auth.uid).val() === true && !newData.exists() && (!data.exists() || (root.child('teacherList').child(data.child('owner').val()).val() === false && !newData.parent().parent().child('teachers').child(data.child('owner').val()).exists()))))",
+      "owner": { ".read": "auth != null && root.child('admins').child(auth.uid).val() === true" },
       "pub": {
         ".read": "auth != null",
         "polls": {
@@ -111,9 +115,19 @@ const unchangedRules = {
   }
 };
 
-test('teachers・sessions・check の規則は変更前の文字列のまま', () => {
+test('teachers・sessions の削除用の規則は設計どおりで、ほかの規則と check は変更前の文字列のまま', () => {
   const r = rules();
   for (const key of Object.keys(unchangedRules)) assert.deepEqual(r[key], unchangedRules[key], key);
+});
+
+test('授業の削除と owner の読み取りの規則は設計書の文字列と一致する', () => {
+  const design = read('docs/superpowers/specs/2026-11-15-teacher-delete-design.md');
+  const sessionRules = design.split('`sessions/$sid`')[1].match(/```\r?\n([\s\S]*?)\r?\n```/)[1];
+  const write = JSON.parse(sessionRules.match(/^"\.write": (".*")\r?$/m)[1]);
+  const owner = JSON.parse(`{${sessionRules.match(/^"owner": .*$/m)[0]}}`).owner;
+  assert.equal(rules().sessions.$sid['.write'], write);
+  assert.deepEqual(rules().sessions.$sid.owner, owner);
+  assert.equal(owner['.read'], ADMIN);
 });
 
 test('規則が JSON として読める', () => {
@@ -158,10 +172,11 @@ test('回答の検証は整数で、質問に実在する選択肢だけ', () =>
   assert.ok(v.includes('options'));
 });
 
-test('先生のデータは本人だけが読み書きできる', () => {
+test('先生本人の読み書きを保ち、管理者は停止中の他の先生を削除し、history・active・sessions だけ読める', () => {
   const t = rules().teachers.$uid;
-  assert.ok(t['.read'].includes('auth.uid === $uid'));
-  assert.ok(t['.write'].includes('auth.uid === $uid'));
+  assert.deepEqual(t, unchangedRules.teachers.$uid);
+  assert.equal(t.sessions['.read'], t.history['.read']);
+  assert.equal(t.sessions['.read'], t.active['.read']);
 });
 
 test('集計（pub/results/<質問>）は、その質問の結果を公開しているときだけ書ける', () => {
