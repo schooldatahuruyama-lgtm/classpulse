@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="ja">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>順番表示のブラウザ確認</title>
+<link rel="stylesheet" href="../css/base.css">
+<link rel="stylesheet" href="../css/app.css">
+<link rel="stylesheet" href="../css/slide.css">
+<link rel="stylesheet" href="../css/editor.css">
+<link rel="stylesheet" href="../css/present.css">
+<link rel="stylesheet" href="../css/student.css">
+<body>
+<script type="module">
+// ローカル HTTP サーバーで開く。架空の教材と通信の代役だけを使い、実データを保存しない。
+import { mount as editor } from '../js/views/editor.js';
+import { mount as present } from '../js/views/present.js';
+import { mount as student } from '../js/views/student.js';
+import { createTextItem, createShapeItem } from '../js/model.js';
+import { buildSession } from '../js/session-logic.js';
+import { createMemoryNet } from '../js/dev/memory-net.js';
+import { fakeStorage } from './helpers/fakes.js';
+
+const params = new URLSearchParams(location.search);
+const role = params.get('role');
+const tick = () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+const deck = { title: '順番表示の確認', order: ['a', 'b'], images: {}, slides: {
+  a: { type: 'content', items: [
+    { ...createTextItem('title'), text: '空を見上げよう', x: 0.08, y: 0.08, w: 0.8, h: 0.2 },
+    { ...createTextItem('text'), text: '雲の形を調べよう', x: 0.08, y: 0.4, w: 0.8, h: 0.2, step: 1 },
+    { ...createShapeItem('shape'), x: 0.7, y: 0.7, w: 0.2, h: 0.12, step: 3 },
+  ] },
+  b: { type: 'content', items: [{ ...createTextItem('end'), text: '次のスライド' }] },
+} };
+
+if (role) {
+  const root = document.createElement('main'); root.className = 'shell-main'; document.body.append(root);
+  if (role === 'editor') {
+    window.stopView = editor(root, { params: { deckId: `browser-animation-${params.get('width')}` }, auth: { user: { uid: 'teacher-test' } },
+      repo: { deckState: async () => 'live', loadDeck: async () => structuredClone(deck), saveDeck: async () => {} } });
+  } else {
+    window.stopView = (role === 'teacher' ? present : student)(root, { params: { sid: 'animation' }, net: parent.net,
+      repo: { getModeration: async () => null }, storage: fakeStorage(), auth: { signInAnonymous: async () => ({ uid: 'student-test' }) }, navigate() {} });
+  }
+  await tick();
+  window.ready = true;
+} else {
+  const heading = document.createElement('h1'); heading.textContent = '順番表示のブラウザ確認';
+  const output = document.createElement('pre'); output.textContent = '確認中…'; document.body.append(heading, output);
+  const session = buildSession(deck, 'deck', 'teacher-test', 1);
+  session.pub.current = { slideId: 'a', index: 0, step: 0 };
+  window.net = createMemoryNet({ initial: { sessions: { animation: session } } });
+  const subscribe = net.subscribe;
+  net.subscribe = (path, onValue, onStatus) => {
+    let online = true;
+    return subscribe(path, (value) => { if (online) onValue(value); }, (status) => { online = status === 'connected'; onStatus(status); });
+  };
+  const frame = (role, width) => {
+    const label = document.createElement('h2'); label.textContent = `${role} ${width}px`;
+    const node = document.createElement('iframe'); node.width = width; node.height = 812; node.title = label.textContent;
+    node.src = `?role=${role}&width=${width}`; node.style.display = 'block'; document.body.append(label, node);
+    return node;
+  };
+  let checks = 0;
+  const check = (condition, message) => { if (!condition) throw new Error(message); checks++; };
+  const waitFor = async (fn) => { for (let i = 0; i < 180; i++) { if (fn()) return; await tick(); } throw new Error('画面の待機時間を超えました'); };
+  const shown = (doc) => [...doc.querySelectorAll('.slide-item')].filter((node) => getComputedStyle(node).display !== 'none').length;
+  try {
+    for (const width of [375, 1280]) {
+      const f = frame('editor', width); await waitFor(() => f.contentWindow.ready);
+      const d = f.contentDocument;
+      if (width < 900) d.querySelector('[aria-controls="ed-right"]').click();
+      d.querySelector('[data-focus-key="ed-pick:title"]').click();
+      const plus = () => d.querySelector('[data-focus-key="ed-step:plus"]');
+      const minus = () => d.querySelector('[data-focus-key="ed-step:minus"]');
+      const rect = plus().getBoundingClientRect();
+      check(rect.width >= 44 && rect.height >= 44, `${width}px: 順番ボタンの大きさ`);
+      check(minus().disabled, `${width}px: 0 で減らせない`);
+      plus().click(); plus().click();
+      check(d.querySelector('.ed-step-label').textContent === '順番 2（「次へ」の 2 回目で出る）', `${width}px: 設定の文`);
+      const title = d.querySelector('.ed-center [data-item-id="title"]');
+      check(getComputedStyle(title, '::after').content === '"2"', `${width}px: つめた番号の印`);
+      d.querySelector('[aria-label="元に戻す"]').click();
+      check(!title.dataset.stepRank || !d.querySelector('.ed-center [data-item-id="title"]').dataset.stepRank, `${width}px: まとめて戻す`);
+      check(d.documentElement.scrollWidth === width, `${width}px: 横にはみ出さない`);
+    }
+    const teacherFrame = frame('teacher', 1000), studentFrame = frame('student', 375);
+    await waitFor(() => teacherFrame.contentWindow.ready && studentFrame.contentWindow.ready);
+    const teacherDoc = teacherFrame.contentDocument;
+    let studentDoc = studentFrame.contentDocument;
+    const next = () => teacherDoc.querySelector('.pr-next').click();
+    check(shown(teacherDoc) === 1 && shown(studentDoc) === 1, '初回は同じ一要素');
+    next(); await waitFor(() => shown(studentDoc) === 2);
+    check(teacherDoc.querySelector('.pr-step').textContent === '出す 1／2', '先生の回数表示');
+    check(getComputedStyle(studentDoc.querySelector('.slide-item-enter')).animationDuration === '0.3s'
+      || matchMedia('(prefers-reduced-motion: reduce)').matches, '生徒のフェード');
+    const old = studentDoc.querySelector('.slide-frame');
+    await net.set('sessions/animation/pub/title', '更新');
+    check(studentDoc.querySelector('.slide-frame') === old, '同じ回数の更新は描き直さない');
+    next(); await waitFor(() => shown(studentDoc) === 3);
+    check(studentDoc.querySelector('.slide-item-enter').dataset.itemId === 'shape', '新しい要素だけフェード');
+    teacherDoc.querySelector('.pr-prev').click(); await waitFor(() => shown(studentDoc) === 2);
+    studentFrame.contentWindow.stopView(); studentFrame.contentWindow.ready = false; studentFrame.contentWindow.location.reload();
+    await waitFor(() => studentFrame.contentWindow.ready); studentDoc = studentFrame.contentDocument;
+    check(shown(studentDoc) === 2 && !studentDoc.querySelector('.slide-item-enter'), '途中参加はフェードなし');
+    net.setOnline(false);
+    const remote = net.dump(); remote.sessions.animation.pub.current.step = 2; net.replaceRoot(remote); net.setOnline(true);
+    check(shown(studentDoc) === 3 && !studentDoc.querySelector('.slide-item-enter'), '再接続はフェードなし');
+    check(!teacherDoc.querySelector('.slide-item-enter'), '先生も再接続はフェードなし');
+    next(); await waitFor(() => teacherDoc.querySelector('.pr-step').hidden);
+    check(!!teacherDoc.querySelector('.slide-enter') && !!studentDoc.querySelector('.slide-enter'), 'スライドの切り替え');
+    check(getComputedStyle(teacherDoc.querySelector('.slide-enter')).animationDuration === '0.25s'
+      || matchMedia('(prefers-reduced-motion: reduce)').matches, '切り替えの時間');
+    output.textContent = `成功 ${checks} 項目（編集 375 / 1280px・先生と生徒の別画面）`;
+  } catch (error) { output.textContent = `失敗 ${checks} 項目まで成功: ${error.message}`; }
+}
+</script>

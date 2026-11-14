@@ -322,9 +322,9 @@ test('次へ・前へで pub が変わる', async () => {
   assert.equal(last().phase, 'live');
   assert.equal(last().pub.current.index, -1);
   await host.next();
-  assert.deepEqual(last().pub.current, { slideId: 's1', index: 0 });
+  assert.deepEqual(last().pub.current, { slideId: 's1', index: 0, step: 0 });
   await host.next();
-  assert.deepEqual(last().pub.current, { slideId: 's2', index: 1 });
+  assert.deepEqual(last().pub.current, { slideId: 's2', index: 1, step: 0 });
   assert.equal(last().pub.polls.s2.status, 'open');
   assert.equal(sessionOf(env, sid).pub.current.index, 1);
   await host.prev();
@@ -466,7 +466,7 @@ test('つながっていないときは進めない', async () => {
   await host.next();
   env.net.setOnline(false);
   await assert.rejects(host.next(), (e) => e.code === 'network');
-  assert.deepEqual(last().pub.current, { slideId: 's1', index: 0 });
+  assert.deepEqual(last().pub.current, { slideId: 's1', index: 0, step: 0 });
   assert.equal(last().connection, 'disconnected');
   env.net.setOnline(true);
   await host.next(); // 失敗した操作が次の操作を止めない
@@ -813,7 +813,7 @@ async function opWhileMoving(op) {
 
 test('「次へ」の通信待ちの間に押した「結果を表示」（s2 向け）は、移動先の s3 を公開しない', async () => {
   const pub = await opWhileMoving((host) => host.setResultsVisible(true, 's2'));
-  assert.deepEqual(pub.current, { slideId: 's3', index: 2 });
+  assert.deepEqual(pub.current, { slideId: 's3', index: 2, step: 0 });
   assert.equal(pub.polls.s3.resultsVisible, false);
   assert.equal(pub.results, undefined);
   assert.equal(pub.polls.s2.resultsVisible, false); // s2 はもう今のスライドではないので、何も書かない
@@ -822,7 +822,7 @@ test('「次へ」の通信待ちの間に押した「結果を表示」（s2 �
 
 test('「次へ」の通信待ちの間に押した「受付を止める」（s2 向け）は、移動先の s3 を止めない', async () => {
   const pub = await opWhileMoving((host) => host.setPaused(true, 's2'));
-  assert.deepEqual(pub.current, { slideId: 's3', index: 2 });
+  assert.deepEqual(pub.current, { slideId: 's3', index: 2, step: 0 });
   assert.equal(pub.polls.s3.status, 'open');
   assert.equal(pub.polls.s2.status, 'closed');
 });
@@ -879,7 +879,7 @@ test('別のタブがスライドを進めていたら、その続きから操�
   await a.host.next(); // s2（受付中）
   await b.host.next(); // B からは s3 へ（s2 は締切）
   const pub = sessionOf(env, sid).pub;
-  assert.deepEqual(pub.current, { slideId: 's3', index: 2 });
+  assert.deepEqual(pub.current, { slideId: 's3', index: 2, step: 0 });
   assert.equal(pub.polls.s2.status, 'closed');
   assert.equal(a.last().pub.current.slideId, 's3');
   await a.host.setPaused(true); // A の「受付を止める」は、今のスライド（s3）に効く
@@ -904,7 +904,7 @@ test('購読が届いていなくても、操作の直前に最新の pub を読
   assert.equal(a.last().pub.current.index, -1); // A には届いていない
   await a.host.prev(); // 最新（s3）から計算して s2 へ戻る。締切済みの s2 は開かない
   const pub = sessionOf(env, sid).pub;
-  assert.deepEqual(pub.current, { slideId: 's2', index: 1 });
+  assert.deepEqual(pub.current, { slideId: 's2', index: 1, step: 0 });
   assert.equal(pub.polls.s2.status, 'closed');
   await a.host.stop();
   await b.host.stop();

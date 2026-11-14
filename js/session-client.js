@@ -6,6 +6,7 @@ import { normalizeDeck, withoutCorrect, isChoiceSlide, choiceCount } from './mod
 import { createOutbox } from './outbox.js';
 import { normalizeText, normalizeWords, sameWords } from './session-logic.js';
 import { CONFIG } from './config.js';
+import { clampStep } from './animation.js';
 
 function toArray(v) {
   if (Array.isArray(v)) return [...v];
@@ -30,6 +31,8 @@ export function createSessionClient({ net, auth, storage, sid, onChange, setTime
   let selected = null;
   let phase = 'loading';
   let connection = 'connected';
+  let fresh = true;         // 初回・再接続後の最初の受信は、動かさずに見せる
+  let animate = false;
   let retrying = 0;
   let retryTimer = null;
   let finishWait = null;
@@ -210,7 +213,7 @@ export function createSessionClient({ net, auth, storage, sid, onChange, setTime
   function buildState() {
     const base = {
       phase, connection, title: pub ? String(pub.title || '') : '',
-      slide: null, slideId: '', index: -1, total: deck ? deck.order.length : 0,
+      slide: null, slideId: '', index: -1, step: null, animate, total: deck ? deck.order.length : 0,
       images: deck ? deck.images : {}, poll: null, results: null, selected: null, answer: null,
       // 自由記述: 今のスライドが自由記述なら kind は 'free'、ワードクラウドなら 'cloud'（ほかは null）。
       // text は、送信済み・送信中など、最後に送ろうとした文章（無ければ null）。answer.text と同じ。
@@ -231,6 +234,7 @@ export function createSessionClient({ net, auth, storage, sid, onChange, setTime
     base.index = index;
     base.slideId = slideId;
     base.slide = slideId ? deck.slides[slideId] || null : null;
+    base.step = Number.isFinite(cur.step) ? clampStep(base.slide, cur.step) : null;
     const poll = slideId && pub.polls ? pub.polls[slideId] : null;
     if (poll) {
       base.poll = { status: poll.status, resultsVisible: !!poll.resultsVisible };
@@ -281,6 +285,8 @@ export function createSessionClient({ net, auth, storage, sid, onChange, setTime
 
   function onPub(value) {
     if (stopped) return;
+    animate = !fresh && connection === 'connected';
+    if (connection === 'connected') fresh = false;
     if (value === null || typeof value !== 'object') {
       phase = 'not-found';
       pub = null;
@@ -316,6 +322,7 @@ export function createSessionClient({ net, auth, storage, sid, onChange, setTime
   function onStatus(status) {
     if (stopped) return;
     connection = status === 'connected' ? 'connected' : 'disconnected';
+    if (connection === 'disconnected') { fresh = true; animate = false; }
     emit();
     if (connection === 'connected') {
       join().catch(() => {}); // 参加の書きこみに失敗していたら、接続時に試す
@@ -354,6 +361,8 @@ export function createSessionClient({ net, auth, storage, sid, onChange, setTime
   }
 
   async function start() {
+    fresh = true;
+    animate = false;
     retrying = 0;
     phase = 'loading';
     emit();

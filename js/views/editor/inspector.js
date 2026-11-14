@@ -5,6 +5,7 @@ import { CONFIG } from '../../config.js';
 import { removeOption as withoutOption, quizCorrect, normalizeShapeItem } from '../../model.js';
 import { parseYouTubeUrl, youTubeWatchUrl, formatVideoStart } from '../../video.js';
 import { itemRows, nudge, resize } from './phone-logic.js';
+import { MAX_STEP, normalizeStep, itemRank } from '../../animation.js';
 
 const SIZES = [
   { value: 's', label: '小' },
@@ -73,6 +74,25 @@ function layerButtons(ed, item) {
     el('div', { class: 'ed-btn-grid' },
       el('button', { type: 'button', class: 'btn', text: 'いちばん前へ', dataset: { focusKey: 'ed-layer:front' }, onclick: () => ed.moveItemLayer(item.id, true) }),
       el('button', { type: 'button', class: 'btn', text: 'いちばん後ろへ', dataset: { focusKey: 'ed-layer:back' }, onclick: () => ed.moveItemLayer(item.id, false) })));
+}
+
+function stepButtons(ed, item) {
+  const step = normalizeStep(item.step);
+  const change = (dir) => {
+    const cur = (ed.currentSlide()?.items || []).find((it) => it.id === item.id);
+    if (!cur) return;
+    const next = { ...cur };
+    const value = normalizeStep(normalizeStep(cur.step) + dir);
+    if (value) next.step = value;
+    else delete next.step;
+    ed.updateItem(next, { refresh: true, side: true, group: 'step' });
+  };
+  return el('div', { class: 'ed-group ed-step', role: 'group', 'aria-labelledby': 'ed-step' },
+    el('p', { id: 'ed-step', class: 'ed-side-label', text: '出る順番' }),
+    el('p', { class: 'ed-step-label', text: step ? `順番 ${step}（「次へ」の ${itemRank(ed.currentSlide(), item)} 回目で出る）` : '最初から出す' }),
+    el('div', { class: 'ed-step-buttons' },
+      el('button', { type: 'button', class: 'btn', text: '−', 'aria-label': '出る順番を減らす', disabled: step === 0, dataset: { focusKey: 'ed-step:minus' }, onclick: () => change(-1) }),
+      el('button', { type: 'button', class: 'btn', text: '＋', 'aria-label': '出る順番を増やす', disabled: step === MAX_STEP, dataset: { focusKey: 'ed-step:plus' }, onclick: () => change(1) })));
 }
 
 // 色の丸いボタンの組。色の名前は読み上げの名前（aria-label）と、選んでいる色の文字で持つ。
@@ -187,6 +207,7 @@ export function renderItemInspector(host, ed) {
       : el('p', { class: 'muted', text: '要素がありません。「文字を追加」などで足してください。' }));
   renderSelectedItemInspector(host, ed);
   if (item) {
+    host.append(stepButtons(ed, item));
     const directions = [['left', '←', '左へ'], ['right', '→', '右へ'], ['up', '↑', '上へ'], ['down', '↓', '下へ']];
     const move = el('div', { class: 'ed-group ed-phone-only', role: 'group', 'aria-labelledby': 'ed-nudge' },
       el('p', { id: 'ed-nudge', class: 'ed-side-label', text: '位置を少し動かす' }),

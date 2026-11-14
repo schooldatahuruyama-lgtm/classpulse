@@ -1,6 +1,7 @@
 // 教材（デッキ）のデータ。DOM・通信・グローバルに触れない純粋なモジュール。
 // どの関数も引数を書きかえず、新しい値を返す。
 import { CONFIG } from './config.js';
+import { normalizeStep } from './animation.js';
 import { VIDEO_ID_PATTERN, normalizeVideoStart } from './video.js';
 
 const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -106,6 +107,8 @@ export function normalizeShapeItem(item) {
   const { defaultFill, defaultStroke, widths } = CONFIG.shape;
   const shape = SHAPE_KINDS.includes(src.shape) ? src.shape : 'rect';
   const out = { ...(src.id !== undefined ? { id: src.id } : {}), kind: 'shape', shape, x, y, w, h };
+  const step = normalizeStep(src.step);
+  if (step) out.step = step;
   const strokeWidth = typeof src.strokeWidth === 'string' && Object.hasOwn(widths, src.strokeWidth) ? src.strokeWidth : 'm';
   let stroke = shapeColor(src.stroke, true) ?? defaultStroke;
   if (isLineShape(shape)) {
@@ -421,10 +424,15 @@ function normalizeSlide(raw) {
     return { type: s.type, question: typeof s.question === 'string' ? s.question : '' };
   }
   // 保存された位置が枠の外・大きさ 0 でも、表示と編集で困らないように直す
-  // 図形は、種類・色などの値も正す（文字・画像は今までどおり位置と大きさだけ）
+  // 図形は、種類・色などの値も正す。どの要素も順番を正す
   const items = toArray(s.items).map((it) => {
     if (!it || typeof it !== 'object') return it;
-    return it.kind === 'shape' ? normalizeShapeItem(it) : clampItem(it);
+    if (it.kind === 'shape') return normalizeShapeItem(it);
+    const item = clampItem(it);
+    const step = normalizeStep(it.step);
+    if (step) item.step = step;
+    else delete item.step;
+    return item;
   });
   return { ...s, type: 'content', items };
 }

@@ -190,6 +190,7 @@ export function mount(root, ctx) {
   let pollUi = null;   // アンケートの部品（同じ質問の間は作り直さない）
   let freeUi = null;   // 自由記述の部品（同じ質問の間は作り直さない。入力欄の文字とカーソルを守る）
   let cloudUi = null;  // ワードクラウドの部品（同じく作り直さない）
+  let contentUi = null; // 資料は同じ描画先に回数だけを反映する
 
   // ---- 骨組み（1 回だけ作る） ----
   const titleEl = el('h1', { class: 'st-title', text: 'ClassPulse' });
@@ -207,6 +208,7 @@ export function mount(root, ctx) {
     pollUi = null;
     freeUi = null;
     cloudUi = null;
+    contentUi = null;
     client = createSessionClient({
       net: ctx.net,
       auth: ctx.auth,
@@ -220,12 +222,22 @@ export function mount(root, ctx) {
   // 本体の中身を入れかえる（key が同じなら何もしない）
   function show(key, ...children) {
     if (key === shownKey) return false;
+    const transition = state.animate && state.index >= 0 && (shownKey === 'wait' || shownKey?.startsWith('slide:'));
     shownKey = key;
     pollUi = null;
     freeUi = null;
     cloudUi = null;
+    contentUi = null;
     body.replaceChildren(...children);
+    // 直後に追加する新しい本文だけに付ける（初回・再接続は動かさない）。
+    enterSlide = transition;
     return true;
+  }
+
+  let enterSlide = false;
+  function appendSlide(node) {
+    if (enterSlide) node.className += ' slide-enter';
+    body.append(node);
   }
 
   // ---- 通信の状態 ----
@@ -606,7 +618,7 @@ export function mount(root, ctx) {
     const key = `slide:${state.slideId}`;
     if (slide.type === 'video') {
       if (show(key)) {
-        body.append(el('section', { class: 'st-message' },
+        appendSlide(el('section', { class: 'st-message' },
           el('p', { text: '動画は、前の画面で見てください。' }),
           slide.caption ? el('p', { text: slide.caption }) : null));
         window.scrollTo(0, 0);
@@ -616,7 +628,7 @@ export function mount(root, ctx) {
     if (slide.type === 'poll' || slide.type === 'quiz' || slide.type === 'rating') {
       if (show(key)) {
         pollUi = buildPoll(slide);
-        body.append(pollUi.root);
+        appendSlide(pollUi.root);
         window.scrollTo(0, 0); // 新しいスライドは上から
       }
       if (pollUi) updatePoll(pollUi);
@@ -625,7 +637,7 @@ export function mount(root, ctx) {
     if (slide.type === 'free') {
       if (show(key)) {
         freeUi = buildFree(slide, state.slideId);
-        body.append(freeUi.root);
+        appendSlide(freeUi.root);
         window.scrollTo(0, 0);
       }
       if (freeUi) updateFree(freeUi);
@@ -634,7 +646,7 @@ export function mount(root, ctx) {
     if (slide.type === 'cloud') {
       if (show(key)) {
         cloudUi = buildCloud(slide, state.slideId);
-        body.append(cloudUi.root);
+        appendSlide(cloudUi.root);
         window.scrollTo(0, 0);
       }
       if (cloudUi) updateCloud(cloudUi);
@@ -642,9 +654,13 @@ export function mount(root, ctx) {
     }
     if (show(key)) {
       const box = el('section', { class: 'st-slide', 'aria-label': 'スライド' });
-      renderSlide(box, slide, state.images);
-      body.append(box);
+      contentUi = { box, step: undefined };
+      appendSlide(box);
       window.scrollTo(0, 0);
+    }
+    if (contentUi && contentUi.step !== state.step) {
+      renderSlide(contentUi.box, slide, state.images, { step: state.step, slideId: state.slideId, animate: state.animate });
+      contentUi.step = state.step;
     }
   }
 

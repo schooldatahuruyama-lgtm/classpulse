@@ -75,6 +75,19 @@
 .ed-item.is-selected { box-shadow: 0 0 0 3px var(--c-main); outline: none; }
 .ed-item:focus-visible { outline: 3px solid var(--c-navy); outline-offset: 4px; }
 .ed-item.is-editing { cursor: text; user-select: text; -webkit-user-select: text; }
+/* 小さい要素でも番号を切らない。文字・画像の中身は元の箱に収める。 */
+.ed-item[data-step-rank] { overflow: visible; }
+.ed-item[data-step-rank] > .slide-text-body,
+.ed-item[data-step-rank] > .slide-image-missing { overflow: hidden; }
+.ed-item[data-step-rank]::after {
+  content: attr(data-step-rank); position: absolute; top: 0; left: 0; z-index: 1;
+  min-width: 22px; height: 22px; padding: 0 4px; border-radius: 5px;
+  background: var(--c-navy); color: #FFFFFF; font-size: 14px; font-weight: 700; line-height: 22px;
+  text-align: center; pointer-events: none;
+}
+.ed-step-label { margin: 0 0 var(--s-1); overflow-wrap: anywhere; }
+.ed-step-buttons { display: flex; gap: var(--s-1); }
+.ed-step-buttons > button { min-width: 44px; min-height: 44px; }
 .ed-placeholder {
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
   color: #4B5694; font-size: calc(2.5 * var(--unit)); font-weight: 400; pointer-events: none;

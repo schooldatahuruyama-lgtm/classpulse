@@ -51,7 +51,7 @@ test('動画: 次へ・前へ・締切は従来どおりで、受付と結果の
   let pub = applyPatch(session.pub, goToPatch(session.pub, order, 1));
   assert.equal(pub.polls.s2.status, 'open');
   pub = applyPatch(pub, nextPatch(pub, order));
-  assert.deepEqual(pub.current, { slideId: 'v', index: 2 });
+  assert.deepEqual(pub.current, { slideId: 'v', index: 2, step: 0 });
   assert.equal(pub.polls.s2.status, 'closed');
   assert.equal(pub.polls.v, undefined);
   assert.equal(pausePatch(pub, 'v', true), null);
@@ -77,7 +77,7 @@ test('始めたときは参加の画面で、質問は待機中', () => {
   assert.deepEqual(session.deck.order, deck.order);
   assert.equal(session.pub.title, 'テスト教材');
   assert.equal(session.pub.state, 'live');
-  assert.deepEqual(session.pub.current, { slideId: '', index: -1 });
+  assert.deepEqual(session.pub.current, { slideId: '', index: -1, step: 0 });
   assert.deepEqual(session.pub.polls.s2, { status: 'waiting', resultsVisible: false });
   assert.equal(session.pub.polls.s3.resultsVisible, true);
   assert.equal(session.pub.polls.s1, undefined);
@@ -89,7 +89,7 @@ test('アンケートに着くと受付中になる', () => {
   assert.equal(p.current.slideId, 's1');
   p = step(p, nextPatch(p, order));
   assert.equal(p.polls.s2.status, 'open');
-  assert.deepEqual(p.current, { slideId: 's2', index: 1 });
+  assert.deepEqual(p.current, { slideId: 's2', index: 1, step: 0 });
 });
 
 test('次へ進むと前の質問は締切', () => {
@@ -99,7 +99,7 @@ test('次へ進むと前の質問は締切', () => {
   const patch = nextPatch(p, order);
   assert.equal(patch['polls/s2/status'], 'closed');
   assert.equal(patch['polls/s3/status'], 'open');
-  assert.deepEqual(patch.current, { slideId: 's3', index: 2 });
+  assert.deepEqual(patch.current, { slideId: 's3', index: 2, step: 0 });
   const q = applyPatch(p, patch);
   assert.equal(q.polls.s2.status, 'closed');
   assert.equal(q.polls.s3.status, 'open');
@@ -136,7 +136,7 @@ test('端では動かない', () => {
 
 test('参加の画面からの next は 0 枚目へ、prev は動かない', () => {
   const { pub, order } = start();
-  assert.deepEqual(nextPatch(pub, order).current, { slideId: 's1', index: 0 });
+  assert.deepEqual(nextPatch(pub, order).current, { slideId: 's1', index: 0, step: 0 });
   assert.equal(prevPatch(pub, order), null);
 });
 
