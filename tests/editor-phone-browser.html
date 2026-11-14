@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="ja">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>編集画面のブラウザ確認</title>
+<link rel="stylesheet" href="../css/base.css">
+<link rel="stylesheet" href="../css/app.css">
+<link rel="stylesheet" href="../css/slide.css">
+<link rel="stylesheet" href="../css/editor.css">
+<body>
+<script type="module">
+// ローカル HTTP サーバーでこのページを開く。架空の教材をメモリ内だけで扱う。
+// 実機の日本語キーボード・ピンチ操作は別に確かめる。
+import { mount } from '../js/views/editor.js';
+import { createDeck, createTextItem, createShapeItem, createSlide, addSlide } from '../js/model.js';
+
+const sizes = [[375, 812], [812, 375], [768, 1024], [1280, 800], [899, 800], [900, 800]];
+const params = new URLSearchParams(location.search);
+const size = params.get('size');
+if (!size) {
+  const title = document.createElement('h1'); title.textContent = '編集画面のブラウザ確認'; document.body.append(title);
+  const output = document.createElement('pre'); output.textContent = '確認中…'; document.body.append(output);
+  const results = new Map();
+  window.addEventListener('message', (ev) => {
+    if (ev.origin !== location.origin || ev.data?.type !== 'editor-phone-check') return;
+    results.set(ev.data.size, ev.data);
+    output.textContent = [...results.values()].map((r) => `${r.size}: ${r.error ? `失敗 ${r.error}` : `成功 ${r.checks}項目`}`).join('\n');
+  });
+  for (const [width, height] of sizes) {
+    const heading = document.createElement('h2'); heading.textContent = `${width} × ${height}`;
+    const frame = document.createElement('iframe'); frame.title = heading.textContent;
+    frame.width = width; frame.height = height; frame.style.border = '0'; frame.style.display = 'block';
+    frame.src = `?size=${width}x${height}`; document.body.append(heading, frame);
+  }
+} else {
+  let checks = 0;
+  const check = (condition, message) => { if (!condition) throw new Error(message); checks++; };
+  const tick = () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  const button = (root, text) => [...root.querySelectorAll('button')].find((b) => b.textContent === text);
+  const visible = (node) => !!node && getComputedStyle(node).display !== 'none' && node.getBoundingClientRect().height > 0;
+  try {
+    const banner = document.createElement('div'); banner.className = 'demo-banner';
+    banner.textContent = '練習モード（このブラウザの中だけに保存）';
+    const exit = document.createElement('button'); exit.className = 'btn'; exit.textContent = '練習をやめる'; banner.append(exit);
+    const root = document.createElement('main'); root.className = 'shell-main'; document.body.append(banner, root);
+    let deck = createDeck('表示確認用の教材', 1);
+    deck = addSlide(deck, { type: 'content', items: [createTextItem('text'), createShapeItem('shape')] }, 'one');
+    for (const type of ['poll', 'quiz', 'rating', 'free', 'cloud', 'video']) deck = addSlide(deck, createSlide(type), type);
+    const stop = mount(root, { params: { deckId: size }, auth: { user: { uid: 'browser-test' } },
+      repo: { deckState: async () => 'live', loadDeck: async () => deck, saveDeck: async (_, next) => { deck = next; } } });
+    window.addEventListener('pagehide', stop, { once: true });
+    await tick();
+    const narrow = innerWidth <= 899;
+    const editor = root.querySelector('.editor'); const bottom = root.querySelector('.ed-bottom');
+    const left = root.querySelector('.ed-left'); const right = root.querySelector('.ed-right');
+    const center = root.querySelector('.ed-center');
+    check(visible(bottom) === narrow, '下の帯の表示条件');
+    check(getComputedStyle(center.querySelector('.ed-canvas-wrap')).padding === (narrow ? '16px' : '24px'), 'キャンバスの余白');
+    check(getComputedStyle(center.querySelector('.ed-item')).touchAction === (narrow ? 'pan-y pinch-zoom' : 'none'), '未選択の touch-action');
+    check(document.documentElement.scrollWidth === innerWidth, '横にはみ出さない');
+    if (narrow) {
+      check(root.querySelector('.ed-save').getBoundingClientRect().top >= root.querySelector('.ed-title').getBoundingClientRect().bottom, '保存の状態は2段目');
+      bottom.querySelector('button').click(); await tick();
+      check(visible(left) && !visible(right), 'スライドだけ開く');
+      check(left.getBoundingClientRect().height <= innerHeight * (innerHeight < 600 ? 0.7 : 0.45) + 1, 'パネルの最大高さ');
+      check(left.getBoundingClientRect().top >= banner.getBoundingClientRect().bottom, '練習の帯とパネルが重ならない');
+      check(parseFloat(getComputedStyle(editor).paddingBottom) >= bottom.getBoundingClientRect().height + left.getBoundingClientRect().height - 1, 'パネルと帯の合計余白');
+      button(left, '閉じる').click(); button(center, '要素を選ぶ').click();
+      right.querySelector('[data-focus-key="ed-pick:text"]').click();
+      right.querySelector('.ed-item-picker').open = true;
+      const body = right.querySelector('.ed-panel-content'); body.scrollTop = 50;
+      const scroll = body.scrollTop; const close = button(right, '閉じる');
+      const bold = button(right, '太字'); bold.focus({ preventScroll: true }); bold.click(); await tick();
+      check(button(right, '閉じる') === close, '外わくを維持');
+      check(body.scrollTop === scroll && document.activeElement.dataset.focusKey === 'ed-bold', '設定変更時のフォーカスとスクロール');
+      close.click(); button(center, '文字を入力').click(); await tick();
+      const ta = root.querySelector('.ed-phone-textarea');
+      check(getComputedStyle(ta).fontSize === '18px' && getComputedStyle(ta).position !== 'fixed', '大きな入力欄を固定しない');
+      check(!visible(bottom) && !visible(left) && !visible(right), '入力中の固定UIを隠す');
+      ta.value = '日本語を入力'; ta.dispatchEvent(new InputEvent('input', { bubbles: true, isComposing: true }));
+      check(root.querySelector('.ed-phone-textarea') === ta, '入力欄を維持');
+      check(center.querySelector('.slide-text-body').textContent === ta.value, 'キャンバス本文を更新');
+      button(center, 'できた').click(); check(document.activeElement === button(center, '文字を入力'), '入力終了時のフォーカス');
+      button(bottom, '設定').click(); await tick();
+      scrollTo(0, document.documentElement.scrollHeight); await tick();
+      check(center.querySelector('.ed-quick').getBoundingClientRect().bottom <= right.getBoundingClientRect().top + 1, '末尾でクイック操作が隠れない');
+      close.click();
+      for (const type of ['poll', 'quiz', 'rating', 'free', 'cloud', 'video']) {
+        left.querySelector(`[data-slide-id="${type}"]`).click(); await tick();
+        check(visible(right) && getComputedStyle(right).position === 'static' && button(bottom, '設定').hidden, `${type} の設定を常時表示`);
+        check(document.documentElement.scrollWidth === innerWidth, `${type} が横にはみ出さない`);
+        if (type === 'quiz' || type === 'poll') {
+          const row = center.querySelector('.ed-opt');
+          check(row.querySelector('input').getBoundingClientRect().bottom <= row.querySelector('button').getBoundingClientRect().top, `${type} の削除は次の行`);
+        }
+      }
+      left.querySelector('[data-slide-id="one"]').click(); await tick();
+    } else {
+      check(visible(left) && visible(right) && !visible(left.querySelector('.ed-panel-head')), '広い画面の3列');
+      check(!visible(center.querySelector('.ed-quick')), '広い画面にクイック操作を出さない');
+      check(left.querySelector('.ed-add').nextElementSibling.classList.contains('ed-slide-actions'), '広い画面の追加ボタンの順番');
+    }
+    scrollTo(0, 0);
+    parent.postMessage({ type: 'editor-phone-check', size, checks }, location.origin);
+  } catch (error) { parent.postMessage({ type: 'editor-phone-check', size, checks, error: error.message }, location.origin); }
+}
+</script>
+</body>
+</html>

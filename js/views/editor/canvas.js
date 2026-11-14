@@ -3,6 +3,7 @@
 import { el } from '../../ui.js';
 import { renderSlide, placeItem, styleText, drawShape, SHAPE_NAMES } from '../../slide-render.js';
 import { clampItem, normalizeShapeItem, SHAPE_KINDS, MIN_ITEM_SIZE as MIN_SIZE } from '../../model.js';
+import { quickActions, shouldMoveOnDown } from './phone-logic.js';
 
 const DRAG_START_PX = 6;          // これより小さい動きはタップとみなす
 const KEY_STEP = 0.01;            // 矢印キー 1 回の移動量
@@ -83,12 +84,19 @@ function buildTools(ed) {
 export function mountCanvas(host, ed) {
   const wrap = el('div', { class: 'ed-canvas-wrap' });
   const tools = buildTools(ed);
-  host.replaceChildren(tools.node, wrap,
+  const phoneInput = el('div', { class: 'ed-phone-edit ed-phone-only', hidden: true });
+  const quick = el('div', { class: 'ed-quick ed-phone-only', 'aria-label': '選んだ要素の操作' });
+  host.replaceChildren(tools.node, phoneInput, wrap, quick,
     el('p', { class: 'small muted ed-canvas-hint', text: '要素をタップで選び、ドラッグで動かします。右下のつまみで大きさを変えます。選んでいる文字をもう一度タップすると入力できます。' }));
 
   let stage = null;
   let handle = null;
   let gesture = null;
+  let pendingTap = null;
+  let phoneEdit = null;
+  let desktopEditId = null;
+  let disposed = false;
+  let quickKey = null;
 
   const findItem = (id) => (ed.currentSlide()?.items || []).find((it) => it.id === id) || null;
   const nodeOf = (id) => (stage ? [...stage.querySelectorAll('[data-item-id]')].find((n) => n.dataset.itemId === id) : null);
@@ -124,6 +132,29 @@ export function mountCanvas(host, ed) {
       n.setAttribute('aria-pressed', on ? 'true' : 'false');
     }
     placeHandle(sel ? findItem(sel) : null);
+    renderQuickActions();
+  }
+
+  function renderQuickActions() {
+    const item = findItem(ed.state.itemId);
+    const actions = quickActions(item);
+    const key = actions.join(',');
+    if (key === quickKey) return;
+    quickKey = key;
+    if (!actions.length) {
+      const choose = el('button', { type: 'button', class: 'btn', text: '要素を選ぶ', onclick: () => ed.openSettings(choose) });
+      quick.replaceChildren(el('p', { class: 'muted', text: '要素をタップして選びます。選んでからドラッグで動かせます。' }), choose);
+      return;
+    }
+    quick.replaceChildren(...actions.map((action) => {
+      const labels = { type: '文字を入力', settings: '設定', deselect: '選択を外す' };
+      const button = el('button', { type: 'button', class: 'btn', text: labels[action], dataset: { action }, onclick: () => {
+        if (action === 'type') startEdit(ed.state.itemId);
+        else if (action === 'settings') ed.openSettings(button);
+        else { finishEdit(); select(null); }
+      } });
+      return button;
+    }));
   }
 
   function select(id) {
@@ -137,7 +168,34 @@ export function mountCanvas(host, ed) {
     const node = nodeOf(id);
     const item = findItem(id);
     if (!node || !item || item.kind !== 'text') return;
+    if (phoneEdit?.id === id || desktopEditId === id) return;
+    finishEdit();
     ed.state.editingId = id;
+    if (ed.isNarrow()) {
+      const ta = el('textarea', { class: 'ed-phone-textarea', rows: '4', 'aria-label': '文字を入力', value: String(item.text || '') });
+      const session = { slideId: ed.state.slideId, id, ta };
+      phoneEdit = session;
+      phoneInput.replaceChildren(ta, el('button', {
+        type: 'button', class: 'btn btn-primary', text: 'できた', onclick: () => finishEdit({ restoreFocus: true }),
+      }));
+      phoneInput.hidden = false;
+      ed.setPhoneEditing(true);
+      ta.addEventListener('input', () => {
+        if (phoneEdit !== session || !validateEdit()) return;
+        const cur = findItem(id);
+        ed.updateItem({ ...cur, text: ta.value });
+        updateText(id);
+      });
+      ta.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Escape' && !ev.isComposing) { ev.preventDefault(); finishEdit({ restoreFocus: true }); }
+      });
+      // 入力を始めた操作の中で一度だけ。変換中・blur 後は欄に触れない。
+      ta.focus();
+      const end = ta.value.length;
+      ta.setSelectionRange(end, end);
+      return;
+    }
+    desktopEditId = id;
     node.classList.add('is-editing');
     node.querySelector('.ed-placeholder')?.remove();
     const ta = el('textarea', { class: 'slide-text-body ed-textarea', 'aria-label': '文字を入力', value: String(item.text || '') });
@@ -156,10 +214,30 @@ export function mountCanvas(host, ed) {
     ta.setSelectionRange(end, end);
   }
 
-  function finishEdit() {
-    const id = ed.state.editingId;
+  function updateText(id) {
+    const node = nodeOf(id);
+    const item = findItem(id);
+    if (!node || !item) return;
+    const body = node.querySelector('.slide-text-body');
+    if (body && body.tagName.toLowerCase() !== 'textarea') body.textContent = String(item.text || '');
+    decorate(node, item);
+  }
+
+  // 入力の終了はここだけ。削除・移動・幅の切りかえ・破棄でも、最後の書き戻しはしない。
+  function finishEdit({ restoreFocus = false } = {}) {
+    if (phoneEdit) {
+      const id = phoneEdit.id;
+      phoneEdit = null;
+      if (ed.state.editingId === id) ed.state.editingId = null;
+      phoneInput.hidden = true;
+      phoneInput.replaceChildren();
+      ed.setPhoneEditing(false);
+      if (restoreFocus) quick.querySelector('[data-action="type"]')?.focus({ preventScroll: true });
+    }
+    const id = desktopEditId;
     if (!id) return;
-    ed.state.editingId = null;
+    desktopEditId = null;
+    if (ed.state.editingId === id) ed.state.editingId = null;
     const node = nodeOf(id);
     const item = findItem(id);
     if (!node) return;
@@ -167,6 +245,23 @@ export function mountCanvas(host, ed) {
     const ta = node.querySelector('textarea');
     if (ta) ta.replaceWith(el('div', { class: 'slide-text-body', text: item ? String(item.text || '') : '' }));
     if (item) decorate(node, item);
+  }
+
+  function validateEdit() {
+    if (disposed) return false;
+    if (phoneEdit && (ed.state.slideId !== phoneEdit.slideId || findItem(phoneEdit.id)?.kind !== 'text' || !ed.isNarrow())) finishEdit();
+    return !!phoneEdit;
+  }
+
+  function resetInteraction() {
+    finishEdit();
+    pendingTap = null;
+    if (gesture) onCancel({ pointerId: gesture.pointerId });
+  }
+
+  function destroy() {
+    resetInteraction();
+    disposed = true;
   }
 
   // ---- ドラッグ（移動・大きさ） ----
@@ -183,6 +278,10 @@ export function mountCanvas(host, ed) {
   }
 
   function onMove(ev) {
+    if (pendingTap && ev.pointerId === pendingTap.pointerId) {
+      if (Math.hypot(ev.clientX - pendingTap.x, ev.clientY - pendingTap.y) >= DRAG_START_PX) pendingTap.moved = true;
+      return;
+    }
     const g = gesture;
     if (!g || ev.pointerId !== g.pointerId) return;
     const px = ev.clientX - g.sx;
@@ -203,6 +302,15 @@ export function mountCanvas(host, ed) {
   }
 
   function onUp(ev) {
+    if (pendingTap && ev.pointerId === pendingTap.pointerId) {
+      const tap = pendingTap;
+      pendingTap = null;
+      if (!tap.moved && Math.hypot(ev.clientX - tap.x, ev.clientY - tap.y) < DRAG_START_PX && findItem(tap.id)) {
+        select(tap.id);
+        nodeOf(tap.id)?.focus({ preventScroll: true });
+      }
+      return;
+    }
     const g = gesture;
     if (!g || ev.pointerId !== g.pointerId) return;
     gesture = null;
@@ -216,6 +324,7 @@ export function mountCanvas(host, ed) {
   }
 
   function onCancel(ev) {
+    if (pendingTap && ev.pointerId === pendingTap.pointerId) pendingTap = null;
     const g = gesture;
     if (!g || ev.pointerId !== g.pointerId) return;
     gesture = null;
@@ -232,10 +341,15 @@ export function mountCanvas(host, ed) {
 
   function onItemDown(ev, id) {
     if (ev.pointerType === 'mouse' && ev.button !== 0) return;
+    if (ev.isPrimary === false) { pendingTap = null; return; }
     if (ed.state.editingId === id) return; // 入力中はテキスト欄の操作にまかせる
-    ev.preventDefault();
     ev.stopPropagation();
     const wasSelected = ed.state.itemId === id;
+    if (!shouldMoveOnDown({ narrow: ed.isNarrow(), pointerType: ev.pointerType, wasSelected })) {
+      pendingTap = { pointerId: ev.pointerId, id, x: ev.clientX, y: ev.clientY, moved: false };
+      return; // preventDefault も選択もしない。スクロールになったら pointercancel で捨てる。
+    }
+    ev.preventDefault();
     select(id);
     nodeOf(id)?.focus({ preventScroll: true });
     beginGesture(ev, ev.currentTarget, id, 'move', wasSelected);
@@ -341,5 +455,5 @@ export function mountCanvas(host, ed) {
   }
 
   render();
-  return { render, refreshItem, applySelection, finishEdit, setImageBusy: tools.setImageBusy, showImageError: tools.showError };
+  return { render, refreshItem, applySelection, finishEdit, validateEdit, resetInteraction, destroy, setImageBusy: tools.setImageBusy, showImageError: tools.showError };
 }
