@@ -16,15 +16,15 @@
       "$uid": {
         ".read": "auth != null && auth.uid === $uid",
         ".write": "auth != null && auth.uid !== $uid && root.child('admins').child(auth.uid).val() === true",
-        ".validate": "newData.isBoolean()"
+        ".validate": "newData.isBoolean() && (newData.val() === true ? !newData.parent().parent().child('teacherDirectory').child($uid).child('suspendedAt').exists() : (data.val() === false || !newData.parent().parent().child('teacherDirectory').child($uid).exists() || newData.parent().parent().child('teacherDirectory').child($uid).child('suspendedAt').val() === now))"
       }
     },
     "teacherDirectory": {
       ".read": "auth != null && root.child('admins').child(auth.uid).val() === true",
       "$uid": {
         ".write": "auth != null && root.child('admins').child(auth.uid).val() === true",
-        ".validate": "newData.hasChildren(['email', 'approvedAt']) && newData.child('email').isString() && newData.child('email').val().length <= 254 && newData.child('approvedAt').isNumber()",
-        "$other": { ".validate": "$other === 'email' || $other === 'approvedAt'" }
+        ".validate": "newData.hasChildren(['email', 'approvedAt']) && newData.child('email').isString() && newData.child('email').val().length <= 254 && newData.child('approvedAt').isNumber() && (!newData.hasChild('suspendedAt') || newData.child('suspendedAt').isNumber())",
+        "$other": { ".validate": "$other === 'email' || $other === 'approvedAt' || $other === 'suspendedAt'" }
       }
     },
     "teacherRequests": {

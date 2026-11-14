@@ -5,6 +5,8 @@ import { createDeck, newId } from '../model.js';
 import { buildDeckFromPages, importMessage, abortable } from '../pdf-import-logic.js';
 import { formatDateTime } from '../format.js';
 import { CONFIG } from '../config.js';
+import { isStillUser } from '../guard.js';
+import { runTeacherCleanup } from '../teacher-cleanup.js';
 import { routeHash } from '../router.js';
 import { backgroundSaver, useAuth } from './editor/background.js';
 import {
@@ -17,6 +19,8 @@ const RECENT_COUNT = 5;
 
 export function mount(root, ctx) {
   let alive = true;
+  const uid = ctx.auth?.user?.uid;
+  const current = () => alive && !!uid && isStillUser(ctx.auth, uid);
   let busy = false; // 作成・発表開始・削除の最中は、ほかの操作を受けつけない
   let createdSid = null; // 作ったが、まだ発表の画面へ移れていない授業（作り直さず、これを開き直す）
   let opening = false;
@@ -389,6 +393,9 @@ export function mount(root, ctx) {
   load();
   // ゴミ箱に入れてから日数がたった教材を完全に削除する（失敗しても出さない。次に開いたときにやり直す）
   ctx.repo.purgeExpiredTrash(Date.now()).catch(() => {});
+  runTeacherCleanup({ repo: ctx.repo, uid, days: CONFIG.teacher.deleteDays, current }).then(({ deleted }) => {
+    if (current() && deleted > 0) toast(`利用停止から ${CONFIG.teacher.deleteDays} 日たった先生 ${deleted} 人を、削除しました。`);
+  });
   return () => {
     alive = false;
     if (importing) importing.abort(); // 画面を離れたら取込みをやめる（教材は作らない）

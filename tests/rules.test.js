@@ -17,8 +17,17 @@ test('teacherList は管理者だけが一覧を読み、自分以外の利用�
   assert.equal(list['.read'], ADMIN);
   assert.equal(list.$uid['.read'], 'auth != null && auth.uid === $uid');
   assert.equal(list.$uid['.write'], "auth != null && auth.uid !== $uid && root.child('admins').child(auth.uid).val() === true");
-  assert.equal(list.$uid['.validate'], 'newData.isBoolean()');
+  assert.equal(list.$uid['.validate'], "newData.isBoolean() && (newData.val() === true ? !newData.parent().parent().child('teacherDirectory').child($uid).child('suspendedAt').exists() : (data.val() === false || !newData.parent().parent().child('teacherDirectory').child($uid).exists() || newData.parent().parent().child('teacherDirectory').child($uid).child('suspendedAt').val() === now))");
   assert.equal(list['.write'], undefined);
+});
+
+test('古い停止日時を残す再開・止め直しを拒否する規則は、設計書の文字列と一致する', () => {
+  // markSuspended も失敗して古い時刻が残る場合は、アプリだけでは防げない。
+  // 新しい規則が状態だけの書きこみを拒否するので、本物では起きない。文字列の一致で確かめる。
+  const design = read('docs/superpowers/specs/2026-11-14-teacher-auto-delete-design.md');
+  const blocks = [...design.matchAll(/```json\r?\n([\s\S]*?)\r?\n```/g)];
+  const specified = JSON.parse(`{${blocks[1][1]}}`);
+  assert.equal(rules().teacherList.$uid['.validate'], specified['.validate']);
 });
 
 test('申しこみは未登録の本人の匿名でない認証だけ。管理者は削除だけできる', () => {
@@ -32,13 +41,19 @@ test('申しこみは未登録の本人の匿名でない認証だけ。管理�
   assert.equal(requests.$uid.$other['.validate'], "$other === 'email' || $other === 'at'");
 });
 
-test('名簿を読める・書けるのは管理者だけ。メールと承認日時以外を拒む', () => {
+test('名簿を読める・書けるのは管理者だけ。メール・承認日時・停止日時だけを許す', () => {
   const directory = rules().teacherDirectory;
   assert.equal(directory['.read'], ADMIN);
   assert.equal(directory.$uid['.read'], undefined);
   assert.equal(directory.$uid['.write'], ADMIN);
-  assert.equal(directory.$uid['.validate'], "newData.hasChildren(['email', 'approvedAt']) && newData.child('email').isString() && newData.child('email').val().length <= 254 && newData.child('approvedAt').isNumber()");
-  assert.equal(directory.$uid.$other['.validate'], "$other === 'email' || $other === 'approvedAt'");
+  assert.equal(directory.$uid['.validate'], "newData.hasChildren(['email', 'approvedAt']) && newData.child('email').isString() && newData.child('email').val().length <= 254 && newData.child('approvedAt').isNumber() && (!newData.hasChild('suspendedAt') || newData.child('suspendedAt').isNumber())");
+  assert.equal(directory.$uid.$other['.validate'], "$other === 'email' || $other === 'approvedAt' || $other === 'suspendedAt'");
+});
+
+test('名簿の停止日時の規則は、自動削除の設計書の文字列と一致する', () => {
+  const design = read('docs/superpowers/specs/2026-11-14-teacher-auto-delete-design.md');
+  const specified = JSON.parse(`{${design.match(/```json\r?\n([\s\S]*?)\r?\n```/)[1]}}`);
+  assert.deepEqual(rules().teacherDirectory.$uid, specified.$uid);
 });
 
 // 削除の設計で指定された 2 か所以外は、先生の管理を足す前の規則をそのまま保つ

@@ -6,6 +6,8 @@ import { NetError } from '../js/errors.js';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { isStillUser } from '../js/guard.js';
+import { CONFIG } from '../js/config.js';
+import { deleteNote } from '../js/teacher-cleanup.js';
 
 // 画面の処理をそのまま動かし、DOM と確認ダイアログだけを代役にする
 function viewHarness(name, ctx, confirmation = async () => true) {
@@ -26,6 +28,9 @@ function viewHarness(name, ctx, confirmation = async () => true) {
   const toasts = [];
   const dialogs = [];
   const sandbox = {
+    CONFIG, deleteNote,
+    // 手動操作のテストでは自動削除を分ける。実際の処理は teacher-cleanup-view.test.js で確認する。
+    runTeacherCleanup: async () => ({ deleted: 0 }),
     el: element, isStillUser, toast: (message) => toasts.push(message), closeAllDialogs: () => {},
     confirmDialog: async (options) => { dialogs.push(options); return confirmation(); },
   };
@@ -292,10 +297,10 @@ test('先生の一覧: 状態と名簿を合わせ、メールあり・メール
     teacherDirectory: { z: { email: 42, approvedAt: 'x' }, b: { email: 'b@example.com', approvedAt: 20 }, a: { email: 'a@example.com', approvedAt: 10 }, only: { email: 'only@example.com' } },
   } });
   assert.deepEqual(await createRepo(net, 'u').listTeachers(), [
-    { uid: 'a', email: 'a@example.com', active: true, approvedAt: 10 },
-    { uid: 'b', email: 'b@example.com', active: false, approvedAt: 20 },
-    { uid: 'missing', email: '', active: false, approvedAt: 0 },
-    { uid: 'z', email: '', active: true, approvedAt: 0 },
+    { uid: 'a', email: 'a@example.com', active: true, approvedAt: 10, suspendedAt: null, hasDirectory: true },
+    { uid: 'b', email: 'b@example.com', active: false, approvedAt: 20, suspendedAt: null, hasDirectory: true },
+    { uid: 'missing', email: '', active: false, approvedAt: 0, suspendedAt: null, hasDirectory: false },
+    { uid: 'z', email: '', active: true, approvedAt: 0, suspendedAt: null, hasDirectory: true },
   ]);
   await net.set('teacherDirectory', 'broken');
   assert.ok((await createRepo(net, 'u').listTeachers()).every((t) => t.email === '' && t.approvedAt === 0));
@@ -328,14 +333,15 @@ test('ことわると対象の申しこみだけを消す', async () => {
   assert.deepEqual(net.dump(), { teacherRequests: { b: { email: 'b@example.com' } }, teacherList: { a: true } });
 });
 
-test('停止・再開は teacherList だけを変え、教材と授業を残す', async () => {
+test('停止・再開は利用状態と停止日時を変え、教材と授業を残す', async () => {
   const keep = { teachers: { t: { decks: { keep: true } } }, sessions: { s: { owner: 't' } } };
-  const net = createFakeNet({ initial: { ...keep, teacherList: { t: true } } });
+  const directory = { email: 't@example.com', approvedAt: 1 };
+  const net = createFakeNet({ now: () => 99, initial: { ...keep, teacherList: { t: true }, teacherDirectory: { t: directory } } });
   const repo = createRepo(net, 'admin');
   await repo.setTeacherActive('t', false);
-  assert.deepEqual(net.dump(), { ...keep, teacherList: { t: false } });
+  assert.deepEqual(net.dump(), { ...keep, teacherList: { t: false }, teacherDirectory: { t: { ...directory, suspendedAt: 99 } } });
   await repo.setTeacherActive('t', true);
-  assert.deepEqual(net.dump(), { ...keep, teacherList: { t: true } });
+  assert.deepEqual(net.dump(), { ...keep, teacherList: { t: true }, teacherDirectory: { t: directory } });
 });
 
 test('自分自身の停止・再開は書きこまず例外にする', async () => {

@@ -41,6 +41,7 @@ export const CONFIG = {
   },
   // ゴミ箱: 教材を残す日数
   trash: { keepDays: 30 },
+  teacher: { deleteDays: 30 },
   idLength: 12,
   sessionIdLength: 22,
   tokenRefreshMarginMs: 300000,

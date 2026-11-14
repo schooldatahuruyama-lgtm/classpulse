@@ -1,6 +1,8 @@
 // 管理者用の先生の一覧。承認・ことわる・停止・削除は、確認してから行う
 import { el, confirmDialog, closeAllDialogs, toast } from '../ui.js';
 import { isStillUser } from '../guard.js';
+import { CONFIG } from '../config.js';
+import { deleteNote, runTeacherCleanup } from '../teacher-cleanup.js';
 
 const RETRY = '接続を確かめて、もう一度押してください。';
 const NO_EMAIL = 'メールアドレスの記録なし';
@@ -14,6 +16,8 @@ function formatDate(ms) {
 export function mount(root, ctx) {
   let alive = true;
   let busy = false;
+  let loadVersion = 0;
+  let hasLoaded = false;
   const user = ctx.auth.user;
   const current = () => alive && isStillUser(ctx.auth, user.uid);
   const message = el('div', { class: 'teacher-message' });
@@ -72,7 +76,7 @@ export function mount(root, ctx) {
       teacher.active ? '利用を停止できませんでした。' : '再開できませんでした。',
       teacher.active ? {
         title: `${email}の利用を停止しますか？`,
-        body: 'この先生は ClassPulse を開けなくなります。教材と授業の記録は消えません。あとで「再開」できます。',
+        body: `この先生は ClassPulse を開けなくなります。止めてから ${CONFIG.teacher.deleteDays} 日たつと、この先生の教材と授業の記録は、自動で削除されます。それまでは「再開」で元に戻せます。`,
         okLabel: '利用を停止', danger: true,
       } : null);
     const remove = () => run(() => ctx.repo.deleteTeacher(teacher.uid),
@@ -81,26 +85,30 @@ export function mount(root, ctx) {
         body: 'この先生の教材・授業の記録・設定が、すべて消えます。元に戻せません。ログインのためのアカウント（Firebase の Authentication）は、この画面では消えません。',
         okLabel: '削除する', cancelLabel: 'やめる', danger: true,
       }, '何度も失敗するときは、Firebase のルールが新しいものになっているか確かめてください。');
+    const note = teacher.active === false ? deleteNote(teacher.suspendedAt, Date.now(), CONFIG.teacher.deleteDays) : null;
     return el('li', { class: 'card teacher-item' },
       el('h3', { class: 'teacher-email', text: email }),
       self ? el('p', { text: '（自分・管理者）' }) : null,
       el('p', { text: teacher.active ? '利用中' : '利用停止中' }),
+      note ? el('p', { class: 'muted', text: note }) : null,
       self ? null : el('div', { class: 'teacher-actions' },
         button(teacher.active ? '利用を停止' : '再開', toggle, teacher.active),
         teacher.active === false ? button('削除', remove, true) : null));
   }
 
-  async function load() {
+  async function load(silent = false) {
+    const version = ++loadVersion;
     try {
       const [requests, teachers] = await Promise.all([ctx.repo.listRequests(), ctx.repo.listTeachers()]);
-      if (!current()) return;
+      if (!current() || version !== loadVersion) return;
       lists.replaceChildren(
         el('section', { class: 'teacher-section' }, el('h2', { text: '承認待ち' }),
           requests.length ? el('ul', { class: 'teacher-list' }, requests.map(requestCard)) : el('p', { text: '承認待ちの人はいません。' })),
         el('section', { class: 'teacher-section' }, el('h2', { text: '先生の一覧' }),
           el('ul', { class: 'teacher-list' }, teachers.map(teacherCard))));
+      hasLoaded = true;
     } catch {
-      if (!current()) return;
+      if (!current() || version !== loadVersion || (silent && hasLoaded)) return;
       lists.replaceChildren(el('div', { class: 'notice', role: 'alert' },
         el('p', { text: `読みこめませんでした。${RETRY}` }),
         button('もう一度', () => run(load, '', '読みこめませんでした。'))));
@@ -121,5 +129,10 @@ export function mount(root, ctx) {
     el('h1', { text: '先生の管理' }), message, lists));
   lists.replaceChildren(el('p', { class: 'loading', text: '読みこんでいます…' }));
   start();
+  runTeacherCleanup({ repo: ctx.repo, uid: user.uid, days: CONFIG.teacher.deleteDays, current }).then(async ({ deleted }) => {
+    if (!current() || deleted === 0) return;
+    toast(`利用停止から ${CONFIG.teacher.deleteDays} 日たった先生 ${deleted} 人を、削除しました。`);
+    await load(true);
+  });
   return () => { alive = false; closeAllDialogs(); };
 }
