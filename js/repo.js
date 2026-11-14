@@ -154,7 +154,11 @@ export function createRepo(net, uid) {
         .filter(([, active]) => typeof active === 'boolean')
         .map(([id, active]) => {
           const d = isRecord(directory) && isRecord(directory[id]) ? directory[id] : {};
-          return { uid: id, email: typeof d.email === 'string' ? d.email : '', active, approvedAt: timeOrZero(d.approvedAt) };
+          return {
+            uid: id, email: typeof d.email === 'string' ? d.email : '', active, approvedAt: timeOrZero(d.approvedAt),
+            suspendedAt: timeOrZero(d.suspendedAt) > 0 ? d.suspendedAt : null,
+            hasDirectory: isRecord(directory) && isRecord(directory[id]),
+          };
         })
         .sort((a, b) => Number(!a.email) - Number(!b.email) || a.email.localeCompare(b.email) || a.uid.localeCompare(b.uid));
     },
@@ -174,7 +178,51 @@ export function createRepo(net, uid) {
 
     async setTeacherActive(targetUid, active) {
       if (targetUid === uid) throw new Error('自分自身の利用状態は変更できません');
-      await net.set(`teacherList/${targetUid}`, active);
+      try {
+        await net.update('', {
+          [`teacherList/${targetUid}`]: active,
+          [`teacherDirectory/${targetUid}/suspendedAt`]: active ? null : net.serverTimestamp(),
+        });
+      } catch {
+        // 古い規則でも、停止・再開は今までどおり使える
+        await net.set(`teacherList/${targetUid}`, active);
+        if (active === false) {
+          try { await this.markSuspended(targetUid); }
+          catch { /* 補記できなくても、停止は成功として扱う */ }
+        }
+      }
+    },
+
+    async serverNow() {
+      const path = `check/${uid}`;
+      await net.set(path, net.serverTimestamp());
+      const now = await net.get(path);
+      if (typeof now !== 'number' || !Number.isFinite(now)) throw new Error('サーバーの時刻を読みこめません');
+      return now;
+    },
+
+    async markSuspended(targetUid) {
+      await net.set(`teacherDirectory/${targetUid}/suspendedAt`, net.serverTimestamp());
+    },
+
+    async clearSuspended(targetUid) {
+      await net.set(`teacherDirectory/${targetUid}/suspendedAt`, null);
+    },
+
+    async deleteIfStillSuspended(targetUid, suspendedAt) {
+      if (targetUid === uid || !(timeOrZero(suspendedAt) > 0)) return false;
+      const [active, recordedAt] = await Promise.all([
+        net.get(`teacherList/${targetUid}`), net.get(`teacherDirectory/${targetUid}/suspendedAt`),
+      ]);
+      if (active !== false || recordedAt !== suspendedAt) return false;
+      try {
+        await this.deleteTeacher(targetUid);
+        return true;
+      } catch (e) {
+        // 別の管理者が先に消した・再開したときは、人数に数えない
+        if ((await net.get(`teacherList/${targetUid}`)) !== false) return false;
+        throw e;
+      }
     },
 
     // 停止中の先生と授業の残りを、ルートへの 1 回の update でまとめて消す
