@@ -4,6 +4,7 @@ import { TEXT_COLORS, OPTION_MARKS, SHAPE_NAMES } from '../../slide-render.js';
 import { CONFIG } from '../../config.js';
 import { removeOption as withoutOption, quizCorrect, normalizeShapeItem } from '../../model.js';
 import { parseYouTubeUrl, youTubeWatchUrl, formatVideoStart } from '../../video.js';
+import { itemRows, nudge } from './phone-logic.js';
 
 const SIZES = [
   { value: 's', label: '小' },
@@ -129,7 +130,7 @@ function renderShapeInspector(host, ed, raw) {
 }
 
 // 資料スライドの右の列
-export function renderItemInspector(host, ed) {
+function renderSelectedItemInspector(host, ed) {
   const id = ed.state.itemId;
   const item = id ? (ed.currentSlide()?.items || []).find((it) => it.id === id) : null;
   if (!item) {
@@ -167,6 +168,38 @@ export function renderItemInspector(host, ed) {
     choiceGroup('ed-align', 'そろえ', ALIGNS, item.align, (v) => set({ align: v })),
     layerButtons(ed, item),
     deleteItemButton(ed, item));
+}
+
+// 要素の一覧と微調整は、せまい画面だけ出す（外わくは編集画面が持つ）。
+export function renderItemInspector(host, ed) {
+  const selectedId = ed.state.itemId;
+  const items = ed.currentSlide()?.items || [];
+  const item = items.find((it) => it.id === selectedId);
+  const previous = host.querySelector('.ed-item-picker');
+  const open = previous && previous.dataset.selectedId === (selectedId || '') ? previous.open : !item;
+  const rows = itemRows(items, selectedId);
+  const picker = el('details', { class: 'ed-item-picker ed-phone-only', open, dataset: { selectedId: selectedId || '' } },
+    el('summary', { text: '要素を選ぶ', dataset: { focusKey: 'ed-item-picker' } }),
+    rows.length ? el('div', { class: 'ed-item-rows' }, rows.map((row) => el('button', {
+      type: 'button', class: 'btn ed-item-row', 'aria-pressed': row.selected ? 'true' : 'false',
+      dataset: { focusKey: `ed-pick:${row.id}` }, onclick: () => ed.selectItem(row.id),
+    }, row.selected ? el('span', { 'aria-hidden': 'true', text: '✓' }) : null, el('span', { text: row.label }))))
+      : el('p', { class: 'muted', text: '要素がありません。「文字を追加」などで足してください。' }));
+  renderSelectedItemInspector(host, ed);
+  if (item) {
+    const directions = [['left', '←', '左へ'], ['right', '→', '右へ'], ['up', '↑', '上へ'], ['down', '↓', '下へ']];
+    const move = el('div', { class: 'ed-group ed-phone-only', role: 'group', 'aria-labelledby': 'ed-nudge' },
+      el('p', { id: 'ed-nudge', class: 'ed-side-label', text: '位置を少し動かす' }),
+      el('div', { class: 'ed-nudge-buttons' }, directions.map(([dir, mark, label]) => el('button', {
+        type: 'button', class: 'btn', text: mark, 'aria-label': label, dataset: { focusKey: `ed-nudge:${dir}` },
+        onclick: () => {
+          const cur = (ed.currentSlide()?.items || []).find((it) => it.id === selectedId);
+          if (cur) ed.updateItem(nudge(cur, dir), { refresh: true });
+        },
+      }))));
+    host.insertBefore(move, host.children[1] || null);
+  }
+  host.insertBefore(picker, host.children[0] || null);
 }
 
 // 結果の出し方と説明の右の列（アンケート・5 段階評価）

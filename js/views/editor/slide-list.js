@@ -46,6 +46,10 @@ function slideActions(ed) {
 
 export function renderSlideList(host, ed) {
   const { deck, slideId } = ed.state;
+  const narrow = ed.isNarrow?.() ?? false;
+  const addOpen = host.querySelector('.ed-slide-add-toggle')?.getAttribute('aria-expanded') === 'true';
+  const scrollTop = host.scrollTop;
+  const scrollLeft = host.querySelector('.ed-slides')?.scrollLeft || 0;
   const list = el('ol', { class: 'ed-slides' });
   deck.order.forEach((id, i) => {
     const slide = deck.slides[id];
@@ -66,16 +70,44 @@ export function renderSlideList(host, ed) {
   });
 
   const actions = slideActions(ed);
+  const add = addButtons(ed);
+  let addToggle = null;
+  if (narrow) {
+    add.id = 'ed-slide-add-menu';
+    add.hidden = !addOpen;
+    addToggle = el('button', {
+      type: 'button', class: 'btn ed-wide ed-slide-add-toggle', text: '＋ スライドを追加',
+      'aria-controls': 'ed-slide-add-menu', 'aria-expanded': addOpen ? 'true' : 'false',
+      onclick: () => {
+        add.hidden = !add.hidden;
+        addToggle.setAttribute('aria-expanded', add.hidden ? 'false' : 'true');
+      },
+    });
+  }
   host.replaceChildren(...[
     el('h2', { class: 'ed-col-title', text: 'スライド' }),
     deck.order.length ? list : el('p', { class: 'muted', text: 'スライドがありません。下のボタンで追加してください。' }),
-    addButtons(ed),
-    actions,
+    ...(narrow ? [actions, addToggle, add] : [add, actions]),
   ].filter(Boolean));
 
   // 選んだスライドが見えるように
   const current = host.querySelector('[aria-current="true"]');
-  if (current && typeof current.scrollIntoView === 'function') current.scrollIntoView({ block: 'nearest' });
+  if (narrow) {
+    host.scrollTop = scrollTop;
+    list.scrollLeft = scrollLeft;
+    scrollSelectedThumb(host);
+  } else if (current && typeof current.scrollIntoView === 'function') current.scrollIntoView({ block: 'nearest' });
+}
+
+// せまい画面の描き直しと、パネルを表示したあとに使う。ページ全体は送らない。
+export function scrollSelectedThumb(host) {
+  const list = host.querySelector('.ed-slides');
+  const current = list?.querySelector('[aria-current="true"]');
+  if (!current || !list.clientWidth) return;
+  const r = current.getBoundingClientRect();
+  const box = list.getBoundingClientRect();
+  if (r.left < box.left) list.scrollLeft += r.left - box.left;
+  else if (r.right > box.right) list.scrollLeft += r.right - box.right;
 }
 
 // 1 枚の縮小表示だけ描き直す
