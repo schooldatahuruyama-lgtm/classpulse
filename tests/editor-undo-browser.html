@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="ja">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>元に戻す・大きさのブラウザ確認</title>
+<link rel="stylesheet" href="../css/base.css">
+<link rel="stylesheet" href="../css/app.css">
+<link rel="stylesheet" href="../css/slide.css">
+<link rel="stylesheet" href="../css/editor.css">
+<body>
+<script type="module">
+// ローカル HTTP サーバーで開く。架空の教材をメモリ内で扱い、通信・実データの保存はしない。
+import { mount } from '../js/views/editor.js';
+import { createDeck, createTextItem, createShapeItem, createSlide, addSlide } from '../js/model.js';
+
+const size = new URLSearchParams(location.search).get('size');
+if (!size) {
+  const heading = document.createElement('h1'); heading.textContent = '元に戻す・大きさのブラウザ確認';
+  const output = document.createElement('pre'); output.textContent = '確認中…'; document.body.append(heading, output);
+  const results = new Map();
+  window.addEventListener('message', (ev) => {
+    if (ev.origin !== location.origin || ev.data?.type !== 'undo-check') return;
+    results.set(ev.data.size, ev.data);
+    output.textContent = [...results.values()].map((r) => `${r.size}: ${r.error ? `失敗 ${r.error}` : `成功 ${r.checks}項目`}`).join('\n');
+  });
+  for (const width of [375, 899, 900, 1280]) {
+    const title = document.createElement('h2'); title.textContent = `${width} × 812`;
+    const frame = document.createElement('iframe'); frame.width = width; frame.height = 812;
+    frame.title = title.textContent; frame.style.border = '0'; frame.style.display = 'block';
+    frame.src = `?size=${width}`; document.body.append(title, frame);
+  }
+} else {
+  let checks = 0;
+  const check = (condition, message) => { if (!condition) throw new Error(message); checks++; };
+  const tick = () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  const button = (root, text) => [...root.querySelectorAll('button')].find((b) => b.textContent === text);
+  const input = (node, value) => { node.value = value; node.dispatchEvent(new Event('input', { bubbles: true })); };
+  try {
+    const banner = document.createElement('div'); banner.className = 'demo-banner'; banner.textContent = '練習モード（確認用・メモリ内のみ）';
+    const root = document.createElement('main'); root.className = 'shell-main'; document.body.append(banner, root);
+    let deck = addSlide(createDeck('確認用の教材', 1), { type: 'content', items: [
+      { ...createTextItem('text'), text: '最初の文字' }, createShapeItem('shape'),
+    ] }, 'one');
+    deck = addSlide(deck, createSlide('content'), 'two');
+    mount(root, { params: { deckId: size }, auth: { user: { uid: 'browser-test' } },
+      repo: { deckState: async () => 'live', loadDeck: async () => deck, saveDeck: async (_, next) => { deck = next; } } });
+    await tick();
+    const undo = root.querySelector('[aria-label="元に戻す"]');
+    const redo = root.querySelector('[aria-label="やり直す"]');
+    const narrow = innerWidth < 900;
+    const rect = (node) => node.getBoundingClientRect();
+    const title = root.querySelector('.ed-title');
+    const present = button(root, '発表を開始');
+    const save = root.querySelector('.ed-save');
+    check(undo.disabled && redo.disabled, '履歴なしは押せない');
+    check(document.documentElement.scrollWidth === innerWidth, '横にはみ出さない');
+    if (narrow) {
+      check(rect(undo).width === 44 && rect(undo).height === 44, '元に戻すは44px');
+      check(rect(redo).width === 44 && rect(redo).height === 44, 'やり直すは44px');
+      check(rect(undo).top >= rect(title).bottom, '履歴は2段目');
+      check(rect(undo).left >= rect(save).right, '保存の右に履歴');
+      check(getComputedStyle(undo.querySelector('.ed-history-label')).display === 'none', '履歴は記号のみ');
+      check(!!(present.compareDocumentPosition(undo) & Node.DOCUMENT_POSITION_FOLLOWING), 'Tab順も発表→履歴');
+    } else {
+      check(rect(redo).right <= rect(present).left, '履歴は発表の左');
+      check(getComputedStyle(undo.querySelector('.ed-history-label')).display !== 'none', '履歴の文字を表示');
+    }
+    input(title, '変更'); undo.click(); check(title.value === '確認用の教材', '教材名を戻す');
+    redo.click(); check(title.value === '変更', '教材名をやり直す'); undo.click();
+    button(root, '文字を追加').click();
+    const ta = root.querySelector(narrow ? '.ed-phone-textarea' : '.ed-textarea');
+    input(ta, '一'); input(ta, '一連の入力'); undo.click();
+    check(!root.querySelector(narrow ? '.ed-phone-textarea' : '.ed-textarea'), '入力を終える');
+    check(root.querySelector('.ed-item.is-selected .slide-text-body').textContent === '', '入力をまとめて戻す');
+    undo.click(); check(root.querySelectorAll('.ed-center .ed-item').length === 2, '追加を戻す');
+    if (narrow) button(root, '要素を選ぶ').click();
+    root.querySelector('[data-focus-key="ed-pick:shape"]').click();
+    const sizeButton = root.querySelector('[data-focus-key="ed-resize:bigger"]');
+    const sizeGroup = sizeButton.closest('.ed-group');
+    check((getComputedStyle(sizeGroup).display !== 'none') === narrow, 'サイズボタンは狭い画面だけ');
+    const shape = () => root.querySelector('.ed-center [data-item-id="shape"]');
+    const before = shape().style.width;
+    if (narrow) {
+      for (const node of sizeGroup.querySelectorAll('button')) check(rect(node).width >= 44 && rect(node).height >= 44, 'サイズボタンは44px以上');
+      sizeButton.click(); sizeButton.click(); check(shape().style.width !== before, '連打で大きくする');
+      undo.click(); check(shape().style.width === before, '大きさを1回で戻す');
+      redo.click(); check(shape().style.width !== before, '大きさをやり直す'); undo.click();
+    }
+    shape().dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true }));
+    const moved = shape().style.left;
+    undo.click(); check(shape().style.left !== moved, '移動を戻す'); redo.click(); check(shape().style.left === moved, '移動をやり直す');
+    button(root, 'この要素を削除').click(); check(!shape(), '要素を削除');
+    undo.click(); check(!!shape(), '要素を戻す'); redo.click(); check(!shape(), '要素の削除をやり直す'); undo.click();
+    if (narrow) root.querySelector('.ed-bottom button').click();
+    button(root.querySelector('.ed-slide-actions'), '削除').click();
+    check(document.querySelector('dialog').textContent.includes('この画面を開いている間は、「元に戻す」で戻せます。'), '削除確認の文');
+    button(document.querySelector('dialog'), '削除').click(); await tick();
+    undo.click(); check(!!root.querySelector('[data-slide-id="one"]'), 'スライド削除を戻す');
+    redo.click(); check(!root.querySelector('[data-slide-id="one"]'), 'スライド削除をやり直す'); undo.click();
+    check(root.querySelector('.ed-history-notice').textContent === '元に戻しました。', 'aria-live の結果');
+    // 確認後はサイズボタンを開いておき、目でも配置を確かめられるようにする。
+    if (narrow) { button(root.querySelector('.ed-left'), '閉じる').click(); button(root.querySelector('.ed-bottom'), '設定').click(); }
+    check(document.documentElement.scrollWidth === innerWidth, '操作後も横にはみ出さない');
+    parent.postMessage({ type: 'undo-check', size, checks }, location.origin);
+  } catch (error) { parent.postMessage({ type: 'undo-check', size, checks, error: error.message }, location.origin); }
+}
+</script>

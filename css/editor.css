@@ -14,7 +14,10 @@
 }
 .ed-top input.ed-title { flex: 1 1 220px; width: auto; font-size: 20px; font-weight: 700; }
 .ed-save { display: flex; align-items: center; gap: var(--s-1); flex-wrap: wrap; }
-.ed-top-actions { display: flex; flex-wrap: wrap; gap: var(--s-1); margin-left: auto; }
+.ed-history { display: flex; gap: var(--s-1); margin-left: auto; }
+.ed-history-button { white-space: nowrap; }
+.ed-history-notice { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.ed-top-actions { display: flex; flex-wrap: wrap; gap: var(--s-1); }
 .ed-toggle { display: none; }
 .ed-toggle[aria-expanded='true'] { border-color: var(--c-navy); background: #E7ECFF; }
 .ed-bottom, .ed-panel-head, .ed-phone-only { display: none; }
@@ -170,8 +173,11 @@ textarea.ed-textarea:focus-visible { outline: none; }
   .ed-top input.ed-title { grid-column: 2; grid-row: 1; width: 100%; min-width: 0; font-size: 16px; }
   .ed-top-actions { grid-column: 3; grid-row: 1; margin-left: 0; }
   .ed-top-actions .btn { padding: 0 var(--s-1); }
-  .ed-save { grid-column: 1 / -1; grid-row: 2; min-width: 0; }
+  .ed-save { grid-column: 1 / 3; grid-row: 2; min-width: 0; }
   .ed-save .chip { white-space: normal; }
+  .ed-history { grid-column: 3; grid-row: 2; justify-self: end; margin-left: 0; }
+  .ed-history-button { width: 44px; height: 44px; padding: 0; font-size: 24px; }
+  .ed-history-label { display: none; }
 
   .ed-bottom {
     display: flex; gap: var(--s-1); position: fixed; z-index: 8; bottom: 0; left: 0; right: 0;
@@ -217,6 +223,9 @@ textarea.ed-textarea:focus-visible { outline: none; }
   .ed-item-row { justify-content: flex-start; text-align: left; overflow-wrap: anywhere; }
   .ed-item-row[aria-pressed='true'] { border-color: var(--c-navy); background: #E7ECFF; }
   .ed-nudge-buttons { display: flex; gap: var(--s-1); }
+  .ed-resize-buttons { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--s-1); margin-bottom: var(--s-1); }
+  .ed-resize-buttons + .ed-resize-buttons { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .ed-resize-buttons .btn { padding: 0 var(--s-1); }
   .ed-opt { grid-template-columns: 36px minmax(0, 1fr) minmax(0, 1fr); }
   .ed-opt-mark { grid-column: 1; grid-row: 1; }
   .ed-opt-input { grid-column: 2 / -1; grid-row: 1; }

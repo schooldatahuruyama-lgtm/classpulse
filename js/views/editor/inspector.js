@@ -4,7 +4,7 @@ import { TEXT_COLORS, OPTION_MARKS, SHAPE_NAMES } from '../../slide-render.js';
 import { CONFIG } from '../../config.js';
 import { removeOption as withoutOption, quizCorrect, normalizeShapeItem } from '../../model.js';
 import { parseYouTubeUrl, youTubeWatchUrl, formatVideoStart } from '../../video.js';
-import { itemRows, nudge } from './phone-logic.js';
+import { itemRows, nudge, resize } from './phone-logic.js';
 
 const SIZES = [
   { value: 's', label: '小' },
@@ -194,10 +194,24 @@ export function renderItemInspector(host, ed) {
         type: 'button', class: 'btn', text: mark, 'aria-label': label, dataset: { focusKey: `ed-nudge:${dir}` },
         onclick: () => {
           const cur = (ed.currentSlide()?.items || []).find((it) => it.id === selectedId);
-          if (cur) ed.updateItem(nudge(cur, dir), { refresh: true });
+          if (cur) ed.updateItem(nudge(cur, dir), { refresh: true, group: `nudge:${dir}` });
         },
       }))));
-    host.insertBefore(move, host.children[1] || null);
+    const sizes = [['bigger', '大きく'], ['smaller', '小さく'], ['wider', '横に広く'], ['narrower', '横にせまく'], ['taller', '縦に広く'], ['shorter', '縦にせまく']];
+    const sizeButton = ([kind, label]) => el('button', {
+      type: 'button', class: 'btn', text: label, dataset: { focusKey: `ed-resize:${kind}` },
+      onclick: () => {
+        const cur = (ed.currentSlide()?.items || []).find((it) => it.id === selectedId);
+        if (cur) ed.updateItem(resize(cur, kind), { refresh: true, group: `resize:${kind}` });
+      },
+    });
+    const size = el('div', { class: 'ed-group ed-phone-only', role: 'group', 'aria-labelledby': 'ed-resize' },
+      el('p', { id: 'ed-resize', class: 'ed-side-label', text: '大きさを少し変える' }),
+      el('div', { class: 'ed-resize-buttons' }, sizes.slice(0, 2).map(sizeButton)),
+      el('div', { class: 'ed-resize-buttons' }, sizes.slice(2).map(sizeButton)));
+    const before = host.children[1] || null;
+    host.insertBefore(move, before);
+    host.insertBefore(size, before);
   }
   host.insertBefore(picker, host.children[0] || null);
 }
@@ -246,7 +260,7 @@ function renderQuestionSettings(host, ed, title, note) {
   const slide = ed.currentSlide();
   const question = el('textarea', {
     id: 'ed-free-question', rows: '4', value: slide.question || '',
-    oninput: () => ed.patchSlide({ question: question.value }),
+    oninput: () => ed.patchSlide({ question: question.value }, { group: 'question' }),
   });
   host.replaceChildren(
     el('h2', { class: 'ed-col-title', text: title }),
@@ -279,13 +293,13 @@ export function renderVideoSettings(host, ed) {
     'aria-describedby': 'ed-video-status',
     oninput: () => {
       const parsed = parseYouTubeUrl(url.value);
-      ed.patchSlide(parsed || { videoId: '', start: 0 });
+      ed.patchSlide(parsed || { videoId: '', start: 0 }, { group: 'video-url' });
       updateStatus(parsed);
     },
   });
   const caption = el('input', {
     id: 'ed-video-caption', type: 'text', maxlength: String(CONFIG.video.captionMaxLength), value: slide.caption || '',
-    oninput: () => ed.patchSlide({ caption: caption.value }),
+    oninput: () => ed.patchSlide({ caption: caption.value }, { group: 'caption' }),
   });
   updateStatus(parseYouTubeUrl(url.value));
   host.replaceChildren(
@@ -306,13 +320,13 @@ export function renderPollForm(host, ed, { focusOption = -1, focusCorrect = -1 }
 
   const question = el('textarea', {
     id: 'ed-poll-question', rows: '3', value: slide.question || '',
-    oninput: () => ed.patchSlide({ question: question.value }, { quiet: true }),
+    oninput: () => ed.patchSlide({ question: question.value }, { group: 'question' }),
   });
 
   const setOption = (i, value) => {
     const next = [...(ed.currentSlide().options || [])];
     next[i] = value;
-    ed.patchSlide({ options: next }, { quiet: true });
+    ed.patchSlide({ options: next }, { group: `option:${i}` });
   };
   // 選択肢を消す: model の removeOption で options と（クイズの）正解を一緒に変える（正解が別の選択肢にずれない）
   const removeOption = (i) => {
@@ -377,12 +391,12 @@ export function renderRatingForm(host, ed, preview) {
   const max = CONFIG.rating.labelMaxLength;
   const question = el('textarea', {
     id: 'ed-rating-question', rows: '3', value: slide.question || '',
-    oninput: () => ed.patchSlide({ question: question.value }),
+    oninput: () => ed.patchSlide({ question: question.value }, { group: 'question' }),
   });
   const labelInput = (id, key) => {
     const input = el('input', {
       type: 'text', id, class: 'ed-rating-label', maxlength: String(max), value: String(slide[key] ?? ''),
-      oninput: () => ed.patchSlide({ [key]: input.value }),
+      oninput: () => ed.patchSlide({ [key]: input.value }, { group: key }),
     });
     return input;
   };

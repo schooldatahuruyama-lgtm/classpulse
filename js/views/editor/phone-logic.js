@@ -1,5 +1,5 @@
 // せまい編集画面の表示と操作の決まり。DOM や保存には触れない。
-import { clampItem } from '../../model.js';
+import { clampItem, MIN_ITEM_SIZE } from '../../model.js';
 import { SHAPE_NAMES } from '../../slide-render.js';
 
 export const NARROW_QUERY = '(max-width: 899px)';
@@ -35,6 +35,29 @@ export function nudge(item, dir) {
   if (!Object.hasOwn(d, dir)) return item;
   const cur = clampItem(item);
   return clampItem({ ...cur, x: cur.x + d[dir][0], y: cur.y + d[dir][1] });
+}
+
+export function resize(item, kind) {
+  if (!['bigger', 'smaller', 'wider', 'narrower', 'taller', 'shorter'].includes(kind)) return item;
+  const cur = clampItem(item);
+  // 0.1 + 0.9 のような端では、引き算の丸め誤差だけで左上を動かさない。
+  if (Number.isFinite(item?.x) && item.x >= 0 && item.x + cur.w <= 1) cur.x = item.x;
+  if (Number.isFinite(item?.y) && item.y >= 0 && item.y + cur.h <= 1) cur.y = item.y;
+  let { w, h } = cur;
+  if (kind === 'bigger' || kind === 'smaller') {
+    const scale = kind === 'bigger'
+      ? Math.min(1.05, (1 - cur.x) / w, (1 - cur.y) / h)
+      : Math.max(1 / 1.05, MIN_ITEM_SIZE / w, MIN_ITEM_SIZE / h);
+    w *= scale;
+    h *= scale;
+  } else {
+    if (kind === 'wider') w += 0.02;
+    if (kind === 'narrower') w -= 0.02;
+    if (kind === 'taller') h += 0.02;
+    if (kind === 'shorter') h -= 0.02;
+  }
+  // 大きさを先に止め、clampItem が左上を動かすことを防ぐ。
+  return { ...cur, w: Math.max(MIN_ITEM_SIZE, Math.min(1 - cur.x, w)), h: Math.max(MIN_ITEM_SIZE, Math.min(1 - cur.y, h)) };
 }
 
 export function shouldMoveOnDown({ narrow, pointerType, wasSelected }) {

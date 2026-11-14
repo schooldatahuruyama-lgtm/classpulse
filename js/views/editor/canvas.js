@@ -183,7 +183,7 @@ export function mountCanvas(host, ed) {
       ta.addEventListener('input', () => {
         if (phoneEdit !== session || !validateEdit()) return;
         const cur = findItem(id);
-        ed.updateItem({ ...cur, text: ta.value });
+        ed.updateItem({ ...cur, text: ta.value }, { group: 'text' });
         updateText(id);
       });
       ta.addEventListener('keydown', (ev) => {
@@ -201,8 +201,9 @@ export function mountCanvas(host, ed) {
     const ta = el('textarea', { class: 'slide-text-body ed-textarea', 'aria-label': '文字を入力', value: String(item.text || '') });
     node.querySelector('.slide-text-body').replaceWith(ta);
     ta.addEventListener('input', () => {
+      if (disposed || desktopEditId !== id) return;
       const cur = findItem(id);
-      if (cur) ed.updateItem({ ...cur, text: ta.value });
+      if (cur) ed.updateItem({ ...cur, text: ta.value }, { group: 'text' });
     });
     ta.addEventListener('blur', () => { if (ed.state.editingId === id) finishEdit(); });
     ta.addEventListener('keydown', (ev) => {
@@ -225,6 +226,7 @@ export function mountCanvas(host, ed) {
 
   // 入力の終了はここだけ。削除・移動・幅の切りかえ・破棄でも、最後の書き戻しはしない。
   function finishEdit({ restoreFocus = false } = {}) {
+    ed.breakGroup?.();
     if (phoneEdit) {
       const id = phoneEdit.id;
       phoneEdit = null;
@@ -374,7 +376,7 @@ export function mountCanvas(host, ed) {
     const next = clampItem({ ...item, x: item.x + d[0], y: item.y + d[1] });
     nodeOf(id) && place(nodeOf(id), next);
     placeHandle(next);
-    ed.updateItem(next);
+    ed.updateItem(next, { group: `move:${ev.key}:${ev.shiftKey ? 'big' : 'small'}` });
   }
 
   function onHandleKey(ev) {
@@ -390,7 +392,7 @@ export function mountCanvas(host, ed) {
     const node = nodeOf(id);
     if (node) place(node, next);
     placeHandle(next);
-    ed.updateItem(next);
+    ed.updateItem(next, { group: `handle:${ev.key}:${ev.shiftKey ? 'big' : 'small'}` });
   }
 
   // キャンバスを作り直す
