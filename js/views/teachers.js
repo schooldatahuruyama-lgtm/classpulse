@@ -1,4 +1,4 @@
-// 管理者用の先生の一覧。承認・ことわる・停止は、確認してから行う
+// 管理者用の先生の一覧。承認・ことわる・停止・削除は、確認してから行う
 import { el, confirmDialog, closeAllDialogs, toast } from '../ui.js';
 import { isStillUser } from '../guard.js';
 
@@ -28,7 +28,7 @@ export function mount(root, ctx) {
     text, disabled: busy, 'data-teacher-action': '', onclick,
   });
 
-  async function run(action, doneText, failText, confirmation = null) {
+  async function run(action, doneText, failText, confirmation = null, failHint = '') {
     if (busy || !current()) return;
     setBusy(true);
     message.replaceChildren();
@@ -40,7 +40,7 @@ export function mount(root, ctx) {
       if (doneText) toast(doneText);
       await load();
     } catch {
-      if (current()) showError(`${failText}${RETRY}`);
+      if (current()) showError(`${failText}${RETRY}${failHint}`);
     } finally {
       if (current()) setBusy(false);
     }
@@ -75,11 +75,19 @@ export function mount(root, ctx) {
         body: 'この先生は ClassPulse を開けなくなります。教材と授業の記録は消えません。あとで「再開」できます。',
         okLabel: '利用を停止', danger: true,
       } : null);
+    const remove = () => run(() => ctx.repo.deleteTeacher(teacher.uid),
+      '削除しました。', '削除できませんでした。', {
+        title: `${email}を削除しますか？`,
+        body: 'この先生の教材・授業の記録・設定が、すべて消えます。元に戻せません。ログインのためのアカウント（Firebase の Authentication）は、この画面では消えません。',
+        okLabel: '削除する', cancelLabel: 'やめる', danger: true,
+      }, '何度も失敗するときは、Firebase のルールが新しいものになっているか確かめてください。');
     return el('li', { class: 'card teacher-item' },
       el('h3', { class: 'teacher-email', text: email }),
       self ? el('p', { text: '（自分・管理者）' }) : null,
       el('p', { text: teacher.active ? '利用中' : '利用停止中' }),
-      self ? null : el('div', { class: 'teacher-actions' }, button(teacher.active ? '利用を停止' : '再開', toggle, teacher.active)));
+      self ? null : el('div', { class: 'teacher-actions' },
+        button(teacher.active ? '利用を停止' : '再開', toggle, teacher.active),
+        teacher.active === false ? button('削除', remove, true) : null));
   }
 
   async function load() {

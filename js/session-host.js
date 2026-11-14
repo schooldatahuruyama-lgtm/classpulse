@@ -48,7 +48,10 @@ export async function startSession({ net, repo, uid, deckId, deck, now, getRando
   }
   const sid = newSessionId(getRandomValues);
   const startedAt = now();
-  await net.set(`sessions/${sid}`, buildSession(deck, deckId, uid, startedAt));
+  await net.update('', {
+    [`sessions/${sid}`]: buildSession(deck, deckId, uid, startedAt),
+    [`teachers/${uid}/sessions/${sid}`]: true,
+  });
   await repo.setActive({ sid, deckId, startedAt });
   return sid;
 }
